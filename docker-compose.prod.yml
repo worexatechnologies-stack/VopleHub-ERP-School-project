@@ -1,0 +1,150 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-volpehub_education}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?Set POSTGRES_SUPERUSER_PASSWORD in backend/.env}
+      APP_DB_USER: ${APP_DB_USER:-volpehub_education}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in backend/.env}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=8GB
+      - -c
+      - effective_cache_size=20GB
+      - -c
+      - maintenance_work_mem=1GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - max_connections=100
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-app-role.sh:/docker-entrypoint-initdb.d/10-create-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-volpehub_education} -d ${POSTGRES_DB:-volpehub_education}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in backend/.env}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: backend/.env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+    volumes:
+      - static_data:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python manage.py check --deploy --fail-level ERROR"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_STORAGE_BUCKET: ${VITE_FIREBASE_STORAGE_BUCKET:-}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+        VITE_FIREBASE_VAPID_KEY: ${VITE_FIREBASE_VAPID_KEY:-}
+    restart: unless-stopped
+    depends_on:
+      - api
+    expose:
+      - "80"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  celery_worker:
+    build: ./backend
+    restart: unless-stopped
+    env_file: backend/.env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      CELERY_WORKER: "1"
+    command: celery -A config worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-4}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    env_file: backend/.env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - static_data:/srv/static:ro
+    depends_on:
+      - web
+      - api
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_data:
+  caddy_data:
+  caddy_config:

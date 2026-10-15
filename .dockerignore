@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.vscode
+.agents
+.antigravity
+backend/staticfiles
+backend/media
+backend/**/*.sqlite3
+backend/**/__pycache__
+backend/**/*.pyc
+.env
+backend/.env
+backend/venv
+venv
+npm-debug.log

@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Volpehub School Management System - Product Overview</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+  @page {
+    size: A4 portrait;
+    margin: 15mm 16mm 15mm 16mm;
+    @bottom-right {
+      content: "Page " counter(page);
+      font-size: 8pt;
+      font-family: 'Inter', sans-serif;
+      color: #64748b;
+    }
+    @bottom-left {
+      content: "Volpehub School ERP — Institutional Documentation";
+      font-size: 8pt;
+      font-family: 'Inter', sans-serif;
+      color: #94a3b8;
+    }
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #1e293b;
+    background: #ffffff;
+    line-height: 1.5;
+    font-size: 9pt;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .page-break {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .avoid-break {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* ----------------------------------------------------
+     COVER PAGE (CLEAN CORPORATE DESIGN)
+     ---------------------------------------------------- */
+  .cover-page {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 24mm 16mm 20mm 16mm;
+    border-top: 6px solid #1e3a8a;
+    background: #ffffff;
+    position: relative;
+  }
+
+  .cover-header {
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .cover-org {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #1e3a8a;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .cover-doc-type {
+    font-size: 8pt;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: #f1f5f9;
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+
+  .cover-body {
+    margin: auto 0;
+  }
+
+  .cover-title {
+    font-size: 28pt;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+
+  .cover-subtitle {
+    font-size: 12pt;
+    font-weight: 400;
+    color: #475569;
+    line-height: 1.5;
+    max-width: 580px;
+    margin-bottom: 30px;
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid #e2e8f0;
+  }
+
+  .summary-item h4 {
+    font-size: 8pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+    margin-bottom: 4px;
+  }
+
+  .summary-item p {
+    font-size: 9.5pt;
+    font-weight: 600;
+    color: #0f172a;
+    line-height: 1.35;
+  }
+
+  .cover-footer {
+    border-top: 1px solid #e2e8f0;
+    padding-top: 16px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 8.5pt;
+    color: #64748b;
+  }
+
+  .cover-footer strong {
+    color: #0f172a;
+  }
+
+  /* ----------------------------------------------------
+     HEADINGS & STRUCTURE
+     ---------------------------------------------------- */
+  .section-header {
+    margin-bottom: 14px;
+    padding-bottom: 6px;
+    border-bottom: 1.5px solid #cbd5e1;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+
+  .section-tag {
+    font-size: 7.5pt;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #1e3a8a;
+  }
+
+  .section-title {
+    font-size: 14pt;
+    font-weight: 800;
+    color: #0f172a;
+    letter-spacing: -0.01em;
+  }
+
+  .subheading {
+    font-size: 10pt;
+    font-weight: 700;
+    color: #0f172a;
+    margin: 12px 0 6px 0;
+  }
+
+  p {
+    margin-bottom: 8px;
+    color: #334155;
+    line-height: 1.45;
+  }
+
+  /* ----------------------------------------------------
+     CARDS & GRIDS
+     ---------------------------------------------------- */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .grid-3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+
+  .card-title {
+    font-size: 9.5pt;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 4px;
+  }
+
+  .card-body {
+    font-size: 8.5pt;
+    color: #475569;
+    line-height: 1.4;
+  }
+
+  /* ----------------------------------------------------
+     TABLES
+     ---------------------------------------------------- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 14px 0;
+    font-size: 8.5pt;
+  }
+
+  th {
+    background: #f1f5f9;
+    color: #0f172a;
+    font-weight: 700;
+    text-align: left;
+    padding: 7px 9px;
+    border: 1px solid #cbd5e1;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  td {
+    padding: 7px 9px;
+    border: 1px solid #e2e8f0;
+    vertical-align: top;
+    color: #334155;
+    line-height: 1.4;
+  }
+
+  tr:nth-child(even) td {
+    background: #f8fafc;
+  }
+
+  /* ----------------------------------------------------
+     LISTS
+     ---------------------------------------------------- */
+  .feature-list {
+    list-style: none;
+    margin: 4px 0;
+  }
+
+  .feature-list li {
+    position: relative;
+    padding-left: 14px;
+    margin-bottom: 4px;
+    font-size: 8.5pt;
+    color: #334155;
+    line-height: 1.4;
+  }
+
+  .feature-list li::before {
+    content: "•";
+    position: absolute;
+    left: 2px;
+    color: #1e3a8a;
+    font-weight: bold;
+    font-size: 10pt;
+  }
+
+  .role-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 7.5pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: #e2e8f0;
+    color: #0f172a;
+    margin-bottom: 6px;
+  }
+
+  .notice-box {
+    background: #eff6ff;
+    border-left: 3px solid #1e3a8a;
+    padding: 8px 12px;
+    margin: 10px 0;
+    font-size: 8.5pt;
+    color: #1e3a8a;
+  }
+</style>
+</head>
+<body>
+
+<!-- ==========================================
+     PAGE 1: COVER PAGE
+     ========================================== -->
+<div class="cover-page page-break">
+  <div class="cover-header">
+    <div class="cover-org">Volpehub Education ERP</div>
+    <div class="cover-doc-type">Product Documentation</div>
+  </div>
+
+  <div class="cover-body">
+    <div style="font-size: 9pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #1e3a8a; margin-bottom: 8px;">
+      Institutional Management Platform
+    </div>
+    <h1 class="cover-title">School Management System</h1>
+    <div class="cover-subtitle">
+      A comprehensive web-based platform for school administration, academic tracking, student admissions, fee collections, staff management, and parent-teacher communication.
+    </div>
+
+    <div class="summary-grid">
+      <div class="summary-item">
+        <h4>User Access</h4>
+        <p>5 Distinct Portals (Admin, Teacher, Parent, Student, Multi-School Trust)</p>
+      </div>
+      <div class="summary-item">
+        <h4>Core Modules</h4>
+        <p>14 Functional Modules for Daily School Operations</p>
+      </div>
+      <div class="summary-item">
+        <h4>Architecture</h4>
+        <p>Multi-Tenant Cloud, High-Speed Excel Ingestion & Role-Based Security</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="cover-footer">
+    <div>
+      <div>Document Type: <strong>System Overview & Client Specification</strong></div>
+      <div>Deployment: <strong>Cloud / Hosted SaaS</strong></div>
+    </div>
+    <div style="text-align: right;">
+      <div>Release Version: <strong>2.0</strong></div>
+      <div>Date: <strong>October 2026</strong></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==========================================
+     PAGE 2: ARCHITECTURE & HOW IT WORKS
+     ========================================== -->
+<div>
+  <div class="section-header">
+    <div>
+      <div class="section-tag">System Overview</div>
+      <div class="section-title">How the Platform Works</div>
+    </div>
+  </div>
+
+  <p>
+    The Volpehub School Management System is designed to centralize and automate school administration. It connects administrative staff, educators, parents, and students through dedicated web interfaces backed by a centralized, secure relational database.
+  </p>
+
+  <div class="subheading">Core Operational Principles</div>
+
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-title">1. Multi-Tenant School Isolation</div>
+      <div class="card-body">
+        Each school has its own independent database context. Student records, financial transactions, and employee profiles are completely separated to prevent data mixing between institutions.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">2. Role-Based Access Control</div>
+      <div class="card-body">
+        Every user account is assigned an explicit role: Super Admin, School Admin, Teacher, Parent, or Student. Users only have access to information and actions relevant to their responsibilities.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">3. High-Volume Data Ingestion</div>
+      <div class="card-body">
+        Built-in bulk Excel import allows school administrators to upload hundreds or thousands of students and staff members in single batches, automatically creating user accounts and login slips.
+      </div>
+    </div>
+  </div>
+
+  <div class="notice-box">
+    <strong>White-Label Branding:</strong> Each school can configure its own logo, custom school colors, official contact details, and custom subdomain so the system aligns with the school's identity.
+  </div>
+
+  <div class="subheading" style="margin-top: 14px;">Technical Specifications</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 20%;">Component</th>
+        <th style="width: 35%;">Technology</th>
+        <th style="width: 45%;">Function</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Frontend Interface</strong></td>
+        <td>React, TypeScript, Redux Toolkit, Tailwind CSS</td>
+        <td>Responsive single-page application that works seamlessly on desktop, laptop, tablet, and mobile browsers.</td>
+      </tr>
+      <tr>
+        <td><strong>Backend API</strong></td>
+        <td>Python, Django REST Framework, Daphne ASGI</td>
+        <td>Processes business logic, validates data, manages authentication, and handles real-time background notifications.</td>
+      </tr>
+      <tr>
+        <td><strong>Database</strong></td>
+        <td>PostgreSQL</td>
+        <td>ACID-compliant relational database ensuring financial ledger accuracy, student history preservation, and encrypted storage.</td>
+      </tr>
+      <tr>
+        <td><strong>Performance Caching</strong></td>
+        <td>Redis Fast-Cache Layer</td>
+        <td>Caches frequent read queries such as rosters, dashboard statistics, and timetables to ensure fast response times.</td>
+      </tr>
+      <tr>
+        <td><strong>Document & Media Storage</strong></td>
+        <td>Database Binary Storage & Media Vault</td>
+        <td>Stores student admission documents, verified certificates, teacher credentials, and school logos securely without broken links.</td>
+      </tr>
+      <tr>
+        <td><strong>Notifications</strong></td>
+        <td>Firebase Cloud Messaging (FCM)</td>
+        <td>Delivers push notifications to mobile devices and browsers for attendance alerts, exam announcements, and fee notices.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ==========================================
+     PAGE 3: 5 USER PORTALS
+     ========================================== -->
+<div>
+  <div class="section-header">
+    <div>
+      <div class="section-tag">User Access</div>
+      <div class="section-title">The 5 Dedicated User Portals</div>
+    </div>
+  </div>
+
+  <p>
+    The platform includes 5 distinct interfaces tailored to the daily responsibilities of each user group in an educational institution:
+  </p>
+
+  <div class="grid-2" style="margin-top: 10px;">
+    <!-- Portal 1 -->
+    <div class="card avoid-break">
+      <div class="role-badge" style="background: #1e3a8a; color: #ffffff;">1. Super Admin Portal</div>
+      <div class="card-title">Educational Trust & Multi-Branch Management</div>
+      <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">For trust directors and group administrators managing multiple campuses.</p>
+      <ul class="feature-list">
+        <li>Cross-school overview dashboard with aggregated headcount and financial metrics.</li>
+        <li>Create and provision new school branches and subdomains.</li>
+        <li>Assign school administrator accounts and manage system credentials.</li>
+        <li>Configure platform-wide settings and monitor school activity.</li>
+      </ul>
+    </div>
+
+    <!-- Portal 2 -->
+    <div class="card avoid-break">
+      <div class="role-badge" style="background: #2563eb; color: #ffffff;">2. School Admin Portal</div>
+      <div class="card-title">Institutional Administration & Operations</div>
+      <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">For Principals, Vice Principals, and Administrative Office staff.</p>
+      <ul class="feature-list">
+        <li>Real-time dashboard: Active student headcount, faculty count, fee collection progress.</li>
+        <li>Student Information System (SIS) management, student profiles, and class allocations.</li>
+        <li>Online admissions processing, applicant review, and digital document verification.</li>
+        <li>Fee structure definition, receipt generation, outstanding dues, and staff payroll.</li>
+        <li>Timetable creation, exam scheduling, report card generation, and bus route tracking.</li>
+      </ul>
+    </div>
+
+    <!-- Portal 3 -->
+    <div class="card avoid-break">
+      <div class="role-badge" style="background: #0f766e; color: #ffffff;">3. Teacher Portal</div>
+      <div class="card-title">Classroom Management & Student Evaluation</div>
+      <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">For subject teachers, class teachers, and department heads.</p>
+      <ul class="feature-list">
+        <li>Class attendance marking with daily present, absent, and leave statuses.</li>
+        <li>Homework assignment creation with instructions, due dates, and attachments.</li>
+        <li>Exam marks entry for assigned subjects with automatic percentage calculation.</li>
+        <li>Daily class timetable and period schedule view.</li>
+        <li>Direct messaging with parents and access to personal salary disbursement slips.</li>
+      </ul>
+    </div>
+
+    <!-- Portal 4 -->
+    <div class="card avoid-break">
+      <div class="role-badge" style="background: #b45309; color: #ffffff;">4. Parent Portal</div>
+      <div class="card-title">Ward Monitoring & Academic Transparency</div>
+      <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">For mothers, fathers, and authorized guardians.</p>
+      <ul class="feature-list">
+        <li>Multi-child switcher: View and manage multiple enrolled siblings under one login.</li>
+        <li>Daily attendance status, monthly attendance rates, and absence notifications.</li>
+        <li>Fee statement: Check total fees, paid amounts, pending balances, and download receipts.</li>
+        <li>Exam report cards, subject grades, teacher remarks, and GPA progress.</li>
+        <li>Daily homework tracker, school circulars, and direct chat with teachers.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Portal 5 -->
+  <div class="card avoid-break" style="margin-top: 4px;">
+    <div class="role-badge" style="background: #0369a1; color: #ffffff;">5. Student Portal</div>
+    <div class="card-title">Student Academic Desk</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">For enrolled students to track their personal academic obligations.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li>Class timetable showing daily periods, subject slots, and assigned teachers.</li>
+        <li>Active homework assignments, project instructions, and submission deadlines.</li>
+      </ul>
+      <ul class="feature-list">
+        <li>Exam timetables, printable examination hall tickets, and published report cards.</li>
+        <li>Personal document vault (certificates, identity cards) and school notices.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ==========================================
+     PAGE 4: CORE MODULES (PART 1)
+     ========================================== -->
+<div>
+  <div class="section-header">
+    <div>
+      <div class="section-tag">Functional Modules</div>
+      <div class="section-title">Core Administrative Modules (Part 1)</div>
+    </div>
+  </div>
+
+  <!-- Module 1: Admissions -->
+  <div class="card avoid-break" style="margin-bottom: 10px;">
+    <div class="card-title">1. Online Admissions & Digital Applications</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Manages the end-to-end student intake process digitally.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Shareable Application Links:</strong> Create public admission links with custom expiry dates and grade limits.</li>
+        <li><strong>Document Collection:</strong> Parents upload Birth Certificates, Transfer Certificates, and Aadhaar cards digitally.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Application Review:</strong> Administration reviews submitted profiles with an integrated document previewer.</li>
+        <li><strong>One-Click Admission:</strong> Approved applicants automatically transfer into active student records with assigned roll numbers.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Module 2: SIS & Bulk Import -->
+  <div class="card avoid-break" style="margin-bottom: 10px;">
+    <div class="card-title">2. Student Information System (SIS) & Bulk Excel Ingestion</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Central master registry for all enrolled students.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Batch Excel Import:</strong> Import existing school data from Excel spreadsheets with column mapping and validation checks.</li>
+        <li><strong>Automatic Account Creation:</strong> Automatically generates separate student and parent login accounts with temporary passwords.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Comprehensive Student Profile:</strong> Stores personal details, parent contacts, medical notes, blood group, and photos.</li>
+        <li><strong>Annual Class Promotion:</strong> Promotes students to the next class while maintaining historical archives of prior terms.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Module 3: Academics & Timetables -->
+  <div class="card avoid-break" style="margin-bottom: 10px;">
+    <div class="card-title">3. Academic Setup & Class Timetables</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Organizes the academic structure and daily period allocations.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Academic Hierarchy:</strong> Configure Academic Cycles (e.g., 2026-27), Classes, Sections (A, B, C), and Subjects.</li>
+        <li><strong>Subject Assignments:</strong> Link core subjects and electives to specific classes and assign designated subject teachers.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Period Scheduler:</strong> Define daily period slots, break timings, and classroom assignments.</li>
+        <li><strong>Conflict Checking:</strong> Prevents scheduling the same teacher across two different classes during the same period.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Module 4: Attendance -->
+  <div class="card avoid-break">
+    <div class="card-title">4. Daily Student Attendance Management</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Tracks classroom attendance with historical audit logging.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Rapid Marking:</strong> Class teachers can mark an entire class present in one click, then adjust absent or late students.</li>
+        <li><strong>Real-Time Percentage:</strong> Automatically computes cumulative attendance percentages for report cards.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Parent Notifications:</strong> Automatically notifies parents when their child is recorded absent.</li>
+        <li><strong>Audit Logging:</strong> Logs the exact timestamp and teacher identity for every attendance entry submitted.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ==========================================
+     PAGE 5: CORE MODULES (PART 2)
+     ========================================== -->
+<div>
+  <div class="section-header">
+    <div>
+      <div class="section-tag">Functional Modules</div>
+      <div class="section-title">Core Administrative Modules (Part 2)</div>
+    </div>
+  </div>
+
+  <!-- Module 5: Fees -->
+  <div class="card avoid-break" style="margin-bottom: 10px;">
+    <div class="card-title">5. Fee Billing, Collections & Staff Payroll</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Manages student tuition invoicing and teacher payroll disbursements.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Fee Structure Configuration:</strong> Define class-wise tuition fees, lab fees, admission charges, and transport costs.</li>
+        <li><strong>Official Fee Receipts:</strong> Generates numbered, printable fee receipts with institution branding for every transaction.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Outstanding Dues Tracking:</strong> Clear dashboards showing collected revenue vs. unpaid fees by grade or student.</li>
+        <li><strong>Staff Salary Vouchers:</strong> Record teacher salary payments, deductions, and generate official payment slips.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Module 6: Exams -->
+  <div class="card avoid-break" style="margin-bottom: 10px;">
+    <div class="card-title">6. Examinations, Hall Tickets & Report Cards</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Coordinates term assessments and student academic evaluation.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Exam Datesheet Publisher:</strong> Publish exam schedules with subject dates, time slots, and maximum marks.</li>
+        <li><strong>Printable Hall Tickets:</strong> Automatically generate exam admit cards complete with candidate details and photos.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Controlled Marks Entry:</strong> Teachers submit subject marks with administrator lock/unlock deadlines to avoid tampering.</li>
+        <li><strong>Report Card Generation:</strong> Automatically calculates totals, letter grades, percentages, and performance remarks.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Module 7: Transport -->
+  <div class="card avoid-break" style="margin-bottom: 10px;">
+    <div class="card-title">7. Transport & Bus Route Management</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Oversees school vehicles, routes, and passenger rosters.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Route & Stop Setup:</strong> Define bus routes, pickup stops, and morning/afternoon scheduled times.</li>
+        <li><strong>Vehicle & Driver Directory:</strong> Store driver names, contact numbers, vehicle registration, and conductor details.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Student Bus Allocation:</strong> Assign students to specific routes and stops for accurate passenger manifests.</li>
+        <li><strong>Parent Route Visibility:</strong> Parents can view their child's assigned route, driver contact, and scheduled timings.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Module 8: Communication -->
+  <div class="card avoid-break">
+    <div class="card-title">8. Communications, Circulars & School Calendar</div>
+    <p style="font-size: 8pt; color: #64748b; margin-bottom: 6px;">Facilitates school-wide announcements and direct parent-teacher messaging.</p>
+    <div class="grid-2">
+      <ul class="feature-list">
+        <li><strong>Broadcast Notices:</strong> Distribute school-wide circulars, holiday notices, and emergency announcements.</li>
+        <li><strong>Direct In-App Chat:</strong> Secure parent-teacher communication channel without sharing personal mobile numbers.</li>
+      </ul>
+      <ul class="feature-list">
+        <li><strong>Event Calendar:</strong> Publish institutional events, sports meets, parent-teacher meetings, and examination dates.</li>
+        <li><strong>Push Notifications:</strong> Delivers instant alerts directly to smartphones and web browsers.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ==========================================
+     PAGE 6: IMPLEMENTATION & SECURITY
+     ========================================== -->
+<div>
+  <div class="section-header">
+    <div>
+      <div class="section-tag">Implementation</div>
+      <div class="section-title">Deployment, Onboarding & Security</div>
+    </div>
+  </div>
+
+  <p>
+    The system is engineered for smooth onboarding with minimal administrative disruption. Existing school data can be imported directly using standardized Excel spreadsheets.
+  </p>
+
+  <div class="subheading">4-Stage Onboarding Process</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 15%;">Stage</th>
+        <th style="width: 35%;">Action Items</th>
+        <th style="width: 50%;">Deliverables</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Stage 1</strong></td>
+        <td><strong>System Setup & Branding</strong></td>
+        <td>Provision school tenant, upload school logo, configure brand colors, and initialize the active academic year.</td>
+      </tr>
+      <tr>
+        <td><strong>Stage 2</strong></td>
+        <td><strong>Master Data Ingestion</strong></td>
+        <td>Import classes, sections, student roster, and staff directory via Excel templates. Credentials generated automatically.</td>
+      </tr>
+      <tr>
+        <td><strong>Stage 3</strong></td>
+        <td><strong>Operational Configuration</strong></td>
+        <td>Configure class timetables, assign subject teachers, and set up quarterly fee structures with billing amounts.</td>
+      </tr>
+      <tr>
+        <td><strong>Stage 4</strong></td>
+        <td><strong>Staff Briefing & Go-Live</strong></td>
+        <td>Distribute login slips to teachers and parents, activate daily attendance, and commence live portal operations.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="subheading" style="margin-top: 14px;">Data Security & Access Controls</div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Data Privacy & Protection</div>
+      <ul class="feature-list">
+        <li><strong>Isolated Tenant Data:</strong> Complete database separation prevents any institution from accessing another school's records.</li>
+        <li><strong>Credential Vault:</strong> User passwords are encrypted using secure cryptographic hashing algorithms.</li>
+        <li><strong>Session Token Rotation:</strong> Short-lived access tokens with HttpOnly refresh cookies prevent session hijacking.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Administrative Control</div>
+      <ul class="feature-list">
+        <li><strong>Temporary Password Enforcement:</strong> Requires new users to set a private password upon first login.</li>
+        <li><strong>Audit Logging:</strong> Administrative actions such as fee collections and attendance edits are permanently logged.</li>
+        <li><strong>Automatic Backups:</strong> Central PostgreSQL database supports automated snapshot and recovery procedures.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="subheading" style="margin-top: 14px;">Comparison: Traditional Records vs. Volpehub School ERP</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 25%;">Operational Area</th>
+        <th style="width: 35%;">Traditional Manual Methods</th>
+        <th style="width: 40%;">Volpehub School ERP</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Student Records</strong></td>
+        <td>Physical register books and scattered desktop files.</td>
+        <td>Centralized searchable database with instant profile retrieval.</td>
+      </tr>
+      <tr>
+        <td><strong>Fee Invoicing</strong></td>
+        <td>Handwritten paper receipt books prone to calculation errors.</td>
+        <td>Automated billing, numbered PDF receipts, and live dues tracking.</td>
+      </tr>
+      <tr>
+        <td><strong>Parent Updates</strong></td>
+        <td>Paper diary notes and periodic parent meetings.</td>
+        <td>Instant real-time attendance, homework, and fee alerts online.</td>
+      </tr>
+      <tr>
+        <td><strong>Report Cards</strong></td>
+        <td>Teachers manually calculate and write scores by hand.</td>
+        <td>Automated percentage, grade, and GPA calculation with PDF export.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="notice-box" style="margin-top: 14px;">
+    <strong>Demonstration & Trial:</strong> Demonstrations can be scheduled directly with pre-populated school branches to experience the live admin console, teacher portal, and parent interface.
+  </div>
+</div>
+
+</body>
+</html>

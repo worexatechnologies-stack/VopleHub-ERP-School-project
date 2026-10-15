@@ -1,0 +1,14 @@
+{
+  "workbench.startupEditor": "readme",
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/venv/Scripts/python.exe",
+  "python.analysis.venvPath": "${workspaceFolder}/backend",
+  "python.analysis.venv": "venv",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/backend",
+    "${workspaceFolder}/backend/venv/Lib/site-packages"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/backend",
+    "${workspaceFolder}/backend/venv/Lib/site-packages"
+  ]
+}

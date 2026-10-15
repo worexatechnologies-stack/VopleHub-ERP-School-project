@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    command: postgres -c max_connections=200 -c shared_buffers=1GB -c effective_cache_size=4GB -c work_mem=32MB -c maintenance_work_mem=256MB -c random_page_cost=1.1 -c effective_io_concurrency=200 -c checkpoint_completion_target=0.9 -c wal_buffers=16MB
+    environment:
+      POSTGRES_DB: volpehub_education
+      POSTGRES_USER: volpehub_education
+      POSTGRES_PASSWORD: worexa@123
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    ports: ["5433:5432"]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  api:
+    build: ./backend
+    command: sh -c "gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 3 --reload"
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://volpehub_education:worexa%40123@db:5432/volpehub_education
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+      DJANGO_DEBUG: "true"
+      REDIS_URL: redis://redis:6379/0
+    volumes: [./backend:/app]
+    ports: ["8000:8000"]
+    depends_on: [db, redis]
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "${WEB_PORT:-3001}:80"
+    depends_on:
+      - api
+volumes:
+  postgres_data:
