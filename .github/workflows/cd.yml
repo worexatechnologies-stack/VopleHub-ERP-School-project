@@ -167,12 +167,16 @@ jobs:
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
           GHCR_ACTOR: ${{ github.actor }}
         run: |
-          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" bash -s << 'EOF'
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
+            bash -s -- "${IMAGE_TAG}" "${GHCR_NAMESPACE}" "${GHCR_ACTOR}" "${GHCR_PULL_TOKEN:-}" << 'EOF'
             set -euo pipefail
-            cd /opt/volpehub
+            IMAGE_TAG="$1"
+            GHCR_NAMESPACE="$2"
+            GHCR_ACTOR="$3"
+            GHCR_PULL_TOKEN="$4"
+            export IMAGE_TAG GHCR_NAMESPACE
 
-            export IMAGE_TAG="${IMAGE_TAG}"
-            export GHCR_NAMESPACE="${GHCR_NAMESPACE}"
+            cd /opt/volpehub
 
             echo "=== VolpeHub Deployment: ${IMAGE_TAG} ==="
 

@@ -94,7 +94,7 @@ services:
     expose:
       - "8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/')"]
+      test: ["CMD", "python", "-c", "import urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(req)"]
       interval: 15s
       timeout: 5s
       retries: 5

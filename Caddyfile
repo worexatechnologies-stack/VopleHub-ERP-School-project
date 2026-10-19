@@ -1,4 +1,4 @@
-http://localhost, http://127.0.0.1 {
+:80 {
     encode zstd gzip
 
     handle_path /static/* {
@@ -6,24 +6,8 @@ http://localhost, http://127.0.0.1 {
         file_server
     }
     @api path /api/* /admin/* /healthz
-    # Local HTTP is terminated here for development; tell Django to avoid an
-    # HTTPS redirect loop. The production site below receives the real HTTPS
-    # forwarded header from Caddy automatically.
     reverse_proxy @api api:8000 {
         header_up X-Forwarded-Proto https
     }
-    reverse_proxy web:80
-}
-
-{$DOMAIN} {
-    tls {$LETSENCRYPT_EMAIL}
-    encode zstd gzip
-
-    handle_path /static/* {
-        root * /srv/static
-        file_server
-    }
-    @api path /api/* /admin/* /healthz
-    reverse_proxy @api api:8000
     reverse_proxy web:80
 }
