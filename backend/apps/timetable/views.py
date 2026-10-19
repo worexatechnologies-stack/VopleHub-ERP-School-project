@@ -101,7 +101,7 @@ class TimetableSlotViewSet(TenantScopedViewSet):
         elif user.role == User.Role.TEACHER:
             teacher = getattr(user, 'teacher_profile', None)
             queryset = queryset.filter(
-                teacher_id=teacher.pk,
+                teacher_id=teacher.pk, published=True,
             ) if (
                 teacher
                 and teacher.user_id == user.pk
@@ -157,7 +157,10 @@ class TimetableSlotViewSet(TenantScopedViewSet):
             pass
 
     def perform_update(self, serializer):
-        slot = serializer.save()
+        kwargs = {}
+        if 'published' not in serializer.validated_data:
+            kwargs['published'] = False
+        slot = serializer.save(**kwargs)
         try:
             from apps.notifications.services import notify_teacher_user
             cls_name = slot.section.class_room.name if slot.section and slot.section.class_room else 'Class'

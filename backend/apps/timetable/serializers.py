@@ -19,7 +19,7 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
     teacherId = serializers.IntegerField(min_value=1)
     period = serializers.IntegerField(min_value=1, max_value=32)
     time = serializers.CharField(source='time_label', max_length=64)
-    published = serializers.BooleanField(required=False, default=True)
+    published = serializers.BooleanField(required=False, default=False)
 
     class Meta:
         model = TimetableSlot

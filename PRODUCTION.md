@@ -1,71 +1,194 @@
-# volpehub.education Production Deployment
+# VolpeHub Production Deployment & Operations Guide
 
-Target server: KVM 8, 8 vCPU, 32 GB RAM, 400 GB NVMe, 32 TB bandwidth.
+This guide outlines the production deployment architecture, security model, environment configuration, and operations for VolpeHub on the Hostinger KVM 8 VPS (`187.127.157.140`).
 
-## 1. Configure environment
+---
 
-Create `backend/.env` from `backend/.env.example` and replace:
+## 1. System Architecture & Coexistence
 
-- `DJANGO_SECRET_KEY`
-- `POSTGRES_PASSWORD`
-- `DATABASE_URL` password portion
-- domain values if not using `volpehub.education`
+VolpeHub is deployed as an independent Docker Compose project alongside the existing "My Dear Partner" deployment on the same VPS.
 
-## 2. Start production stack
+| Dimension | VolpeHub | My Dear Partner |
+| :--- | :--- | :--- |
+| **Directory** | `/opt/volpehub` | `/opt/mydearpartner` |
+| **Compose Project** | `volpehub` (`-p volpehub`) | `mydearpartner` |
+| **Docker Network** | `volpehub_default` (isolated bridge) | `mydearpartner_default` |
+| **Database** | `volpehub_education` in PostgreSQL 16 (`db`) | `mydearpartner` in PostgreSQL 15 |
+| **Volumes** | `volpehub_postgres_data`, `volpehub_redis_data`, etc. | `mydearpartner_*` |
+| **Public Ports** | `8081` (HTTP) / `8444` (HTTPS) via Caddy | `80` (HTTP) / `443` (HTTPS) via Nginx |
+| **Registry** | GitHub Container Registry (`ghcr.io`) | Local build / Docker Hub |
 
-```bash
-docker compose -f docker-compose.prod.yml --env-file backend/.env up -d --build
-```
+> [!IMPORTANT]
+> Because My Dear Partner's Nginx container binds ports `80` and `443` on the host, VolpeHub's edge proxy (Caddy) binds to `${CADDY_HTTP_PORT:-8081}` and `${CADDY_HTTPS_PORT:-8444}` to guarantee zero port collisions and zero disruption to My Dear Partner.
 
-PostgreSQL creates the production database automatically from `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`.
+---
 
-The API container automatically:
+## 2. Server Preparation (One-Time Setup)
 
-- waits for PostgreSQL
-- runs `python manage.py migrate --noinput`
-- runs `python manage.py collectstatic --noinput`
-- starts Gunicorn with Uvicorn workers
-
-## 3. Recommended worker sizing
-
-Default `WEB_CONCURRENCY=9` is set for 8 vCPU. If the app is mostly API-bound, keep 9. If memory pressure appears, reduce to 6 or 7.
-
-## 4. Persistent data
-
-Production data is stored in Docker volumes:
-
-- `postgres_data`
-- `redis_data`
-- `static_data`
-
-Configure server-provider weekly backups or snapshots to include these Docker volumes.
-
-## 5. Health checks
+On the VPS (`187.127.157.140`), execute the following commands as root to prepare the dedicated `/opt/volpehub` directory and permissions:
 
 ```bash
-docker compose -f docker-compose.prod.yml ps
-docker compose -f docker-compose.prod.yml logs -f api
+# 1. Create deployment directory structure
+mkdir -p /opt/volpehub/docker/postgres
+mkdir -p /opt/volpehub/backups
+
+# 2. (Optional but recommended) Create dedicated least-privilege deploy user
+useradd -m -s /bin/bash -g docker volpehub-deploy || usermod -aG docker volpehub-deploy
+mkdir -p /home/volpehub-deploy/.ssh
+chmod 700 /home/volpehub-deploy/.ssh
+
+# Copy deploy SSH public key to authorized_keys
+cp ~/.ssh/authorized_keys /home/volpehub-deploy/.ssh/authorized_keys
+chown -R volpehub-deploy:docker /home/volpehub-deploy/.ssh /opt/volpehub
+chmod 600 /home/volpehub-deploy/.ssh/authorized_keys
+chmod 775 /opt/volpehub
 ```
 
-HTTPS is terminated by the included Caddy service. Set `DOMAIN` and `LETSENCRYPT_EMAIL`, ensure DNS points to this server, and allow inbound ports 80 and 443 before starting the stack.
+---
 
-## 6. Firebase Cloud Messaging
+## 3. Production Environment File (`/opt/volpehub/.env`)
 
-1. In Firebase Console, create/select the project, register a **Web app**, enable Cloud Messaging, and generate a **Web Push VAPID key**.
-2. Put the public web-app values (`VITE_FIREBASE_*`) in `backend/.env`; Docker passes these only into the frontend build. They are public identifiers, not server credentials.
-3. Create a Firebase Admin service account. Store its JSON in your secret manager or mount it read-only into both the `api` and `celery_worker` containers. Set `FIREBASE_ENABLED=true` and either:
+Create `/opt/volpehub/.env` on the VPS with production secrets. **Never commit this file to Git.**
 
-   ```bash
-   FIREBASE_SERVICE_ACCOUNT_FILE=/run/secrets/firebase-service-account.json
-   ```
+```ini
+# Core Django Settings
+DJANGO_SECRET_KEY=change-to-a-very-long-random-production-secret-at-least-50-characters
+DJANGO_DEBUG=false
+DJANGO_SETTINGS_MODULE=config.settings.prod
+ALLOWED_HOSTS=volpehub.education,www.volpehub.education,187.127.157.140,localhost,127.0.0.1
+CORS_ALLOW_ALL_ORIGINS=false
+CORS_ALLOWED_ORIGINS=https://volpehub.education,https://www.volpehub.education
+CSRF_TRUSTED_ORIGINS=https://volpehub.education,https://www.volpehub.education
 
-   or set `FIREBASE_SERVICE_ACCOUNT_JSON` from the secret manager. Never add the service-account JSON to Git, frontend environment variables, or the browser.
-4. Rebuild the frontend after changing any `VITE_FIREBASE_*` value. Firebase Messaging requires HTTPS in production (localhost is allowed for development).
+# Database Configuration (Unique to VolpeHub)
+POSTGRES_DB=volpehub_education
+POSTGRES_SUPERUSER=postgres
+POSTGRES_SUPERUSER_PASSWORD=generate-strong-unique-postgres-password
+APP_DB_USER=volpehub_education
+APP_DB_PASSWORD=generate-strong-unique-app-password
+DATABASE_URL=postgres://volpehub_education:generate-strong-unique-app-password@db:5432/volpehub_education
 
-FCM tokens are stored per device in PostgreSQL. The API automatically deletes tokens Firebase reports as invalid, and retries temporary delivery failures through Celery with exponential backoff.
+# Cache & Redis (Unique to VolpeHub)
+REDIS_PASSWORD=generate-strong-unique-redis-password
+REDIS_URL=redis://:generate-strong-unique-redis-password@redis:6379/0
 
-## 7. First administrator and backups
+# Worker & Concurrency Tuning (Hostinger KVM 8: 8 vCPUs, 32GB RAM)
+WEB_CONCURRENCY=6
+GUNICORN_TIMEOUT=120
+CELERY_CONCURRENCY=4
 
-Set `BOOTSTRAP_SUPERADMIN_EMAIL`, `BOOTSTRAP_SUPERADMIN_PASSWORD`, and `BOOTSTRAP_SUPERADMIN_NAME` in `backend/.env`. Run `./deploy.sh` to start the stack and create the account idempotently.
+# Domain & Edge Ports
+DOMAIN=volpehub.education
+LETSENCRYPT_EMAIL=admin@volpehub.education
+CADDY_HTTP_PORT=8081
+CADDY_HTTPS_PORT=8444
 
-Schedule `./backup.sh` nightly with cron. It writes PostgreSQL dumps to `./backups` and retains them for `BACKUP_RETENTION_DAYS` (14 by default).
+# Superadmin Bootstrap (Idempotent initial setup)
+BOOTSTRAP_SUPERADMIN_EMAIL=admin@volpehub.education
+BOOTSTRAP_SUPERADMIN_PASSWORD=generate-initial-strong-superadmin-password
+BOOTSTRAP_SUPERADMIN_NAME=VolpeHub Administrator
+
+# Backups
+BACKUP_RETENTION_DAYS=14
+```
+
+---
+
+## 4. GitHub Actions CI/CD Pipeline Configuration
+
+### A. Repository Variables (`Settings -> Secrets and variables -> Actions -> Variables`)
+- None required (defaults fallback to repository owner and git commit SHA).
+
+### B. Repository Secrets (`Settings -> Secrets and variables -> Actions -> Secrets`)
+Configure the following secrets in the GitHub repository:
+
+| Secret Name | Description | Example / Source |
+| :--- | :--- | :--- |
+| `SSH_HOST` | Hostinger VPS IP address or hostname | `187.127.157.140` |
+| `SSH_USER` | Deployment user with docker group access | `volpehub-deploy` or `root` |
+| `SSH_PRIVATE_KEY` | Ed25519 or RSA deployment private key | Paste contents of private key (`~/.ssh/github_actions_deploy`) |
+| `SSH_KNOWN_HOSTS` | Strict host key line for the VPS | Output of `ssh-keyscan -H 187.127.157.140` |
+| `GHCR_PULL_TOKEN` | Read-only GitHub PAT for package pull | GitHub Personal Access Token (`read:packages`) |
+
+> [!NOTE]
+> `GITHUB_TOKEN` is automatically provided by GitHub Actions with `packages: write` permissions to publish container images to GHCR.
+
+### C. GitHub Environment Protection
+1. Navigate to **Settings → Environments → New environment**.
+2. Name the environment: `production`.
+3. Set **Deployment branches** to `Selected branches` → `main`.
+4. (Recommended) Enable **Required reviewers** for production releases.
+
+---
+
+## 5. Deployment Procedures
+
+### Automated Deployment (Recommended)
+1. Push your validated code to the `main` branch.
+2. The GitHub Actions workflow (`.github/workflows/cd.yml`) will:
+   - Run type checks, frontend build, and Django backend unit tests.
+   - Build multi-stage production Docker images and push them to GHCR tagged with `${{ github.sha }}`.
+   - Establish a secure SSH session with strict host verification.
+   - Sync `docker-compose.prod.yml`, `Caddyfile`, and scripts to `/opt/volpehub/`.
+   - Take an automated pre-deployment snapshot of PostgreSQL (`backup.sh`).
+   - Run safe database migrations: `docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py migrate --noinput`.
+   - Apply service updates: `docker compose -f docker-compose.prod.yml -p volpehub up -d --remove-orphans`.
+   - Verify container health status via `/api/health/`.
+
+### Manual CLI First-Deployment (Bootstrap on VPS)
+```bash
+cd /opt/volpehub
+# Ensure .env is populated
+./deploy.sh
+```
+
+---
+
+## 6. Verification & Health Monitoring
+
+To verify the running VolpeHub stack without affecting any other service:
+
+```bash
+# 1. Check container statuses
+docker compose -f docker-compose.prod.yml -p volpehub ps
+
+# 2. Check health endpoint directly
+curl -I http://localhost:8000/api/health/
+# Expected: HTTP/1.1 200 OK {"status":"ok","database":"ok","service":"volpehub-api"}
+
+# 3. View API logs
+docker compose -f docker-compose.prod.yml -p volpehub logs --tail=50 -f api
+
+# 4. View Caddy proxy logs
+docker compose -f docker-compose.prod.yml -p volpehub logs --tail=50 -f caddy
+```
+
+---
+
+## 7. Rollback & Disaster Recovery
+
+### Application Rollback
+To roll back the container stack to the previous working release:
+
+```bash
+cd /opt/volpehub
+./rollback.sh
+```
+
+Or roll back to a specific Git commit SHA:
+```bash
+cd /opt/volpehub
+./rollback.sh 5e0e6a1...
+```
+
+### Database Restore Procedure
+Database restore is **only** required if a destructive migration damaged application data.
+
+```bash
+cd /opt/volpehub
+# List available backups
+ls -lh ./backups/
+
+# Restore specific dump file
+./restore.sh ./backups/volpehub-20261019-120000.dump
+```

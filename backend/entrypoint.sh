@@ -25,7 +25,14 @@ for attempt in range(1, 61):
         time.sleep(2)
 PY
 
-python manage.py migrate --noinput
-python manage.py collectstatic --noinput
+# Celery workers should not execute migrations or static file collection
+if [ "${CELERY_WORKER:-0}" != "1" ]; then
+    if [ "${SKIP_STARTUP_MIGRATIONS:-0}" != "1" ]; then
+        python manage.py migrate --noinput
+    fi
+    if [ "${SKIP_STARTUP_COLLECTSTATIC:-0}" != "1" ]; then
+        python manage.py collectstatic --noinput
+    fi
+fi
 
 exec "$@"

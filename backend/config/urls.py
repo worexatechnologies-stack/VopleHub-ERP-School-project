@@ -1,5 +1,25 @@
 from django.contrib import admin
+from django.http import JsonResponse
+from django.db import connection
 from django.urls import include, path
+
+
+def health_check(request):
+    """Production health check verifying application and database connectivity."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        db_status = "ok"
+        status_code = 200
+    except Exception as exc:
+        db_status = f"error: {str(exc)}"
+        status_code = 503
+
+    return JsonResponse({
+        "status": "ok" if status_code == 200 else "degraded",
+        "database": db_status,
+        "service": "volpehub-api",
+    }, status=status_code)
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
 from rest_framework.routers import DefaultRouter
@@ -88,6 +108,8 @@ router.register('exports', ExportJobViewSet, basename='export')
 
 
 urlpatterns = [
+    path('healthz/', health_check, name='healthz'),
+    path('api/health/', health_check, name='health-check'),
     path('admin/', admin.site.urls),
     path('api/v1/enrollment/verify/', VerifyEnrollmentLinkView.as_view()),
     path('api/v1/enrollment/submit/', SubmitEnrollmentApplicationView.as_view()),

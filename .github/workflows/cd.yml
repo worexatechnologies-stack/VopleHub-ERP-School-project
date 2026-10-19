@@ -1,0 +1,244 @@
+name: VolpeHub CD (Production)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci-verification:
+    name: Run CI Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Run TypeScript type check
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements.txt'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Validate Django system checks
+        env:
+          DATABASE_URL: sqlite:///tmp/cd_check.sqlite3
+          DJANGO_SECRET_KEY: cd-verify-secret-key-at-least-32-chars-long
+          DJANGO_SETTINGS_MODULE: config.settings.dev
+        run: |
+          python backend/manage.py check
+
+      - name: Run unit test suite
+        env:
+          DATABASE_URL: sqlite:///tmp/cd_test.sqlite3
+          DJANGO_SECRET_KEY: cd-test-secret-key-at-least-32-chars-long
+          DJANGO_SETTINGS_MODULE: config.settings.dev
+        run: |
+          python backend/manage.py test apps.community apps.notifications apps.timetable apps.staff
+
+  publish-images:
+    name: Build & Publish GHCR Images
+    needs: ci-verification
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      repo_owner: ${{ steps.repo_owner.outputs.lowercase }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Lowercase repository owner for GHCR compatibility
+        id: repo_owner
+        run: |
+          echo "lowercase=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set Release Tag
+        id: meta
+        run: |
+          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-api:${{ github.sha }}
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-api:latest
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          file: ./Dockerfile.frontend
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-web:${{ github.sha }}
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-web:latest
+
+  deploy-production:
+    name: Safe Production Deployment
+    needs: publish-images
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout deployment assets
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure SSH key and strict host verification
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Transfer Compose and operational scripts to VPS
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            docker-compose.prod.yml \
+            Caddyfile \
+            backup.sh \
+            restore.sh \
+            rollback.sh \
+            "${SSH_USER}@${SSH_HOST}:/opt/volpehub/"
+
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" "mkdir -p /opt/volpehub/docker/postgres /opt/volpehub/backups"
+
+          scp -i ~/.ssh/deploy_key \
+            docker/postgres/init-app-role.sh \
+            "${SSH_USER}@${SSH_HOST}:/opt/volpehub/docker/postgres/"
+
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
+            "chmod +x /opt/volpehub/backup.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/docker/postgres/init-app-role.sh"
+
+      - name: Execute atomic production deployment
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          IMAGE_TAG: ${{ needs.publish-images.outputs.image_tag }}
+          GHCR_NAMESPACE: ${{ needs.publish-images.outputs.repo_owner }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" bash -s << 'EOF'
+            set -euo pipefail
+            cd /opt/volpehub
+
+            export IMAGE_TAG="${IMAGE_TAG}"
+            export GHCR_NAMESPACE="${GHCR_NAMESPACE}"
+
+            echo "=== VolpeHub Deployment: ${IMAGE_TAG} ==="
+
+            # 1. Verify production environment file is in place
+            if [ ! -f .env ] && [ ! -f backend/.env ]; then
+              echo "Error: Production .env file not found in /opt/volpehub" >&2
+              exit 1
+            fi
+
+            # 2. Authenticate with GHCR if token provided
+            if [ -n "${GHCR_PULL_TOKEN}" ]; then
+              echo "${GHCR_PULL_TOKEN}" | docker login ghcr.io -u "${GHCR_ACTOR}" --password-stdin > /dev/null 2>&1
+            fi
+
+            # 3. Pull exact immutable container image tags
+            echo "Pulling container images for release ${IMAGE_TAG}..."
+            docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker
+
+            # 4. Validate Docker Compose project configuration
+            echo "Validating Compose configuration..."
+            docker compose -f docker-compose.prod.yml -p volpehub config -q
+
+            # 5. Execute pre-deployment database backup if database container is running
+            if docker compose -f docker-compose.prod.yml -p volpehub ps --services --filter "status=running" | grep -q "db"; then
+              echo "Creating pre-deployment database backup..."
+              ./backup.sh
+            fi
+
+            # 6. Apply database migrations safely before traffic switch
+            echo "Running database migrations..."
+            docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py migrate --noinput
+
+            # 7. Record release metadata
+            if [ -f .current_release ]; then
+              cp .current_release .previous_release
+            fi
+            echo "${IMAGE_TAG}" > .current_release
+
+            # 8. Apply service changes using targeted compose project
+            echo "Applying service changes..."
+            docker compose -f docker-compose.prod.yml -p volpehub up -d --remove-orphans
+
+            # 9. Verify deployment health endpoint
+            echo "Verifying health endpoint..."
+            MAX_RETRIES=15
+            COUNT=0
+            HEALTHY=0
+
+            while [ $COUNT -lt $MAX_RETRIES ]; do
+              STATUS=$(docker inspect --format='{{json .State.Health.Status}}' volpehub-api-1 2>/dev/null || echo '"starting"')
+              if [ "$STATUS" = '"healthy"' ]; then
+                HEALTHY=1
+                break
+              fi
+              echo "Waiting for health check (attempt $((COUNT+1))/$MAX_RETRIES, status: $STATUS)..."
+              sleep 5
+              COUNT=$((COUNT+1))
+            done
+
+            if [ $HEALTHY -ne 1 ]; then
+              echo "Error: VolpeHub API container failed health check after deployment!" >&2
+              docker compose -f docker-compose.prod.yml -p volpehub ps
+              echo "To rollback, run: ./rollback.sh \$(cat .previous_release)" >&2
+              exit 1
+            fi
+
+            echo "=== VolpeHub Deployment Succeeded ==="
+            docker compose -f docker-compose.prod.yml -p volpehub ps
+          EOF

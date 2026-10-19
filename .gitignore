@@ -11,4 +11,17 @@ backend/schema*.yaml
 !.env.example
 venv/
 backend/venv/
+backend/media/
+backups/
+*.dump
+.current_release
+.previous_release
+.rolled_back_from_release
+secrets/
+backend/secrets/
+*firebase*.json
+*service-account*.json
+*.plist
+google-services.json
+GoogleService-Info.plist
 
