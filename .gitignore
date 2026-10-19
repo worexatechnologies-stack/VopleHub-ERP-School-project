@@ -24,4 +24,6 @@ backend/secrets/
 *.plist
 google-services.json
 GoogleService-Info.plist
+*.sqlite3
+*.db
 
