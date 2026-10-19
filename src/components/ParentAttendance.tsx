@@ -39,7 +39,15 @@ export default function ParentAttendance() {
   const { data: allRecords = [], isLoading: attendanceLoading } = useGetAttendanceQuery();
 
   // Selected Ward
-  const [selectedWardId, setSelectedWardId] = useState<string>('all');
+  const [selectedWardId, setSelectedWardId] = useState<string>('');
+
+  React.useEffect(() => {
+    if (wards.length > 0) {
+      if (!selectedWardId || !wards.some(w => String(w.id) === selectedWardId)) {
+        setSelectedWardId(String(wards[0].id));
+      }
+    }
+  }, [wards, selectedWardId]);
 
   // Today's date ISO string (e.g. "2026-08-29") to cap future dates
   const todayString = useMemo(() => formatLocalDate(new Date()), []);
@@ -49,19 +57,17 @@ export default function ParentAttendance() {
 
   const isSelectedTodayOrFuture = selectedDate >= todayString;
 
-  // Filter records by selected ward
-  const wardFilteredRecords = useMemo(() => {
-    if (selectedWardId === 'all') return allRecords;
-    return allRecords.filter(r => String(r.studentId) === selectedWardId);
-  }, [allRecords, selectedWardId]);
-
   // Selected Ward details
   const activeWard = useMemo(() => {
-    if (selectedWardId === 'all') {
-      return wards[0] || null;
-    }
+    if (wards.length === 0) return null;
     return wards.find(w => String(w.id) === selectedWardId) || wards[0] || null;
   }, [wards, selectedWardId]);
+
+  // Filter records strictly by active ward
+  const wardFilteredRecords = useMemo(() => {
+    if (!activeWard) return [];
+    return allRecords.filter(r => String(r.studentId) === String(activeWard.id));
+  }, [allRecords, activeWard]);
 
   // Map of date string -> AttendanceRecord[]
   const recordsByDate = useMemo(() => {
@@ -203,7 +209,6 @@ export default function ParentAttendance() {
               onChange={e => setSelectedWardId(e.target.value)}
               className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-800 shadow-2xs focus:outline-none focus:ring-2 focus:ring-indigo-400 cursor-pointer"
             >
-              <option value="all">All Linked Children</option>
               {wards.map(w => (
                 <option key={w.id} value={String(w.id)}>
                   {w.name} ({w.class} {w.section ? `- ${w.section}` : ''})

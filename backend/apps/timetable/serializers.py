@@ -19,7 +19,7 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
     teacherId = serializers.IntegerField(min_value=1)
     period = serializers.IntegerField(min_value=1, max_value=32)
     time = serializers.CharField(source='time_label', max_length=64)
-    published = serializers.BooleanField(read_only=True)
+    published = serializers.BooleanField(required=False, default=True)
 
     class Meta:
         model = TimetableSlot
@@ -27,7 +27,7 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
             'id', 'schoolId', 'academicYear', 'sectionId', 'day', 'period',
             'time', 'subjectId', 'teacherId', 'classroom', 'published',
         ]
-        read_only_fields = ['id', 'published']
+        read_only_fields = ['id']
 
     def get_fields(self):
         # ``class`` is a reserved Python keyword, so these response-only fields
@@ -169,6 +169,7 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context['request']
+        validated_data.setdefault('published', True)
         return self._save_safely(lambda: TimetableSlot.objects.create(
             **validated_data, created_by=request.user,
         ))
@@ -177,9 +178,8 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
         def save():
             for field, value in validated_data.items():
                 setattr(instance, field, value)
-            # A previously published schedule becomes a draft after any edit.
-            # This prevents students and parents seeing unreviewed changes.
-            instance.published = False
+            if 'published' not in validated_data:
+                instance.published = True
             instance.save()
             return instance
 

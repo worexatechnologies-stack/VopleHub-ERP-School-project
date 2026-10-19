@@ -71,6 +71,21 @@ class CachedJWTAuthentication(JWTAuthentication):
         if cached is not None:
             return cached
         result = super().authenticate(request)
+        if result is None:
+            # Fallback for direct browser document downloads/previews: check query parameter
+            query_params = getattr(request, 'query_params', None)
+            if query_params is None and hasattr(request, 'GET'):
+                query_params = request.GET
+            raw_token = None
+            if query_params:
+                raw_token = query_params.get('token') or query_params.get('access_token')
+            if raw_token:
+                try:
+                    validated_token = self.get_validated_token(raw_token)
+                    user = self.get_user(validated_token)
+                    result = (user, validated_token)
+                except Exception:
+                    result = None
         if result is not None:
             request._cached_jwt_auth = result
         return result

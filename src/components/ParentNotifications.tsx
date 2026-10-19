@@ -22,6 +22,7 @@ import {
 } from '../store/api/notificationApi';
 import { useGetStudentsQuery } from '../store/api/studentApi';
 import { testNotificationSound } from '../services/notificationSound';
+import { useAppSelector } from '../store';
 
 type ParentNotification = {
   id: number;
@@ -42,9 +43,11 @@ interface ParentNotificationsProps {
 }
 
 export default function ParentNotifications({ onNavigateToTab }: ParentNotificationsProps) {
+  const currentUser = useAppSelector((state) => state.auth.user);
+  const isParent = currentUser?.role === 'Parent';
   const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
   const { data: wards = [], isLoading: wardsLoading } = useGetStudentsQuery(undefined, {
-    skip: !isServerBacked,
+    skip: !isServerBacked || !isParent,
   });
   const {
     data: rawNotifications = [],
@@ -217,8 +220,8 @@ export default function ParentNotifications({ onNavigateToTab }: ParentNotificat
   // Filter items based on selected child, category, and search query
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
-      // Child Filter
-      if (activeWard) {
+      // Child Filter (Only for parent with linked children)
+      if (isParent && activeWard) {
         if (!isNoticeForWard(item, activeWard)) {
           return false;
         }
@@ -245,16 +248,17 @@ export default function ParentNotifications({ onNavigateToTab }: ParentNotificat
 
       return true;
     });
-  }, [items, activeWard, categoryFilter, searchQuery, isNoticeForWard]);
+  }, [items, isParent, activeWard, categoryFilter, searchQuery, isNoticeForWard]);
 
   // Notice counts per child
   const childNoticeCounts = useMemo(() => {
+    if (!isParent) return {};
     const map: Record<string, number> = {};
     wards.forEach((w) => {
       map[String(w.id)] = items.filter((item) => isNoticeForWard(item, w)).length;
     });
     return map;
-  }, [items, wards, isNoticeForWard]);
+  }, [items, wards, isParent, isNoticeForWard]);
 
   const unreadCount = filteredItems.filter((item) => !item.readAt).length;
 
@@ -268,19 +272,21 @@ export default function ParentNotifications({ onNavigateToTab }: ParentNotificat
           </div>
           <div>
             <div className="flex items-center gap-2 mb-1">
-              <span className="portal-pill-badge indigo">Parent Portal</span>
+              <span className="portal-pill-badge indigo">{isParent ? 'Parent Portal' : currentUser?.role || 'School Portal'}</span>
               <span className="text-[11px] font-bold text-slate-400">Official Announcements</span>
             </div>
-            <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight">School Notices</h1>
+            <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight">
+              {isParent ? 'School Notices & Circulars' : currentUser?.role === 'Teacher' ? 'Teacher Notices & Schedules' : 'School Notices & Bulletins'}
+            </h1>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Official circulars, class alerts, and school-wide announcements from your School Admin and teachers.
+              Official circulars, timetable notices, class alerts, and school-wide announcements.
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3 self-start lg:self-center">
-          {/* Ward Switcher Dropdown */}
-          {wards.length > 0 && (
+          {/* Ward Switcher Dropdown (Parents only) */}
+          {isParent && wards.length > 0 && (
             <div className="bg-slate-50 p-2.5 rounded-2xl border border-slate-200/80">
               <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1 px-1">
                 Select Child
@@ -317,7 +323,7 @@ export default function ParentNotifications({ onNavigateToTab }: ParentNotificat
       </header>
 
       {/* Quick Child Filter Pills (Instant One-Click Child Switching) */}
-      {wards.length > 0 && (
+      {isParent && wards.length > 0 && (
         <div className="portal-card p-3.5 flex flex-wrap items-center gap-2">
           <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mr-1 flex items-center gap-1.5">
             <Filter className="h-3.5 w-3.5 text-rose-500" /> Child:

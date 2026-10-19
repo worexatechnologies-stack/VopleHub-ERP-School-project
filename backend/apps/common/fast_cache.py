@@ -81,9 +81,9 @@ def build_cache_key(namespace: str, request) -> str:
     full_path = request.get_full_path()
     path_hash = hashlib.md5(full_path.encode('utf-8')).hexdigest()[:12]
 
-    # For user-specific namespaces like auth_me, isolate per user_id
-    if namespace in ('auth_me', 'me'):
-        return f"fast:{namespace}:{user_id}:{ver}:{path_hash}"
+    # For user-specific namespaces like auth_me, or user-scoped roles (Teacher, Student, Parent), isolate per user_id
+    if namespace in ('auth_me', 'me') or str(role).lower() in ('teacher', 'student', 'parent'):
+        return f"fast:{namespace}:{school_id}:{user_id}:{ver}:{path_hash}"
 
     return f"fast:{namespace}:{school_id}:{role}:{ver}:{path_hash}"
 

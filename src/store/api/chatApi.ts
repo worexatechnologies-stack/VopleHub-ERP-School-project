@@ -108,8 +108,13 @@ export interface UnreadSummaryResponse {
 
 export const chatApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
-    getChatContacts: build.query<ChatContact[], void>({
-      query: () => ({ url: '/chat/contacts/' }),
+    getChatContacts: build.query<ChatContact[], { search?: string } | string | void>({
+      query: (arg) => {
+        const search = typeof arg === 'string' ? arg : arg?.search;
+        return {
+          url: search ? `/chat/contacts/?search=${encodeURIComponent(search)}` : '/chat/contacts/',
+        };
+      },
       providesTags: ['Chat'],
     }),
     getConversations: build.query<ApiConversation[], void>({
@@ -133,7 +138,7 @@ export const chatApi = baseApi.injectEndpoints({
         return [{ type: 'Chat' as const, id: `messages-${id}` }];
       },
     }),
-    startConversation: build.mutation<ApiConversation, { targetUserId?: number; teacherId?: number; studentId?: number }>({
+    startConversation: build.mutation<ApiConversation, { targetUserId?: number | string; teacherId?: number; studentId?: number }>({
       query: (body) => ({
         url: '/conversations/start/',
         method: 'POST',
@@ -152,7 +157,9 @@ export const chatApi = baseApi.injectEndpoints({
           const formData = new FormData();
           formData.append('message', message);
           formData.append('client_idempotency_key', key);
-          files.forEach((f, idx) => formData.append(`file_${idx}`, f));
+          files.forEach((f) => {
+            formData.append('files', f);
+          });
           return {
             url: `/conversations/${conversationId}/messages/`,
             method: 'POST',

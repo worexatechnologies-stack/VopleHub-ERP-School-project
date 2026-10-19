@@ -102,6 +102,9 @@ export default function TimetableView({
       const assignedSlot = slots.find((slot) => slot.teacherName.trim().toLowerCase() === String(user.name || '').trim().toLowerCase());
       teacherId = String(assignedSlot?.teacherId || '');
     }
+    if (!teacherId && slots.length > 0 && slots[0].teacherId) {
+      teacherId = String(slots[0].teacherId);
+    }
     headingText = `Teacher Lecture Schedule: ${user.name}`;
     subtitleText = `Track your assigned lecture hours, class periods, and room assignments.`;
   }
@@ -129,16 +132,15 @@ export default function TimetableView({
   );
 
   const activeDayTeacherSlots = slots.filter(s => 
-    s.teacherId === teacherId && 
-    s.day === selectedDay && 
-    s.published
+    (!teacherId || String(s.teacherId) === String(teacherId)) && 
+    s.day === selectedDay
   );
 
   const perspectivePublishedSlots = useMemo(() => {
-    const published = slots.filter((slot) => slot.published);
     if (user.role === 'Teacher') {
-      return published.filter((slot) => slot.teacherId === teacherId);
+      return slots.filter((slot) => !teacherId || String(slot.teacherId) === String(teacherId));
     }
+    const published = slots.filter((slot) => slot.published);
     return published.filter((slot) => slot.class === userClass && slot.section === userSection);
   }, [slots, teacherId, user.role, userClass, userSection]);
   const scheduledSubjectNames = useMemo(
@@ -234,7 +236,7 @@ export default function TimetableView({
         <div className="lg:col-span-3 space-y-5">
           {displayMode === 'weekly' ? (
             <TimetableGrid
-              slots={slots.filter(s => s.published)} // Only show published timetables to students/parents/teachers!
+              slots={user.role === 'Teacher' ? slots : slots.filter(s => s.published)}
               timingConfig={timingConfig}
               viewMode={user.role === 'Teacher' ? 'teacher' : 'class'}
               selectedClass={userClass}

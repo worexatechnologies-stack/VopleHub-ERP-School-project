@@ -177,8 +177,8 @@ export default function TimetableGrid({
   if (viewMode === 'teacher') {
     // Resolve the teacher name from the actual timetable slots (server data),
     // falling back to the selected teacher ID only when no slot exists yet.
-    const teacherSlot = slots.find(s => s.teacherId === selectedTeacherId);
-    const selectedTeacherName = teacherSlot?.teacherName || 'Teacher';
+    const teacherSlot = slots.find(s => !selectedTeacherId || String(s.teacherId) === String(selectedTeacherId));
+    const selectedTeacherName = teacherSlot?.teacherName || (slots.length > 0 && slots[0]?.teacherName ? slots[0].teacherName : 'Teacher');
 
     return (
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden" id="timetable-teacher-grid">
@@ -246,7 +246,7 @@ export default function TimetableGrid({
 
                     // Find slots for this specific teacher on this day + period
                     const teacherSlots = slots.filter(s => 
-                      s.teacherId === selectedTeacherId && 
+                      (!selectedTeacherId || String(s.teacherId) === String(selectedTeacherId)) && 
                       s.day === day && 
                       s.period === block.periodNumber
                     );

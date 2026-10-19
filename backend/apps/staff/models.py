@@ -69,10 +69,6 @@ class TeacherTeachingAssignment(models.Model):
                 fields=['school', 'teacher', 'section', 'subject'],
                 name='unique_teacher_section_subject_assignment',
             ),
-            models.UniqueConstraint(
-                fields=['school', 'section', 'subject'],
-                name='unique_teacher_for_section_subject',
-            ),
         ]
         indexes = [
             models.Index(

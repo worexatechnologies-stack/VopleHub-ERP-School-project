@@ -205,7 +205,7 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
   useEffect(() => {
     let active = true;
     loadTimetableSlots()
-      .then((rows) => { if (active) setTimetableSlots(rows.filter(s => s.published)); })
+      .then((rows) => { if (active) setTimetableSlots(role === 'Teacher' ? rows : rows.filter(s => s.published)); })
       .catch(() => { if (active) setTimetableSlots([]); });
     return () => { active = false; };
   }, [role]);
@@ -1290,13 +1290,6 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
       badge: 'Curriculum',
     },
     {
-      id: 'notifications',
-      title: 'School Notices',
-      subtitle: 'Official announcements, circulars & class-wise broadcast alerts.',
-      icon: Bell,
-      badge: 'Circulars',
-    },
-    {
       id: 'fees',
       title: 'School Fee Desk',
       subtitle: 'Review term tuition fees, invoice ledgers & payment receipts.',
@@ -1593,16 +1586,10 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
         <div className="space-y-1">
           <h3 className="text-sm font-extrabold text-slate-900">Need assistance or have school queries?</h3>
           <p className="text-xs text-slate-600 font-medium">
-            Use the <strong>Teacher Chat</strong> to reach out to assigned class teachers or visit the <strong>School Notices</strong> desk for circulars.
+            Use the <strong>Teacher Chat</strong> to reach out to assigned class teachers.
           </p>
         </div>
         <div className="flex items-center gap-2.5 shrink-0">
-          <button
-            onClick={() => onNavigateToTab('notifications')}
-            className="rounded-xl bg-white border border-slate-200 px-4 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 shadow-2xs transition cursor-pointer"
-          >
-            View School Notices
-          </button>
           <button
             onClick={() => onNavigateToTab('communication')}
             className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs transition cursor-pointer"

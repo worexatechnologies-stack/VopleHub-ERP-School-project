@@ -39,7 +39,12 @@ class TeacherPermission(permissions.BasePermission):
             return False
         if request.method not in permissions.SAFE_METHODS:
             return request.user.role == User.Role.SCHOOL_ADMIN
-        return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER, User.Role.PARENT]
+        return request.user.role in [
+            User.Role.SCHOOL_ADMIN,
+            User.Role.TEACHER,
+            User.Role.PARENT,
+            User.Role.STUDENT,
+        ]
 
 class TeacherViewSet(TenantScopedViewSet):
     permission_classes = [TeacherPermission]
@@ -84,7 +89,24 @@ class TeacherViewSet(TenantScopedViewSet):
                     Q(teaching_assignments__section__name__in=section_names, teaching_assignments__section__class_room__name__in=class_names) |
                     Q(sections__name__in=section_names, sections__class_room__name__in=class_names)
                 ).distinct()
-            return qs.none()
+        if user.role == User.Role.STUDENT:
+            student_profile = getattr(user, 'student_profile', None)
+            student = getattr(student_profile, 'student', None) if student_profile else None
+            if student:
+                section_id = getattr(student, 'section_record_id', None)
+                section_name = getattr(student, 'section', None)
+                class_name = getattr(student, 'class_name', None)
+                from django.db.models import Q
+                filters = Q()
+                if section_id:
+                    filters |= Q(teaching_assignments__section_id=section_id) | Q(sections__id=section_id)
+                if section_name and class_name:
+                    filters |= (
+                        Q(teaching_assignments__section__name=section_name, teaching_assignments__section__class_room__name=class_name) |
+                        Q(sections__name=section_name, sections__class_room__name=class_name)
+                    )
+                return qs.filter(filters).distinct() if filters else qs
+            return qs
         if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return qs
         return qs.none()
@@ -206,32 +228,26 @@ class TeacherViewSet(TenantScopedViewSet):
                     sec_id = item.get('sectionId')
                     sub_id = item.get('subjectId')
                     if sec_id and sub_id:
-                        if not TeacherTeachingAssignment.objects.filter(
-                            school_id=teacher.school_id, section_id=sec_id, subject_id=sub_id,
-                        ).exists():
-                            TeacherTeachingAssignment.objects.create(
-                                school=teacher.school,
-                                teacher=teacher,
-                                section_id=sec_id,
-                                subject_id=sub_id,
-                                created_by=self.request.user,
-                            )
+                        TeacherTeachingAssignment.objects.get_or_create(
+                            school=teacher.school,
+                            teacher=teacher,
+                            section_id=sec_id,
+                            subject_id=sub_id,
+                            defaults={'created_by': self.request.user},
+                        )
         elif teacher.sections.exists() and teacher.subject_records.exists():
             with transaction.atomic():
                 for sec in teacher.sections.select_related('class_room').all():
                     cls_subs = set(sec.class_room.subjects.values_list('id', flat=True)) if sec.class_room else set()
                     for sub in teacher.subject_records.all():
                         if not cls_subs or sub.id in cls_subs:
-                            if not TeacherTeachingAssignment.objects.filter(
-                                school_id=teacher.school_id, section=sec, subject=sub,
-                            ).exists():
-                                TeacherTeachingAssignment.objects.create(
-                                    school=teacher.school,
-                                    teacher=teacher,
-                                    section=sec,
-                                    subject=sub,
-                                    created_by=self.request.user,
-                                )
+                            TeacherTeachingAssignment.objects.get_or_create(
+                                school=teacher.school,
+                                teacher=teacher,
+                                section=sec,
+                                subject=sub,
+                                defaults={'created_by': self.request.user},
+                            )
 
     def destroy(self, request, *args, **kwargs):
         """Delete the teacher profile and its login as one atomic operation."""
@@ -276,13 +292,6 @@ class TeacherViewSet(TenantScopedViewSet):
 
         with transaction.atomic():
             teacher = Teacher.objects.select_for_update().get(pk=teacher.pk)
-            if TeacherTeachingAssignment.objects.filter(
-                school_id=request.user.school_id, section=section, subject=subject,
-            ).exclude(teacher=teacher).exists():
-                return Response(
-                    {'detail': 'This class section and subject are already assigned to another teacher.'},
-                    status=status.HTTP_409_CONFLICT,
-                )
             TeacherTeachingAssignment.objects.get_or_create(
                 school_id=request.user.school_id,
                 teacher=teacher,
@@ -777,7 +786,10 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
         404: OpenApiResponse(description='Not found'),
     })
     def retrieve(self, request, teacher_id=None, doc_id=None):
-        document = TeacherDocument.objects.select_related('teacher__user').filter(pk=doc_id, teacher_id=teacher_id).first()
+        query = TeacherDocument.objects.select_related('teacher__user').filter(pk=doc_id)
+        if teacher_id and str(teacher_id).lower() != 'me':
+            query = query.filter(teacher_id=teacher_id)
+        document = query.first()
         if not document:
             raise Http404
         teacher, user = document.teacher, request.user
@@ -805,6 +817,7 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
                 response['Cache-Control'] = 'private, no-store'
                 response['X-Content-Type-Options'] = 'nosniff'
                 response['X-Frame-Options'] = 'SAMEORIGIN'
+                response['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type, Content-Length'
                 return response
             except Exception:
                 pass
@@ -819,6 +832,7 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
         response['Cache-Control'] = 'private, no-store'
         response['X-Content-Type-Options'] = 'nosniff'
         response['X-Frame-Options'] = 'SAMEORIGIN'
+        response['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type, Content-Length'
         return response
 
     @extend_schema(request=TeacherDocumentSerializer, responses={
@@ -827,10 +841,30 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
         403: OpenApiResponse(description='Forbidden'),
         404: OpenApiResponse(description='Not found'),
     })
+    def _get_teacher(self, request, teacher_id):
+        if not teacher_id or str(teacher_id).lower() == 'me' or (request.user.role == User.Role.TEACHER and str(teacher_id) == '0'):
+            t = Teacher.objects.filter(user=request.user).first()
+            if t:
+                return t
+        t = Teacher.objects.filter(pk=teacher_id, school_id=request.user.school_id).first()
+        if not t and request.user.role == User.Role.TEACHER:
+            return Teacher.objects.filter(user=request.user).first()
+        return t
+
+    @extend_schema(request=None, responses={
+        200: TeacherDocumentSerializer,
+        400: OpenApiResponse(description='Bad request'),
+        403: OpenApiResponse(description='Forbidden'),
+        404: OpenApiResponse(description='Not found'),
+    })
     def partial_update(self, request, teacher_id=None, doc_id=None):
         if request.user.role != User.Role.SCHOOL_ADMIN:
             return Response({'detail': 'Only school administrators can verify or reject teacher documents.'}, status=status.HTTP_403_FORBIDDEN)
-        document = TeacherDocument.objects.select_related('teacher').filter(pk=doc_id, teacher_id=teacher_id).first()
+        teacher = self._get_teacher(request, teacher_id)
+        if teacher:
+            document = TeacherDocument.objects.select_related('teacher').filter(pk=doc_id, teacher=teacher).first()
+        else:
+            document = TeacherDocument.objects.select_related('teacher').filter(pk=doc_id, teacher__school_id=request.user.school_id).first()
         if not document or str(document.teacher.school_id or '') != str(request.user.school_id or ''):
             raise Http404
         new_status = request.data.get('status')
@@ -845,6 +879,7 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
                 document.verified_at = None
                 document.verified_by = None
             document.save()
+            bump_cache_version('teachers', request.user.school_id)
             return Response(TeacherDocumentSerializer(document, context={'request': request}).data)
         return Response({'detail': 'Invalid status. Choose Verified, Rejected, or Pending.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -854,9 +889,15 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
         404: OpenApiResponse(description='Not found'),
     })
     def destroy(self, request, teacher_id=None, doc_id=None):
-        document = TeacherDocument.objects.select_related('teacher').filter(
-            pk=doc_id, teacher_id=teacher_id, teacher__school_id=request.user.school_id
-        ).first()
+        teacher = self._get_teacher(request, teacher_id)
+        if teacher:
+            document = TeacherDocument.objects.select_related('teacher').filter(
+                pk=doc_id, teacher=teacher, teacher__school_id=request.user.school_id
+            ).first()
+        else:
+            document = TeacherDocument.objects.select_related('teacher').filter(
+                pk=doc_id, teacher__school_id=request.user.school_id
+            ).first()
         if not document:
             raise Http404
         allowed = (request.user.role == User.Role.SCHOOL_ADMIN) or (
@@ -868,6 +909,7 @@ class TeacherDocumentDownloadView(viewsets.ViewSet):
             from apps.common.storage import delete_file
             delete_file(document.file_key)
         document.delete()
+        bump_cache_version('teachers', request.user.school_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -875,9 +917,19 @@ class TeacherDocumentCollectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'credential_management'
 
+    def _get_teacher(self, request, teacher_id):
+        if not teacher_id or str(teacher_id).lower() == 'me' or (request.user.role == User.Role.TEACHER and str(teacher_id) == '0'):
+            t = Teacher.objects.filter(user=request.user).first()
+            if t:
+                return t
+        t = Teacher.objects.filter(pk=teacher_id, school_id=request.user.school_id).first()
+        if not t and request.user.role == User.Role.TEACHER:
+            return Teacher.objects.filter(user=request.user).first()
+        return t
+
     @extend_schema(responses={200: TeacherDocumentSerializer(many=True), 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Not found')})
     def get(self, request, teacher_id=None):
-        teacher = Teacher.objects.filter(pk=teacher_id, school_id=request.user.school_id).first()
+        teacher = self._get_teacher(request, teacher_id)
         if not teacher:
             raise Http404
         allowed = (request.user.role == User.Role.SCHOOL_ADMIN) or (
@@ -896,7 +948,7 @@ class TeacherDocumentCollectionView(APIView):
     def post(self, request, teacher_id=None):
         if request.user.role not in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]:
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        teacher = Teacher.objects.filter(pk=teacher_id, school_id=request.user.school_id).first()
+        teacher = self._get_teacher(request, teacher_id)
         if not teacher:
             raise Http404
         if request.user.role == User.Role.TEACHER and teacher.user_id != request.user.id:
@@ -904,6 +956,7 @@ class TeacherDocumentCollectionView(APIView):
         serializer = TeacherDocumentUploadSerializer(data=request.data, context={'teacher': teacher, 'request': request})
         serializer.is_valid(raise_exception=True)
         document = serializer.save()
+        bump_cache_version('teachers', request.user.school_id)
         return Response(TeacherDocumentSerializer(document, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 

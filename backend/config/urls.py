@@ -23,6 +23,7 @@ from apps.sis.views import (
     StudentViewSet,
     StudentDocumentCollectionView,
     StudentDocumentDownloadView,
+    SchoolDocumentQueueView,
     EnrollmentLinkViewSet,
     EnrollmentApplicationViewSet,
     VerifyEnrollmentLinkView,
@@ -117,7 +118,7 @@ urlpatterns = [
     path('api/v1/conversations/<int:conversation_id>/read/', ConversationReadView.as_view()),
     path('api/v1/messages/<int:message_id>/', MessageDetailView.as_view()),
     path('api/v1/unread-count/', UnreadCountView.as_view()),
-    path('api/v1/attachments/<uuid:attachment_id>/download/', AttachmentDownloadView.as_view()),
+    path('api/v1/attachments/<str:attachment_id>/download/', AttachmentDownloadView.as_view()),
     path('api/v1/chatbot/ask/', ParentChatbotAskView.as_view()),
     path('api/v1/chatbot/interactions/', ChatbotInteractionListView.as_view()),
     path('api/v1/notifications/', NotificationListView.as_view()),
@@ -135,10 +136,16 @@ urlpatterns = [
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema')),
 ]
+urlpatterns.insert(-4, path('api/v1/school/documents/queue/', SchoolDocumentQueueView.as_view()))
+urlpatterns.insert(-4, path('api/v1/documents/queue/', SchoolDocumentQueueView.as_view()))
 urlpatterns.insert(-4, path('api/v1/students/<int:student_id>/documents/', StudentDocumentCollectionView.as_view()))
 urlpatterns.insert(-4, path('api/v1/students/<int:student_id>/documents/<int:doc_id>/', StudentDocumentDownloadView.as_view({'get': 'retrieve', 'delete': 'destroy', 'patch': 'partial_update'})))
+urlpatterns.insert(-4, path('api/v1/students/me/documents/', StudentDocumentCollectionView.as_view()))
+urlpatterns.insert(-4, path('api/v1/students/me/documents/<int:doc_id>/', StudentDocumentDownloadView.as_view({'get': 'retrieve', 'delete': 'destroy', 'patch': 'partial_update'})))
 urlpatterns.insert(-4, path('api/v1/teachers/<int:teacher_id>/documents/', TeacherDocumentCollectionView.as_view()))
 urlpatterns.insert(-4, path('api/v1/teachers/<int:teacher_id>/documents/<int:doc_id>/', TeacherDocumentDownloadView.as_view({'get': 'retrieve', 'delete': 'destroy', 'patch': 'partial_update'})))
+urlpatterns.insert(-4, path('api/v1/teachers/me/documents/', TeacherDocumentCollectionView.as_view()))
+urlpatterns.insert(-4, path('api/v1/teachers/me/documents/<int:doc_id>/', TeacherDocumentDownloadView.as_view({'get': 'retrieve', 'delete': 'destroy', 'patch': 'partial_update'})))
 # Defensive fallback routes in case legacy/cached clients include redundant /api/v1 prefixes
 urlpatterns.insert(-4, path('api/v1/api/v1/students/<int:student_id>/documents/<int:doc_id>/', StudentDocumentDownloadView.as_view({'get': 'retrieve', 'delete': 'destroy', 'patch': 'partial_update'})))
 urlpatterns.insert(-4, path('api/v1/api/v1/teachers/<int:teacher_id>/documents/<int:doc_id>/', TeacherDocumentDownloadView.as_view({'get': 'retrieve', 'delete': 'destroy', 'patch': 'partial_update'})))

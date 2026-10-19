@@ -34,6 +34,7 @@ import {
   Building2,
   Check,
   SlidersHorizontal,
+  Send,
 } from 'lucide-react';
 import { Student } from '../types';
 import { emitNotification } from '../services/notificationBus';
@@ -423,17 +424,17 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
         });
     }
 
-    // Trigger parent absentee SMS if marked absent
-    if (status === 'Absent') {
-      const student = students.find(s => s.id === studentId);
-      if (student) {
-        const pSummary = periodSummaries.find(p => p.period === periodNumber) || activePeriodSummary;
-        const subjName = pSummary.subjectName || `Period ${periodNumber}`;
-        const teacherName = pSummary.teacherName || 'Faculty';
-        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const textMessage = `[Attendance Alert] ${student.name} marked ABSENT for ${subjName} (Period ${periodNumber}) today (${dayOfWeek}, ${currentDateISO}) at ${timestamp}. Teacher: ${teacherName}.`;
-        setSmsLogs(prev => [textMessage, ...prev]);
-      }
+    // Trigger parent notice for all attendance statuses: Present, Absent, Late
+    const student = students.find((s) => s.id === studentId);
+    if (student) {
+      const pSummary = periodSummaries.find((p) => p.period === periodNumber) || activePeriodSummary;
+      const subjName = pSummary.subjectName || '';
+      const isGeneric = !subjName || subjName.toLowerCase().startsWith('period');
+      const targetDesc = isGeneric ? `Period ${periodNumber}` : `${subjName} (Period ${periodNumber})`;
+      const teacherName = pSummary.teacherName || 'Faculty';
+      const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const textMessage = `[Attendance Alert] ${student.name} marked ${status.toUpperCase()} for ${targetDesc} today on ${dayOfWeek}, ${currentDateISO} at ${timestamp}. Teacher: ${teacherName}.`;
+      setSmsLogs((prev) => [textMessage, ...prev]);
     }
   };
 
@@ -564,6 +565,116 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     baseSectionStudents.forEach((student) => {
       handleMarkPeriodStatus(student.id, selectedPeriod, 'Absent');
     });
+  };
+
+  // Submit Attendance Action: Save records and return to sections
+  const [isSubmittingAttendance, setIsSubmittingAttendance] = useState(false);
+
+  const handleSubmitAttendance = async () => {
+    if (baseSectionStudents.length === 0) return;
+    setIsSubmittingAttendance(true);
+
+    try {
+      const studentIdSet = new Set(baseSectionStudents.map((s) => Number(s.id)));
+      const existingDateRecords = allDateRecords.filter((r) => studentIdSet.has(r.studentId));
+
+      const recordMap = new Map<string, AttendanceStatus>();
+      existingDateRecords.forEach((r) => {
+        recordMap.set(`${r.studentId}_${r.period}`, r.status);
+      });
+
+      // Ensure active selectedPeriod is filled for all students (defaulting unmarked to Present)
+      baseSectionStudents.forEach((s) => {
+        const key = `${s.id}_${selectedPeriod}`;
+        const activeStatus = records[s.id] || recordMap.get(key) || 'Present';
+        recordMap.set(key, activeStatus as AttendanceStatus);
+      });
+
+      const itemsToSubmit = Array.from(recordMap.entries()).map(([key, st]) => {
+        const [sId, pNum] = key.split('_');
+        return {
+          studentId: Number(sId),
+          period: Number(pNum),
+          status: st,
+        };
+      });
+
+      // Optimistically update local state
+      setAllDateRecords((prev) => {
+        const remaining = prev.filter(
+          (r) => !(studentIdSet.has(r.studentId) && r.period === selectedPeriod)
+        );
+        const newEntries = itemsToSubmit
+          .filter((item) => item.period === selectedPeriod)
+          .map((item) => ({
+            id: Date.now() + Math.random(),
+            studentId: item.studentId,
+            period: item.period,
+            status: item.status,
+          }));
+        return [...remaining, ...newEntries];
+      });
+
+      setRecords((prev) => {
+        const next = { ...prev };
+        baseSectionStudents.forEach((s) => {
+          if (!next[s.id]) next[s.id] = 'Present';
+        });
+        return next;
+      });
+
+      if (isServerBacked) {
+        await bulkMarkAttendanceMutation({
+          date: currentDateISO,
+          items: itemsToSubmit,
+        }).unwrap();
+        fetchReport();
+        refreshDateRecords();
+      }
+
+      // Log notices for students: Present, Absent, and Late
+      const pSummary = periodSummaries.find((p) => p.period === selectedPeriod) || activePeriodSummary;
+      const subjName = pSummary.subjectName || '';
+      const isGeneric = !subjName || subjName.toLowerCase().startsWith('period');
+      const targetDesc = isGeneric
+        ? `Class ${selectedClass}-${selectedSection} (Period ${selectedPeriod})`
+        : `${subjName} (Period ${selectedPeriod})`;
+
+      itemsToSubmit
+        .filter((item) => item.period === selectedPeriod)
+        .forEach((item) => {
+          const sObj = baseSectionStudents.find((s) => Number(s.id) === item.studentId);
+          if (sObj) {
+            const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            setSmsLogs((prev) => [
+              `[Attendance Alert] ${sObj.name} marked ${item.status.toUpperCase()} for ${targetDesc} today on ${dayOfWeek}, ${currentDateISO} at ${timeStr}.`,
+              ...prev,
+            ]);
+          }
+        });
+
+      emitNotification({
+        title: 'Attendance Submitted',
+        message: `Attendance for ${formatCleanClass(selectedClass)} - ${formatCleanSection(selectedSection)} (Period ${selectedPeriod}) has been saved and submitted successfully.`,
+        tone: 'success',
+        source: 'attendance',
+      });
+
+      // Once submitted, navigate back to sections
+      setTimeout(() => {
+        setNavStep('sections');
+      }, 350);
+    } catch (err: any) {
+      const msg = err?.data?.detail || err?.message || 'Failed to submit attendance.';
+      emitNotification({
+        title: 'Submission Failed',
+        message: msg,
+        tone: 'danger',
+        source: 'attendance',
+      });
+    } finally {
+      setIsSubmittingAttendance(false);
+    }
   };
 
   // Stats for the active period
@@ -903,11 +1014,11 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                 ))}
               </div>
 
-              {/* Batch Actions for active period & full day */}
+              {/* Batch Actions & Submit Button */}
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={handleMarkFullDayPresent}
-                  disabled={isBulkMarking || baseSectionStudents.length === 0}
+                  disabled={isBulkMarking || isSubmittingAttendance || baseSectionStudents.length === 0}
                   className="px-3.5 py-1.5 rounded-xl text-xs font-black bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:to-teal-800 text-white shadow-sm hover:shadow active:scale-95 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
                   title="Mark all students in this class as Present for all 6 periods today"
                 >
@@ -916,17 +1027,28 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                 </button>
                 <button
                   onClick={handleMarkAllPresent}
-                  className="px-3 py-1.5 rounded-xl text-xs font-black bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition flex items-center gap-1 cursor-pointer"
+                  disabled={isSubmittingAttendance}
+                  className="px-3 py-1.5 rounded-xl text-xs font-black bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
                   <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
                   All Present (P{selectedPeriod})
                 </button>
                 <button
                   onClick={handleMarkAllAbsent}
-                  className="px-3 py-1.5 rounded-xl text-xs font-black bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 transition flex items-center gap-1 cursor-pointer"
+                  disabled={isSubmittingAttendance}
+                  className="px-3 py-1.5 rounded-xl text-xs font-black bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
                   <XCircle className="w-3.5 h-3.5 text-rose-600" />
                   All Absent (P{selectedPeriod})
+                </button>
+                <button
+                  onClick={handleSubmitAttendance}
+                  disabled={isSubmittingAttendance || isBulkMarking || baseSectionStudents.length === 0}
+                  className="px-4 py-1.5 rounded-xl text-xs font-black bg-gradient-to-r from-indigo-600 via-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 active:scale-95 text-white shadow-md shadow-indigo-500/25 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
+                  title="Submit attendance records and return to sections"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{isSubmittingAttendance ? 'Submitting...' : 'Submit Attendance'}</span>
                 </button>
               </div>
             </div>
@@ -1064,6 +1186,49 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                   );
                 })
               )}
+            </div>
+
+            {/* Sticky Submission Bottom Action Bar */}
+            <div className="sticky bottom-4 z-20 mx-3 sm:mx-6 my-4 bg-slate-900/95 backdrop-blur-md text-white p-3.5 sm:px-6 rounded-2xl shadow-2xl border border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-200">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center shrink-0">
+                  <CheckCheck className="w-4 h-4 text-indigo-400" />
+                </div>
+                <div>
+                  <p className="text-xs font-black text-white">
+                    {formatCleanClass(selectedClass)} · {formatCleanSection(selectedSection)} (Period {selectedPeriod})
+                  </p>
+                  <p className="text-[11px] text-slate-300 font-medium">
+                    {baseSectionStudents.length} Students ·{' '}
+                    <span className="text-emerald-400 font-bold">{dayStats.presentCount} Present</span>
+                    {dayStats.absentAnyCount > 0 && (
+                      <span className="text-rose-400 font-bold"> · {dayStats.absentAnyCount} Absent</span>
+                    )}
+                    {dayStats.unmarkedCount > 0 && (
+                      <span className="text-amber-400 font-bold"> · {dayStats.unmarkedCount} Unmarked</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
+                <button
+                  type="button"
+                  onClick={() => setNavStep('sections')}
+                  className="px-3.5 py-2 text-xs font-bold text-slate-300 hover:text-white hover:bg-slate-800 rounded-xl transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmitAttendance}
+                  disabled={isSubmittingAttendance || isBulkMarking || baseSectionStudents.length === 0}
+                  className="px-6 py-2 rounded-xl text-xs font-extrabold bg-gradient-to-r from-indigo-500 via-indigo-600 to-violet-600 hover:from-indigo-600 hover:to-violet-700 active:scale-95 text-white shadow-lg shadow-indigo-500/30 transition flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{isSubmittingAttendance ? 'Submitting Attendance...' : 'Submit Attendance'}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

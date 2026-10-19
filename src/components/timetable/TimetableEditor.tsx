@@ -407,7 +407,7 @@ export default function TimetableEditor({
       teacherId: slotTeacherId,
       teacherName: teacherObj?.name || 'Unassigned',
       classroom: slotClassroom.trim() || 'Default',
-      published: false // initially Draft
+      published: true
     };
 
     let updatedSlots = [];
@@ -512,7 +512,7 @@ export default function TimetableEditor({
           class: copyToClass,
           section: copyToSection,
           sectionId: targetSection.id,
-          published: false // saved as draft
+          published: true
         });
         copiedCount++;
       }

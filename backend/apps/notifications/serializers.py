@@ -42,9 +42,11 @@ class NotificationSerializer(serializers.ModelSerializer):
     readAt = serializers.DateTimeField(source='read_at', read_only=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
 
+    relatedObject = serializers.JSONField(source='related_object', read_only=True)
+
     class Meta:
         model = Notification
-        fields = ['id', 'senderId', 'senderName', 'recipientId', 'recipientName', 'category', 'title', 'body', 'channel', 'status', 'requestStatus', 'related_object', 'readAt', 'createdAt']
+        fields = ['id', 'senderId', 'senderName', 'recipientId', 'recipientName', 'category', 'title', 'body', 'channel', 'status', 'requestStatus', 'related_object', 'relatedObject', 'readAt', 'createdAt']
 
     def get_senderName(self, obj) -> str:
         if not obj.sender:

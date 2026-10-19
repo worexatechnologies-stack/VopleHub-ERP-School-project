@@ -13,8 +13,10 @@ import {
   FileText,
   Filter,
   GraduationCap,
+  Image as ImageIcon,
   Layers,
   Loader2,
+  Maximize2,
   Megaphone,
   MessageSquare,
   Paperclip,
@@ -22,6 +24,7 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Smile,
   Trash2,
   UserCheck,
   UserX,
@@ -33,7 +36,7 @@ import {
   X,
 } from 'lucide-react';
 import { chatSocket, type ChatSocketStatus } from '../services/chatSocket';
-import type { AuthUser } from '../utils/auth';
+import { ACCESS_TOKEN_STORAGE_KEY, type AuthUser } from '../utils/auth';
 import type { Student } from '../types';
 import { store } from '../store';
 import { chatApi } from '../store/api/chatApi';
@@ -73,6 +76,11 @@ interface ApiParticipant {
   role: string;
   email: string;
   isOnline: boolean;
+  assignedSections?: string[];
+  subjects?: string[];
+  childMappings?: TeacherChildInfo[];
+  students?: ChatStudentInfo[];
+  studentSummary?: string;
 }
 
 interface ApiConversation {
@@ -82,6 +90,9 @@ interface ApiConversation {
     id: number;
     body: string;
     createdAt: string;
+    isMe?: boolean;
+    readAt?: string | null;
+    attachments?: Array<{ id: string; originalName: string; contentType?: string; fileSize?: number; downloadUrl?: string }>;
   } | null;
   unreadCount: number;
   updatedAt: string;
@@ -301,25 +312,254 @@ function getTeacherChildMappings(teacher: TeacherRecord, students: Student[]): T
   return mappings;
 }
 
+/** Normalize attachment url to prevent cross-origin localhost:8000 / IP mismatches */
+export function normalizeAttachmentUrl(url: string): string {
+  if (!url) return '';
+  return url.replace(/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i, '');
+}
+
+/** Securely download a file using Bearer token without exposing JWT in URL */
+export async function downloadSecureAttachment(url: string, filename: string) {
+  try {
+    if (url.startsWith('blob:')) {
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename || 'download';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    }
+    const cleanUrl = normalizeAttachmentUrl(url);
+    const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
+    const fetchUrl = token && !cleanUrl.includes('token=')
+      ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+      : cleanUrl;
+
+    const res = await fetch(fetchUrl, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`Download failed with status ${res.status}`);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = filename || 'download';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  } catch (err) {
+    console.error('Error downloading attachment:', err);
+    const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
+    const cleanUrl = normalizeAttachmentUrl(url);
+    const fallbackUrl = token ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : cleanUrl;
+    window.open(fallbackUrl, '_blank');
+  }
+}
+
+/** Formats a date string into chat date separator text: TODAY, YESTERDAY, or date */
+function formatChatDate(dateStr: string): string {
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '';
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const diffDays = Math.round((today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) return 'TODAY';
+    if (diffDays === 1) return 'YESTERDAY';
+    if (diffDays < 7) {
+      return d.toLocaleDateString(undefined, { weekday: 'long' }).toUpperCase();
+    }
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+  } catch {
+    return '';
+  }
+}
+
+/** Formats a timestamp for chat list items: "10:45 AM", "Yesterday", or "Oct 15" */
+function formatConversationTime(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '';
+    const now = new Date();
+    const isToday =
+      d.getDate() === now.getDate() &&
+      d.getMonth() === now.getMonth() &&
+      d.getFullYear() === now.getFullYear();
+    if (isToday) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday =
+      d.getDate() === yesterday.getDate() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getFullYear() === yesterday.getFullYear();
+    if (isYesterday) {
+      return 'Yesterday';
+    }
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
+interface ChatImagePreviewProps {
+  url: string;
+  originalName: string;
+  fileSize: number;
+  timeStr: string;
+  isMe: boolean;
+  readAt: string | null;
+  onOpenLightbox: (imageUrl: string, title: string) => void;
+}
+
+function ChatImagePreview({
+  url,
+  originalName,
+  fileSize,
+  timeStr,
+  isMe,
+  readAt,
+  onOpenLightbox,
+}: ChatImagePreviewProps) {
+  const [blobUrl, setBlobUrl] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [hasError, setHasError] = useState<boolean>(false);
+
+  const cleanUrl = useMemo(() => normalizeAttachmentUrl(url), [url]);
+
+  const fetchImage = useCallback(async () => {
+    if (!cleanUrl) return;
+    setIsLoading(true);
+    setHasError(false);
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
+      const fetchUrl = token && !cleanUrl.includes('token=')
+        ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+        : cleanUrl;
+
+      const res = await fetch(fetchUrl, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (!res.ok) {
+        throw new Error(`Failed to load image: ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      setBlobUrl(objectUrl);
+      setIsLoading(false);
+    } catch (err) {
+      console.warn('Authenticated image fetch error:', err);
+      const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
+      const fallbackUrl = token ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : cleanUrl;
+      setBlobUrl(fallbackUrl);
+      setIsLoading(false);
+    }
+  }, [cleanUrl]);
+
+  useEffect(() => {
+    let active = true;
+    void fetchImage();
+    return () => {
+      active = false;
+      if (blobUrl && blobUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    };
+  }, [fetchImage]);
+
+  return (
+    <div className="relative group overflow-hidden rounded-xl bg-black/5 w-[240px] sm:w-[280px] max-w-full my-0.5 select-none">
+      {isLoading ? (
+        <div className="flex flex-col items-center justify-center h-44 w-full bg-slate-200/60 animate-pulse rounded-xl">
+          <ImageIcon className="w-8 h-8 text-slate-400 animate-bounce" />
+          <span className="text-[10px] text-slate-500 font-bold mt-2">Loading photo…</span>
+        </div>
+      ) : hasError ? (
+        <div className="flex flex-col items-center justify-center p-4 h-36 w-full bg-rose-50/70 rounded-xl text-center">
+          <AlertTriangle className="w-6 h-6 text-rose-500 mb-1" />
+          <p className="text-[11px] font-bold text-rose-700">Image failed to open</p>
+          <button
+            type="button"
+            onClick={fetchImage}
+            className="mt-2 inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-extrabold bg-white border border-rose-200 text-rose-700 rounded-lg shadow-2xs hover:bg-rose-50 cursor-pointer"
+          >
+            <RefreshCw className="w-3 h-3" /> Retry
+          </button>
+        </div>
+      ) : (
+        <div
+          className="relative cursor-pointer overflow-hidden rounded-xl"
+          onClick={() => onOpenLightbox(blobUrl, originalName)}
+        >
+          <img
+            src={blobUrl}
+            alt={originalName}
+            onError={() => setHasError(true)}
+            className="w-full h-[190px] sm:h-[230px] object-cover rounded-xl transition duration-300 group-hover:scale-[1.02]"
+          />
+
+          {/* WhatsApp Hover Zoom Overlay */}
+          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+            <span className="bg-black/60 text-white rounded-full p-2.5 backdrop-blur-xs shadow-lg">
+              <Maximize2 className="w-5 h-5" />
+            </span>
+          </div>
+
+          {/* WhatsApp Overlaid Translucent Bottom-Right Time & Status Pill */}
+          <div className="absolute bottom-1.5 right-1.5 flex items-center gap-1 bg-black/60 backdrop-blur-xs text-white text-[10px] font-medium px-2 py-0.5 rounded-full shadow-xs">
+            <span>{timeStr}</span>
+            {isMe && (
+              readAt ? (
+                <CheckCheck className="w-3.5 h-3.5 text-[#53bdeb]" />
+              ) : (
+                <CheckCheck className="w-3.5 h-3.5 text-white/80" />
+              )
+            )}
+          </div>
+
+          {/* Quick Download Button Top-Right on Hover */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void downloadSecureAttachment(blobUrl || url, originalName);
+            }}
+            title="Download image"
+            className="absolute top-1.5 right-1.5 p-1.5 bg-black/60 hover:bg-black/80 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-md cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CommunicationModule({ user, isGlass = false, onNavigateToTab }: CommunicationModuleProps) {
   const resolvedRole = user?.role || 'School Admin';
   const copy = roleCopy[resolvedRole] || roleCopy['School Admin'];
 
   // ── Role-Specific Allowed Sub-Tabs ──────────────────────────────────────────
-  const allowedSubTabs = useMemo<Array<'requests' | 'broadcasts' | 'chats'>>(() => {
+  const allowedSubTabs = useMemo<Array<'chats' | 'requests' | 'broadcasts'>>(() => {
     if (resolvedRole === 'Student') {
-      return ['requests'];
+      return ['chats', 'requests'];
     }
     if (resolvedRole === 'Parent') {
       return ['chats'];
     }
-    return ['requests', 'broadcasts', 'chats'];
+    return ['chats', 'requests', 'broadcasts'];
   }, [resolvedRole]);
 
-  // ── Main Sub-Tab State (Parent is locked to 'chats' only) ───────────────────
-  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'broadcasts' | 'chats'>(
-    resolvedRole === 'Parent' ? 'chats' : 'requests'
-  );
+  // ── Main Sub-Tab State (Default to 'chats' for WhatsApp Chat Desk) ───────────
+  const [activeSubTab, setActiveSubTab] = useState<'chats' | 'requests' | 'broadcasts'>('chats');
 
   useEffect(() => {
     if (resolvedRole === 'Parent') {
@@ -441,6 +681,30 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   const [socketStatus, setSocketStatus] = useState<ChatSocketStatus>('disconnected');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [highlightedMessageText, setHighlightedMessageText] = useState<string | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; title?: string } | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const highlightedMessageRef = useRef<HTMLDivElement | null>(null);
+  const pendingChatRef = useRef<{
+    conversationId?: number;
+    senderId?: number;
+    senderName?: string;
+    highlightMessageText?: string;
+  } | null>(null);
+
+  const getSecureDownloadUrl = useCallback((url: string) => {
+    if (!url) return '';
+    const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
+    return token ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : url;
+  }, []);
+
+  const isImageAttachment = (att: { originalName: string; contentType?: string }) => {
+    return (
+      (att.contentType && att.contentType.startsWith('image/')) ||
+      /\.(png|jpe?g|gif|webp|svg)$/i.test(att.originalName)
+    );
+  };
 
   // ── Real-Time WebSocket Connection & Event Synchronization ───────────────
   useEffect(() => {
@@ -544,10 +808,10 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   }, []);
 
   // Load Contacts list from role-scoped endpoint
-  const loadContacts = useCallback(async () => {
+  const loadContacts = useCallback(async (searchQuery?: string) => {
     try {
       const data = await store
-        .dispatch(chatApi.endpoints.getChatContacts.initiate(undefined))
+        .dispatch(chatApi.endpoints.getChatContacts.initiate(searchQuery ? { search: searchQuery } : undefined))
         .unwrap();
       if (Array.isArray(data)) {
         setBackendContacts(data as any);
@@ -581,7 +845,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     }
   }, []);
 
-  // Poll notifications, contacts & conversations periodically
+  // Poll notifications & conversations periodically (do not poll contacts every 3s to prevent lag)
   useEffect(() => {
     void loadNotifications(true);
     void loadContacts();
@@ -590,7 +854,6 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
 
     const interval = window.setInterval(() => {
       void loadNotifications();
-      void loadContacts();
       void loadConversations();
       if (selectedConversationId) {
         void loadMessagesForConversation(selectedConversationId);
@@ -730,17 +993,33 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   }, [backendContacts, contactsList]);
 
   // Handle Contact Selection
-  const handleSelectContact = async (contact: ChatContact) => {
+  const handleSelectContact = async (contact: ChatContact, highlightText?: string) => {
     setSelectedContact(contact);
     setChatLoading(true);
     setChatMessages([]);
+    if (highlightText) {
+      setHighlightedMessageText(highlightText);
+      setTimeout(() => setHighlightedMessageText(null), 6000);
+    }
 
     try {
       const body: Record<string, any> = {};
-      if (typeof contact.userId === 'number') {
-        body.targetUserId = contact.userId;
-      } else if (typeof contact.id === 'number') {
-        body.teacherId = contact.id;
+      const uid = contact.userId != null ? Number(contact.userId) : Number(contact.id);
+      if (!isNaN(uid) && uid > 0) {
+        if (contact.role === 'Teacher' && !contact.userId && contact.id) {
+          body.teacherId = Number(contact.id);
+        } else {
+          body.targetUserId = uid;
+        }
+      } else if (contact.id === 'admin-office' || contact.isOfficeDesk) {
+        body.targetUserId = 'admin-office';
+      }
+
+      if (contact.childMappings && contact.childMappings.length > 0 && contact.childMappings[0].studentId) {
+        const sId = Number(contact.childMappings[0].studentId);
+        if (!isNaN(sId) && sId > 0) {
+          body.studentId = sId;
+        }
       }
 
       const conv = await store.dispatch(chatApi.endpoints.startConversation.initiate(body)).unwrap();
@@ -760,11 +1039,198 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     }
   };
 
+  // Handle Conversation Selection (Immediate Unread Badge Reset)
+  const handleSelectConversation = useCallback(
+    async (conv: ApiConversation) => {
+      // 1. Optimistically clear unread count badge immediately so it disappears upon click
+      setConversations((prev) =>
+        prev.map((c) => (c.id === conv.id ? { ...c, unreadCount: 0 } : c))
+      );
+
+      setSelectedConversationId(conv.id);
+      setSelectedContact({
+        id: conv.otherParticipant.id,
+        userId: conv.otherParticipant.id,
+        name: conv.otherParticipant.name,
+        role: conv.otherParticipant.role,
+        email: conv.otherParticipant.email,
+        isOnline: conv.otherParticipant.isOnline,
+        assignedSections: conv.otherParticipant.assignedSections,
+        subjects: conv.otherParticipant.subjects,
+        childMappings: conv.otherParticipant.childMappings,
+        students: conv.otherParticipant.students,
+        studentSummary: conv.otherParticipant.studentSummary,
+      });
+      setChatLoading(true);
+      setChatMessages([]);
+
+      try {
+        chatSocket.joinConversation(conv.id);
+        chatSocket.markConversationRead(conv.id);
+        const msgs = await store.dispatch(chatApi.endpoints.getMessages.initiate(conv.id)).unwrap();
+        setChatMessages(msgs as any);
+      } catch {
+        // silent
+      } finally {
+        setChatLoading(false);
+      }
+    },
+    []
+  );
+
+  // Debounced Contact Search with Backend
   useEffect(() => {
-    if (!selectedContact && effectiveContacts.length > 0 && activeSubTab === 'chats') {
+    const q = contactSearch.trim();
+    if (!q) return;
+    const timer = setTimeout(() => {
+      void loadContacts(q);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [contactSearch, loadContacts]);
+
+  const openChatWith = useCallback(
+    async (params: {
+      conversationId?: number;
+      senderId?: number;
+      senderName?: string;
+      highlightMessageText?: string;
+    }) => {
+      setActiveSubTab('chats');
+
+      if (params.highlightMessageText) {
+        setHighlightedMessageText(params.highlightMessageText);
+        setTimeout(() => setHighlightedMessageText(null), 6000);
+      }
+
+      // 1. Try to match contact in effectiveContacts by senderId or name
+      let contact = effectiveContacts.find(
+        (c) =>
+          (params.senderId && (c.userId === params.senderId || c.id === params.senderId)) ||
+          (params.senderName &&
+            (c.name.toLowerCase() === params.senderName.toLowerCase() ||
+              c.name.toLowerCase().includes(params.senderName.toLowerCase()) ||
+              params.senderName.toLowerCase().includes(c.name.toLowerCase())))
+      );
+
+      // 2. If not found in effectiveContacts, check existing conversations
+      if (!contact && conversations.length > 0) {
+        const conv = conversations.find(
+          (c) =>
+            (params.conversationId && c.id === params.conversationId) ||
+            (params.senderId && c.otherParticipant?.id === params.senderId) ||
+            (params.senderName &&
+              c.otherParticipant?.name &&
+              (c.otherParticipant.name.toLowerCase() === params.senderName.toLowerCase() ||
+                c.otherParticipant.name.toLowerCase().includes(params.senderName.toLowerCase()) ||
+                params.senderName.toLowerCase().includes(c.otherParticipant.name.toLowerCase())))
+        );
+        if (conv?.otherParticipant) {
+          contact = {
+            id: conv.otherParticipant.id,
+            userId: conv.otherParticipant.id,
+            name: conv.otherParticipant.name,
+            role: conv.otherParticipant.role,
+            email: conv.otherParticipant.email,
+            isOnline: conv.otherParticipant.isOnline,
+          };
+        }
+      }
+
+      // 3. If contact found, select it
+      if (contact) {
+        pendingChatRef.current = null;
+        await handleSelectContact(contact, params.highlightMessageText);
+        return;
+      }
+
+      // 4. If conversationId is known directly
+      if (params.conversationId) {
+        pendingChatRef.current = null;
+        setSelectedConversationId(params.conversationId);
+        chatSocket.joinConversation(params.conversationId);
+        chatSocket.markConversationRead(params.conversationId);
+        setChatLoading(true);
+        try {
+          const msgs = await store
+            .dispatch(chatApi.endpoints.getMessages.initiate(params.conversationId))
+            .unwrap();
+          setChatMessages(msgs as any);
+        } catch {
+          // ignore
+        } finally {
+          setChatLoading(false);
+        }
+        return;
+      }
+
+      // If contacts haven't loaded yet, store as pending
+      pendingChatRef.current = params;
+    },
+    [effectiveContacts, conversations]
+  );
+
+  const openChatFromNotification = (n: ApiNotification) => {
+    void markRead(n.id);
+    const rel = (n as any).relatedObject || (n as any).related_object;
+    let sName = n.senderName;
+    if ((!sName || sName === 'School office') && n.title && n.title.toLowerCase().startsWith('new message from ')) {
+      sName = n.title.slice(17).trim();
+    }
+    void openChatWith({
+      conversationId: rel?.conversationId,
+      senderId: n.senderId || rel?.senderId,
+      senderName: sName,
+      highlightMessageText: n.body,
+    });
+  };
+
+  // Listen for open-chat event and process pending_open_chat from sessionStorage
+  useEffect(() => {
+    const handleOpenChatEvent = (e: any) => {
+      const detail = e.detail;
+      if (detail) {
+        void openChatWith(detail);
+      }
+    };
+
+    window.addEventListener('open-chat', handleOpenChatEvent);
+
+    try {
+      const pending = sessionStorage.getItem('pending_open_chat');
+      if (pending) {
+        sessionStorage.removeItem('pending_open_chat');
+        const parsed = JSON.parse(pending);
+        if (parsed) {
+          void openChatWith(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return () => {
+      window.removeEventListener('open-chat', handleOpenChatEvent);
+    };
+  }, [openChatWith]);
+
+  useEffect(() => {
+    if (pendingChatRef.current && (effectiveContacts.length > 0 || conversations.length > 0)) {
+      const p = pendingChatRef.current;
+      pendingChatRef.current = null;
+      void openChatWith(p);
+    } else if (!selectedConversationId && conversations.length > 0 && activeSubTab === 'chats' && !pendingChatRef.current) {
+      void handleSelectConversation(conversations[0]);
+    } else if (!selectedContact && !selectedConversationId && effectiveContacts.length > 0 && activeSubTab === 'chats' && !pendingChatRef.current && conversations.length === 0) {
       void handleSelectContact(effectiveContacts[0]);
     }
-  }, [effectiveContacts.length, activeSubTab]);
+  }, [effectiveContacts.length, conversations, activeSubTab, openChatWith, selectedConversationId, selectedContact, handleSelectConversation]);
+
+  // Scroll to highlighted message when loaded
+  useEffect(() => {
+    if (highlightedMessageText && highlightedMessageRef.current) {
+      highlightedMessageRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [highlightedMessageText, chatMessages]);
 
   // Mark Notification Read
   const markRead = async (id: number) => {
@@ -950,6 +1416,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     const filesToSend = [...selectedFiles];
     setChatMessage('');
     setSelectedFiles([]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (imageInputRef.current) imageInputRef.current.value = '';
 
     const idempotencyKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `msg-${Date.now()}`;
 
@@ -972,8 +1440,9 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         return [...prev, newMsg as any];
       });
       void loadConversations();
-    } catch {
-      emitNotification({ title: 'Message failed', message: 'Could not deliver chat message.', tone: 'danger', source: 'communication' });
+    } catch (err: any) {
+      const detail = err?.data?.detail || err?.data?.message || (err instanceof Error ? err.message : 'Could not deliver chat message.');
+      emitNotification({ title: 'Message failed', message: detail, tone: 'danger', source: 'communication' });
     } finally {
       setIsSendingChat(false);
     }
@@ -994,6 +1463,9 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
 
   const unreadCount = notifications.filter((n) => !n.readAt).length;
   const pendingRequestsCount = notifications.filter((n) => isLeaveRequest(n) && (n.requestStatus || n.status || 'Pending') === 'Pending').length;
+  const totalChatUnreadCount = useMemo(() => {
+    return conversations.reduce((acc, c) => acc + (c.unreadCount || 0), 0);
+  }, [conversations]);
 
   // Admin available section tags
   const adminAvailableSections = useMemo(() => {
@@ -1151,6 +1623,20 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     resolvedRole,
   ]);
 
+  const matchingConversations = useMemo(() => {
+    const q = contactSearch.toLowerCase().trim();
+    if (!q) return conversations;
+    return conversations.filter((c) => {
+      const nameMatch = c.otherParticipant?.name?.toLowerCase().includes(q);
+      const bodyMatch = c.lastMessage?.body?.toLowerCase().includes(q);
+      const roleMatch = c.otherParticipant?.role?.toLowerCase().includes(q);
+      const studentMatch = (c.otherParticipant?.students || []).some(
+        (s: ChatStudentInfo) => s.name.toLowerCase().includes(q) || String(s.rollNo).includes(q)
+      );
+      return nameMatch || bodyMatch || roleMatch || studentMatch;
+    });
+  }, [conversations, contactSearch]);
+
   // Card Visual Differentiation Helper
   const getNotificationCardStyle = (n: ApiNotification) => {
     const cat = (n.category || '').toLowerCase();
@@ -1303,14 +1789,6 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                 <BookOpen className="h-4 w-4 text-blue-600" />
                 Class Homework →
               </button>
-              <button
-                type="button"
-                onClick={() => onNavigateToTab('notifications')}
-                className="flex items-center gap-2 rounded-2xl bg-white/15 border border-white/20 px-4 py-3 text-xs font-extrabold text-white shadow-xs transition hover:bg-white/25 active:scale-95 cursor-pointer"
-              >
-                <Bell className="h-4 w-4 text-rose-200" />
-                School Notices Desk →
-              </button>
             </div>
           )}
         </div>
@@ -1320,10 +1798,28 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       {allowedSubTabs.length > 1 && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
           <div className="flex flex-wrap items-center gap-2">
+            {allowedSubTabs.includes('chats') && (
+              <button
+                onClick={() => setActiveSubTab('chats')}
+                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition cursor-pointer ${activeSubTab === 'chats'
+                    ? 'bg-[#00a884] text-white shadow-md'
+                    : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+              >
+                <MessageSquare className="h-4 w-4" />
+                Direct Chat
+                {totalChatUnreadCount > 0 && (
+                  <span className="ml-1 rounded-full bg-[#25D366] px-2 py-0.5 text-[10px] font-black text-white shadow-xs">
+                    {totalChatUnreadCount}
+                  </span>
+                )}
+              </button>
+            )}
+
             {allowedSubTabs.includes('requests') && (
               <button
                 onClick={() => setActiveSubTab('requests')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition ${activeSubTab === 'requests'
+                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition cursor-pointer ${activeSubTab === 'requests'
                     ? 'bg-indigo-600 text-white shadow-md'
                     : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
@@ -1331,9 +1827,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                 <Bell className="h-4 w-4" />
                 {resolvedRole === 'Student'
                   ? 'Class Notices & Announcements'
-                  : resolvedRole === 'Teacher'
-                    ? 'Notifications & Staff Requests'
-                    : 'Notifications & Requests'}
+                  : 'Community Notices & Requests'}
                 {pendingRequestsCount > 0 && (
                   <span className="ml-1 rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-black text-white">
                     {pendingRequestsCount} Pending
@@ -1350,26 +1844,13 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
             {allowedSubTabs.includes('broadcasts') && (
               <button
                 onClick={() => setActiveSubTab('broadcasts')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition ${activeSubTab === 'broadcasts'
+                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition cursor-pointer ${activeSubTab === 'broadcasts'
                     ? 'bg-indigo-600 text-white shadow-md'
                     : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
               >
                 <Megaphone className="h-4 w-4" />
-                Broadcast Desk
-              </button>
-            )}
-
-            {allowedSubTabs.includes('chats') && (
-              <button
-                onClick={() => setActiveSubTab('chats')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition ${activeSubTab === 'chats'
-                    ? 'bg-indigo-600 text-white shadow-md'
-                    : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-              >
-                <MessageSquare className="h-4 w-4" />
-                {resolvedRole === 'Parent' ? 'Teacher 1-on-1 Chat' : resolvedRole === 'School Admin' || resolvedRole === 'Super Admin' ? 'Teacher Direct Chat' : 'Private 1-on-1 Chat'}
+                Community Broadcast Desk
               </button>
             )}
           </div>
@@ -1556,12 +2037,28 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
               filteredNotifications.map((n) => {
                 const style = getNotificationCardStyle(n);
                 const isReq = isLeaveRequest(n);
+                const isChatNotif =
+                  n.channel === 'chat' ||
+                  n.channel === 'CHAT' ||
+                  n.category === 'Message' ||
+                  (n.category || '').toLowerCase().includes('chat') ||
+                  (n.title || '').toLowerCase().startsWith('new message from');
 
                 return (
                   <div
                     key={n.id}
-                    className={`rounded-2xl border p-4 transition-all duration-200 space-y-3 ${style.border} ${!n.readAt ? 'ring-1 ring-indigo-500/20' : ''
-                      }`}
+                    onClick={() => {
+                      if (isChatNotif) {
+                        openChatFromNotification(n);
+                      }
+                    }}
+                    className={`rounded-2xl border p-4 transition-all duration-200 space-y-3 ${style.border} ${
+                      !n.readAt ? 'ring-1 ring-indigo-500/20' : ''
+                    } ${
+                      isChatNotif
+                        ? 'cursor-pointer hover:border-indigo-400 hover:shadow-md hover:bg-indigo-50/20 active:scale-[0.99]'
+                        : ''
+                    }`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-start gap-3">
@@ -1586,7 +2083,10 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         </span>
                         {!n.readAt && (
                           <button
-                            onClick={() => void markRead(n.id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void markRead(n.id);
+                            }}
                             className="rounded-lg bg-indigo-50 px-2 py-1 text-[10px] font-bold text-indigo-600 hover:bg-indigo-100 cursor-pointer"
                           >
                             Mark Read
@@ -1594,6 +2094,26 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         )}
                       </div>
                     </div>
+
+                    {/* Direct Private Chat Action */}
+                    {isChatNotif && (
+                      <div className="flex items-center justify-between border-t pt-2.5 mt-1 border-indigo-100">
+                        <span className="text-[11px] font-bold text-indigo-700 flex items-center gap-1.5">
+                          <MessageSquare className="h-3.5 w-3.5 text-indigo-600" />
+                          Direct Private Message
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openChatFromNotification(n);
+                          }}
+                          className="flex items-center gap-1 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 px-3.5 py-1.5 rounded-xl transition cursor-pointer shadow-xs active:scale-95"
+                        >
+                          Open Chat & View Message →
+                        </button>
+                      </div>
+                    )}
 
                     {/* Direct Homework Shortcut Action */}
                     {(n.category === 'Homework' || (n.category || '').toLowerCase().includes('homework') || (n.title || '').toLowerCase().includes('homework')) && onNavigateToTab && (
@@ -2012,427 +2532,453 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       {/* SUB-TAB 3: ISOLATED PRIVATE 1-ON-1 CHAT (TEACHER, PARENT, ADMIN ONLY)        */}
       {/* ─────────────────────────────────────────────────────────────────────────── */}
       {activeSubTab === 'chats' && allowedSubTabs.includes('chats') && (
-        <div className={`grid grid-cols-1 md:grid-cols-3 rounded-3xl border overflow-hidden ${surface}`}>
-          {/* Contacts Sidebar */}
-          <div className="border-r border-slate-200 p-4 space-y-3 bg-slate-50/50">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-xs font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-indigo-600" />
-                  {resolvedRole === 'Parent'
-                    ? "Children's Teachers"
-                    : resolvedRole === 'School Admin' || resolvedRole === 'Super Admin'
-                      ? 'Faculty Teachers'
-                      : 'Communications Desk'}
-                </h3>
-                <p className="text-[10px] text-slate-400 font-semibold">
-                  {resolvedRole === 'Parent'
-                    ? "Teachers assigned to your children's classes"
-                    : resolvedRole === 'School Admin' || resolvedRole === 'Super Admin'
-                      ? 'Differentiated by Class, Section & Subjects'
-                      : 'Office Desk & Parents of your students'}
-                </p>
-              </div>
-              <span className="text-[10px] font-bold text-indigo-700 font-mono bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">
-                {filteredContacts.length} Available
-              </span>
-            </div>
-
-            {/* 1. PARENT MULTI-CHILD FILTER TABS (When Parent has multiple sons / children) */}
-            {resolvedRole === 'Parent' && parentChildrenList.length > 1 && (
-              <div className="space-y-1.5 pt-1 bg-white/80 p-2.5 rounded-2xl border border-slate-200/80 shadow-2xs">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 flex items-center gap-1">
-                  <GraduationCap className="w-3 h-3 text-indigo-500" /> Filter Teachers by Child (Son / Daughter):
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setParentChildFilter('All')}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-bold transition cursor-pointer ${parentChildFilter === 'All'
-                        ? 'bg-indigo-600 text-white shadow-xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                  >
-                    <Users className="w-3.5 h-3.5" /> All Children ({parentChildrenList.length})
-                  </button>
-                  {parentChildrenList.map((child) => (
-                    <button
-                      key={child.id}
-                      type="button"
-                      onClick={() => setParentChildFilter(child.id)}
-                      className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-bold transition cursor-pointer ${parentChildFilter === child.id
-                          ? 'bg-emerald-600 text-white shadow-xs'
-                          : 'bg-slate-50 border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                    >
-                      <GraduationCap className="w-3.5 h-3.5" /> {child.name} ({child.classLabel})
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* 2. ADMIN CLASS & SECTION DIFFERENTIATION FILTER */}
-            {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && (
-              <div className="space-y-2 pt-1 bg-white/80 p-2.5 rounded-2xl border border-slate-200/80 shadow-2xs">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 flex items-center gap-1">
-                    <Filter className="w-3 h-3 text-indigo-500" /> Filter Faculty by Class & Section:
-                  </label>
-                  {(adminClassFilter !== 'All' || adminSectionFilter !== 'All') && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminClassFilter('All');
-                        setAdminSectionFilter('All');
-                      }}
-                      className="text-[10px] font-bold text-rose-600 hover:underline cursor-pointer"
-                    >
-                      Clear Filters
-                    </button>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-2 gap-1.5">
-                  <select
-                    value={adminClassFilter}
-                    onChange={(e) => setAdminClassFilter(e.target.value)}
-                    className={`w-full rounded-xl border px-2 py-1.5 text-xs font-bold ${inputClass}`}
-                  >
-                    <option value="All">All Classes</option>
-                    {academicClasses.map((c) => (
-                      <option key={c.id} value={c.name}>
-                        {c.name.startsWith('Class') ? c.name : `Class ${c.name}`}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={adminSectionFilter}
-                    onChange={(e) => setAdminSectionFilter(e.target.value)}
-                    className={`w-full rounded-xl border px-2 py-1.5 text-xs font-bold ${inputClass}`}
-                  >
-                    <option value="All">All Sections</option>
-                    {adminAvailableSections.map((sec) => (
-                      <option key={sec} value={sec}>
-                        Section {sec}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            )}
-
-            {/* 3. TEACHER AUDIENCE & PARENT STUDENT DIFFERENTIATION FILTER */}
-            {resolvedRole === 'Teacher' && (
-              <div className="space-y-2 pt-1 bg-white/80 p-2.5 rounded-2xl border border-slate-200/80 shadow-2xs">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 flex items-center gap-1">
-                  <Filter className="w-3 h-3 text-indigo-500" /> Audience Filter:
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setTeacherAudienceFilter('All')}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-bold transition cursor-pointer ${teacherAudienceFilter === 'All'
-                        ? 'bg-indigo-600 text-white shadow-xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                  >
-                    <Users className="w-3.5 h-3.5" /> All Contacts
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTeacherAudienceFilter('Admin')}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-bold transition cursor-pointer ${teacherAudienceFilter === 'Admin'
-                        ? 'bg-indigo-600 text-white shadow-xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                  >
-                    <Building2 className="w-3.5 h-3.5" /> School Admin
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTeacherAudienceFilter('Parents')}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-bold transition cursor-pointer ${teacherAudienceFilter === 'Parents'
-                        ? 'bg-emerald-600 text-white shadow-xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                  >
-                    <UserCheck className="w-3.5 h-3.5" /> Parents of Students
-                  </button>
-                </div>
-
-                {teacherAudienceFilter !== 'Admin' && teacherAvailableClasses.length > 0 && (
-                  <div className="pt-1">
-                    <label className="block text-[10px] font-bold text-slate-400 mb-1">
-                      Filter Parents by Student Class:
-                    </label>
-                    <select
-                      value={teacherClassFilter}
-                      onChange={(e) => setTeacherClassFilter(e.target.value)}
-                      className={`w-full rounded-xl border px-2 py-1.5 text-xs font-bold ${inputClass}`}
-                    >
-                      <option value="All">All Student Classes</option>
-                      {teacherAvailableClasses.map((cls) => (
-                        <option key={cls} value={cls}>
-                          {cls}
-                        </option>
-                      ))}
-                    </select>
+        <div className={`grid grid-cols-1 md:grid-cols-3 rounded-3xl border border-slate-200 shadow-sm overflow-hidden h-[calc(100vh-140px)] min-h-[580px] max-h-[840px] ${surface}`}>
+          {/* WhatsApp Contacts / Recent Chats Sidebar */}
+          <div className="flex flex-col h-full min-h-0 border-r border-[#e9edef] bg-white overflow-hidden">
+            {/* Sidebar Top Search & Header */}
+            <div className="p-3 border-b border-[#f0f2f5] bg-[#f0f2f5]/80 shrink-0 space-y-2 select-none">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="grid h-7 w-7 place-items-center rounded-lg bg-[#00a884] text-white">
+                    <MessageSquare className="w-4 h-4" />
                   </div>
+                  <div>
+                    <h3 className="text-xs font-black tracking-tight text-slate-800 leading-none">
+                      Direct Chats
+                    </h3>
+                    <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
+                      {contactSearch.trim() ? 'Searching contacts…' : 'Recent active conversations'}
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-extrabold text-[#008069] bg-[#e7f8f5] border border-[#c3ede6] px-2.5 py-0.5 rounded-full">
+                  {contactSearch.trim() ? `${filteredContacts.length} Found` : `${conversations.length} Active`}
+                </span>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder={
+                    resolvedRole === 'Parent'
+                      ? 'Search teacher, subject, child…'
+                      : resolvedRole === 'Teacher'
+                        ? 'Search parent, student name, roll #, class…'
+                        : 'Search teachers, parents, class, roll #…'
+                  }
+                  value={contactSearch}
+                  onChange={(e) => setContactSearch(e.target.value)}
+                  className={`w-full rounded-xl border pl-9 pr-8 py-2 text-xs bg-white border-slate-200 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#00a884]`}
+                />
+                {contactSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setContactSearch('')}
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 )}
               </div>
-            )}
 
-            {/* Search Input */}
-            <div className="relative">
-              <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
-              <input
-                type="text"
-                placeholder={
-                  resolvedRole === 'Parent'
-                    ? 'Search teacher, child, class, section, subject…'
-                    : resolvedRole === 'Teacher'
-                      ? 'Search parent, student name, roll #, class, section…'
-                      : 'Search teacher name, class, section, or subject…'
-                }
-                value={contactSearch}
-                onChange={(e) => setContactSearch(e.target.value)}
-                className={`w-full rounded-xl border pl-9 pr-3 py-1.5 text-xs ${inputClass}`}
-              />
+              {/* Search Refinement Filters (Only shown when searching) */}
+              {contactSearch.trim() !== '' && (
+                <div className="space-y-1.5 pt-1">
+                  {/* Parent Multi-Child filter */}
+                  {resolvedRole === 'Parent' && parentChildrenList.length > 1 && (
+                    <div className="flex flex-wrap gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setParentChildFilter('All')}
+                        className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
+                          parentChildFilter === 'All'
+                            ? 'bg-[#00a884] text-white'
+                            : 'bg-white border border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        All Children
+                      </button>
+                      {parentChildrenList.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setParentChildFilter(c.id)}
+                          className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
+                            parentChildFilter === c.id
+                              ? 'bg-[#00a884] text-white'
+                              : 'bg-white border border-slate-200 text-slate-600'
+                          }`}
+                        >
+                          {c.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Admin Class & Section filter */}
+                  {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && (
+                    <div className="grid grid-cols-2 gap-1">
+                      <select
+                        value={adminClassFilter}
+                        onChange={(e) => setAdminClassFilter(e.target.value)}
+                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold"
+                      >
+                        <option value="All">All Classes</option>
+                        {academicClasses.map((c) => (
+                          <option key={c.id} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={adminSectionFilter}
+                        onChange={(e) => setAdminSectionFilter(e.target.value)}
+                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold"
+                      >
+                        <option value="All">All Sections</option>
+                        {adminAvailableSections.map((sec) => (
+                          <option key={sec} value={sec}>
+                            Sec {sec}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Teacher Audience Filter */}
+                  {resolvedRole === 'Teacher' && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setTeacherAudienceFilter('All')}
+                        className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
+                          teacherAudienceFilter === 'All'
+                            ? 'bg-[#00a884] text-white'
+                            : 'bg-white border border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTeacherAudienceFilter('Admin')}
+                        className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
+                          teacherAudienceFilter === 'Admin'
+                            ? 'bg-[#00a884] text-white'
+                            : 'bg-white border border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        Admin Desk
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTeacherAudienceFilter('Parents')}
+                        className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
+                          teacherAudienceFilter === 'Parents'
+                            ? 'bg-[#00a884] text-white'
+                            : 'bg-white border border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        Parents
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Contacts List */}
-            <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
-              {filteredContacts.length === 0 ? (
-                <div className="p-6 text-center text-xs text-slate-400 bg-white rounded-2xl border border-slate-100 space-y-1">
-                  <Users className="w-8 h-8 text-slate-300 mx-auto" />
-                  <p className="font-bold text-slate-600">
-                    {resolvedRole === 'Parent'
-                      ? 'No teachers assigned yet to your children.'
-                      : resolvedRole === 'Teacher'
-                        ? 'No contacts match your filter.'
-                        : 'No faculty teachers match your filter.'}
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    {resolvedRole === 'Parent'
-                      ? 'Once teachers are assigned to your child’s class in Academic Setup, they will appear here.'
-                      : 'Try adjusting your class/section filter or search query.'}
-                  </p>
-                </div>
-              ) : (
-                filteredContacts.map((c) => {
-                  const isSelected = selectedContact?.name === c.name || (selectedContact?.userId && selectedContact.userId === c.userId);
-                  const isOnline = c.isOnline ?? false;
-                  const isParent = c.role === 'Parent';
-                  const isAdminOffice = c.isOfficeDesk || c.role === 'School Admin' || c.role === 'Super Admin';
+            {/* Conversation / Contact List Body */}
+            <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-[#f0f2f5]">
+              {contactSearch.trim() === '' ? (
+                // ── DEFAULT VIEW: ACTIVE CONVERSATIONS ONLY (Zero Lag, WhatsApp Style) ──
+                conversations.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-slate-400 bg-white space-y-2 mt-6">
+                    <div className="grid h-12 w-12 place-items-center rounded-full bg-slate-100 text-slate-400 mx-auto">
+                      <MessageSquare className="w-6 h-6" />
+                    </div>
+                    <p className="font-bold text-slate-700 text-sm">No Active Chats</p>
+                    <p className="text-[11px] text-slate-400 max-w-[200px] mx-auto">
+                      Search above for any teacher, parent, or office desk to start messaging.
+                    </p>
+                  </div>
+                ) : (
+                  conversations.map((conv) => {
+                    const isSelected = selectedConversationId === conv.id;
+                    const other = conv.otherParticipant;
+                    const isOnline = other?.isOnline ?? false;
+                    const unread = conv.unreadCount || 0;
+                    const lastMsg = conv.lastMessage;
+                    const timeLabel = formatConversationTime(lastMsg?.createdAt || conv.updatedAt);
+                    const isParent = other?.role === 'Parent';
+                    const isAdminOffice = other?.role === 'School Admin' || other?.role === 'Super Admin';
 
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => void handleSelectContact(c)}
-                      className={`w-full flex flex-col gap-2 rounded-2xl p-3 text-left transition cursor-pointer ${isSelected
-                          ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 ring-2 ring-indigo-400'
-                          : 'bg-white border border-slate-100 hover:bg-slate-100 text-slate-800'
+                    // Context subtitle
+                    let contextSubtitle = other?.role || 'Chat';
+                    if (isParent) {
+                      if (other.students && other.students.length > 0) {
+                        contextSubtitle = `Parent of ${other.students[0].name} (${other.students[0].className} - Sec ${other.students[0].section})`;
+                      } else if (other.studentSummary) {
+                        contextSubtitle = other.studentSummary;
+                      } else {
+                        contextSubtitle = 'Parent';
+                      }
+                    } else if (other?.role === 'Teacher') {
+                      if (other.childMappings && other.childMappings.length > 0) {
+                        contextSubtitle = `Teacher for ${other.childMappings[0].studentName} (${other.childMappings[0].className})`;
+                      } else if (other.assignedSections && other.assignedSections.length > 0) {
+                        contextSubtitle = `Teacher · ${other.assignedSections[0]}`;
+                      } else {
+                        contextSubtitle = 'Faculty Teacher';
+                      }
+                    } else if (isAdminOffice) {
+                      contextSubtitle = 'School Admin / Office Desk';
+                    }
+
+                    return (
+                      <button
+                        key={conv.id}
+                        type="button"
+                        onClick={() => void handleSelectConversation(conv)}
+                        className={`w-full flex items-center gap-3 px-3 py-3 text-left transition cursor-pointer select-none border-l-4 ${
+                          isSelected
+                            ? 'bg-[#f0f2f5] border-l-[#00a884]'
+                            : 'bg-white hover:bg-[#f5f6f6] border-l-transparent'
                         }`}
-                    >
-                      {/* Name, Role & Online Status */}
-                      <div className="flex items-center justify-between w-full">
-                        <div className="flex items-center gap-2.5">
-                          <div className="relative shrink-0">
-                            <div
-                              className={`grid h-9 w-9 place-items-center rounded-xl font-black text-xs ${isSelected
-                                  ? 'bg-indigo-500 text-white'
-                                  : isAdminOffice
-                                    ? 'bg-purple-100 text-purple-700'
-                                    : isParent
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : 'bg-indigo-50 text-indigo-700'
-                                }`}
-                            >
-                              {c.name.slice(0, 2).toUpperCase()}
-                            </div>
+                      >
+                        {/* Avatar */}
+                        <div className="relative shrink-0">
+                          <div
+                            className={`grid h-12 w-12 place-items-center rounded-full font-black text-sm text-white shadow-2xs ${
+                              isAdminOffice
+                                ? 'bg-purple-600'
+                                : isParent
+                                  ? 'bg-[#00a884]'
+                                  : 'bg-indigo-600'
+                            }`}
+                          >
+                            {(other?.name || 'User').slice(0, 2).toUpperCase()}
+                          </div>
+                          <span
+                            className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ring-2 ring-white ${
+                              isOnline ? 'bg-emerald-500' : 'bg-slate-300'
+                            }`}
+                          />
+                        </div>
+
+                        {/* Details */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1">
+                            <p className="text-xs font-bold text-[#111b21] truncate">
+                              {other?.name || 'Contact'}
+                            </p>
                             <span
-                              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-white ${isOnline ? 'bg-emerald-500' : 'bg-slate-300'
-                                }`}
-                            />
-                          </div>
-                          <div>
-                            <p className="text-xs font-black leading-tight flex items-center gap-1.5">
-                              {c.name}
-                            </p>
-                            <div className="flex items-center gap-1.5 mt-0.5">
-                              <span
-                                className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded-md ${isSelected
-                                    ? 'bg-indigo-700 text-indigo-100'
-                                    : isAdminOffice
-                                      ? 'bg-purple-100 text-purple-800'
-                                      : isParent
-                                        ? 'bg-emerald-100 text-emerald-800'
-                                        : 'bg-slate-100 text-slate-600'
-                                  }`}
-                              >
-                                {c.role}
-                              </span>
-                              <span className={`text-[10px] font-semibold ${isSelected ? 'text-indigo-100' : 'text-slate-400'}`}>
-                                · {isOnline ? 'Online' : 'Offline'}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                        <ChevronRight className={`h-4 w-4 shrink-0 ${isSelected ? 'text-white' : 'text-slate-300'}`} />
-                      </div>
-
-                      {/* 1. TEACHER VIEW: DIFFERENTIATE PARENT BASED ON STUDENT */}
-                      {resolvedRole === 'Teacher' && isParent && (
-                        <div className="space-y-1 w-full pt-1 border-t border-slate-100/60">
-                          {c.students && c.students.length > 0 ? (
-                            <div className="space-y-1">
-                              {c.students.map((st) => (
-                                <div
-                                  key={st.id}
-                                  className={`rounded-xl p-2 text-[11px] border ${isSelected
-                                      ? 'bg-indigo-700/80 border-indigo-400 text-white'
-                                      : 'bg-emerald-50/90 border-emerald-200 text-emerald-950'
-                                    }`}
-                                >
-                                  <div className="font-black flex items-center gap-1">
-                                    <GraduationCap className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-indigo-200' : 'text-emerald-700'}`} />
-                                    <span>
-                                      Parent of: <span className="underline decoration-emerald-400 font-extrabold">{st.name}</span>
-                                    </span>
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-1 text-[10px] font-bold mt-1">
-                                    <span className={`px-1.5 py-0.5 rounded-md ${isSelected ? 'bg-indigo-800 text-indigo-100' : 'bg-emerald-100 text-emerald-800'}`}>
-                                      {st.className.startsWith('Class') ? st.className : `Class ${st.className}`} - Sec {st.section}
-                                    </span>
-                                    {st.rollNo && (
-                                      <span className={`px-1.5 py-0.5 rounded-md ${isSelected ? 'bg-indigo-800 text-indigo-100' : 'bg-slate-200 text-slate-700'}`}>
-                                        Roll #{st.rollNo}
-                                      </span>
-                                    )}
-                                    {st.admissionNo && (
-                                      <span className={`px-1.5 py-0.5 rounded-md ${isSelected ? 'bg-indigo-800 text-indigo-100' : 'bg-slate-200 text-slate-700'}`}>
-                                        Adm #{st.admissionNo}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className={`text-[10px] font-semibold ${isSelected ? 'text-indigo-100' : 'text-slate-500'}`}>
-                              {c.studentSummary || 'Student Guardian'}
-                            </p>
-                          )}
-                        </div>
-                      )}
-
-                      {/* 2. PARENT VIEW: MENTION TEACHER'S SECTION, CLASS & SUBJECTS FOR EACH SON / CHILD */}
-                      {resolvedRole === 'Parent' && c.childMappings && c.childMappings.length > 0 && (
-                        <div className="space-y-1.5 w-full pt-1 border-t border-slate-100/60">
-                          {c.childMappings.map((cm, idx) => (
-                            <div
-                              key={idx}
-                              className={`rounded-xl p-2 text-[11px] space-y-1 border ${isSelected
-                                  ? 'bg-indigo-700/80 border-indigo-400 text-white'
-                                  : 'bg-emerald-50/90 border-emerald-200 text-emerald-950'
-                                }`}
+                              className={`text-[10px] shrink-0 ml-1 ${
+                                unread > 0 ? 'text-[#25D366] font-extrabold' : 'text-slate-400 font-medium'
+                              }`}
                             >
-                              <div className="font-extrabold flex items-center gap-1.5">
-                                <GraduationCap className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-indigo-200' : 'text-emerald-700'}`} />
-                                <span>
-                                  Teacher for <span className="underline decoration-emerald-400 font-black">{cm.studentName}</span>
-                                </span>
-                              </div>
-                              <div className="flex flex-wrap items-center gap-1 text-[10px] font-bold">
-                                  <span className={`px-1.5 py-0.5 rounded-md ${isSelected ? 'bg-indigo-800 text-indigo-100' : 'bg-emerald-100 text-emerald-800'}`}>
-                                    {cm.className.startsWith('Class') ? cm.className : `Class ${cm.className}`} - Sec {cm.sectionName}
-                                  </span>
-                                  {cm.subjects && cm.subjects.length > 0 && (
-                                    <span className={`px-1.5 py-0.5 rounded-md ${isSelected ? 'bg-indigo-800 text-indigo-100' : 'bg-indigo-100 text-indigo-800'}`}>
-                                      {cm.subjects.join(', ')}
-                                    </span>
-                                  )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                              {timeLabel}
+                            </span>
+                          </div>
 
-                      {/* 3. ADMIN VIEW: DIFFERENTIATE TEACHERS BY CLASS, SECTION & SUBJECTS */}
-                      {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && (
-                        <div className="space-y-1 w-full pt-1 border-t border-slate-100/60">
-                          {c.assignedSections && c.assignedSections.length > 0 ? (
-                            <div className="flex flex-wrap items-center gap-1">
-                              <span className={`text-[10px] font-bold ${isSelected ? 'text-indigo-200' : 'text-slate-400'}`}>
-                                Classes:
+                          <p className="text-[10px] text-slate-500 font-medium truncate mt-0.5">
+                            {contextSubtitle}
+                          </p>
+
+                          <div className="flex items-center justify-between gap-1 mt-1">
+                            <p className="text-[11px] text-[#667781] truncate flex items-center gap-1">
+                              {lastMsg?.isMe && (
+                                <CheckCheck
+                                  className={`w-3.5 h-3.5 inline shrink-0 ${
+                                    lastMsg.readAt ? 'text-sky-500' : 'text-slate-400'
+                                  }`}
+                                />
+                              )}
+                              <span className="truncate">
+                                {lastMsg
+                                  ? lastMsg.body || (lastMsg.attachments?.length ? '📷 Photo' : '...')
+                                  : 'Start a conversation'}
                               </span>
-                              {c.assignedSections.map((sec, idx) => (
-                                <span
-                                  key={idx}
-                                  className={`rounded-md px-1.5 py-0.5 text-[10px] font-extrabold ${isSelected
-                                      ? 'bg-indigo-700 text-white border border-indigo-500'
-                                      : 'bg-indigo-50 text-indigo-700 border border-indigo-100'
-                                    }`}
-                                >
-                                  {sec.startsWith('Class') ? sec : `Class ${sec}`}
-                                </span>
-                              ))}
+                            </p>
+
+                            {/* WhatsApp Unread Badge: 1, 2, 3... - Disappears on click */}
+                            {unread > 0 && (
+                              <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-[#25D366] text-white text-[10px] font-black shrink-0 shadow-xs animate-in zoom-in-75 duration-150">
+                                {unread}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })
+                )
+              ) : (
+                // ── SEARCH VIEW: MATCHING CONVERSATIONS + DIRECTORY CONTACTS (Capped to 25) ──
+                <div className="p-2 space-y-3">
+                  {/* Matching Conversations */}
+                  {matchingConversations.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="px-2 pt-1 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                        Active Chats ({matchingConversations.length})
+                      </div>
+                      {matchingConversations.map((conv) => {
+                        const isSelected = selectedConversationId === conv.id;
+                        const other = conv.otherParticipant;
+                        const isOnline = other?.isOnline ?? false;
+                        const unread = conv.unreadCount || 0;
+                        const lastMsg = conv.lastMessage;
+
+                        return (
+                          <button
+                            key={`search-conv-${conv.id}`}
+                            type="button"
+                            onClick={() => {
+                              void handleSelectConversation(conv);
+                              setContactSearch('');
+                            }}
+                            className={`w-full flex items-center gap-3 p-2.5 rounded-2xl text-left transition cursor-pointer select-none border-l-4 ${
+                              isSelected
+                                ? 'bg-[#f0f2f5] border-l-[#00a884]'
+                                : 'bg-white hover:bg-[#f5f6f6] border border-slate-100 border-l-transparent'
+                            }`}
+                          >
+                            <div className="relative shrink-0">
+                              <div className="grid h-10 w-10 place-items-center rounded-full bg-[#00a884] font-black text-xs text-white">
+                                {(other?.name || 'User').slice(0, 2).toUpperCase()}
+                              </div>
+                              <span
+                                className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full ring-2 ring-white ${
+                                  isOnline ? 'bg-emerald-500' : 'bg-slate-300'
+                                }`}
+                              />
                             </div>
-                          ) : (
-                            <p className={`text-[10px] ${isSelected ? 'text-indigo-200' : 'text-slate-400'}`}>
-                              No class section assigned
-                            </p>
-                          )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-bold text-[#111b21] truncate">{other?.name}</p>
+                                {unread > 0 && (
+                                  <span className="min-w-[18px] h-4 px-1 flex items-center justify-center rounded-full bg-[#25D366] text-white text-[9px] font-black">
+                                    {unread}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate-500 truncate mt-0.5">
+                                {lastMsg?.body || 'Recent chat'}
+                              </p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
 
-                          {c.subjects && c.subjects.length > 0 && (
-                            <p className={`text-[10px] font-semibold truncate ${isSelected ? 'text-indigo-100' : 'text-slate-500'}`}>
-                              Subjects: {c.subjects.join(', ')}
-                            </p>
-                          )}
-                        </div>
-                      )}
+                  {/* School Directory Matching Contacts */}
+                  <div className="space-y-1">
+                    <div className="px-2 pt-1 flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                        School Contacts ({filteredContacts.length})
+                      </span>
+                    </div>
 
-                      {/* School Admin Office Desk specific description */}
-                      {isAdminOffice && resolvedRole === 'Teacher' && (
-                        <div className="text-[10px] font-semibold text-purple-700 pt-0.5">
-                          Staff Coordination & Principal Office Desk
-                        </div>
-                      )}
-                    </button>
-                  );
-                })
+                    {filteredContacts.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-400 bg-white rounded-2xl border border-slate-100 space-y-1">
+                        <Search className="w-6 h-6 text-slate-300 mx-auto" />
+                        <p className="font-bold text-slate-600">No person found for "{contactSearch}"</p>
+                        <p className="text-[10px] text-slate-400">Try searching by student name, parent name, or class.</p>
+                      </div>
+                    ) : (
+                      filteredContacts.slice(0, 25).map((c) => {
+                        const isSelected =
+                          selectedContact?.name === c.name ||
+                          (selectedContact?.userId && selectedContact.userId === c.userId);
+                        const isOnline = c.isOnline ?? false;
+                        const isParent = c.role === 'Parent';
+                        const isAdminOffice = c.isOfficeDesk || c.role === 'School Admin' || c.role === 'Super Admin';
+
+                        return (
+                          <button
+                            key={`contact-${c.id}`}
+                            type="button"
+                            onClick={() => {
+                              void handleSelectContact(c);
+                              setContactSearch('');
+                            }}
+                            className={`w-full flex items-center gap-3 p-2.5 rounded-2xl text-left transition cursor-pointer select-none border-l-4 ${
+                              isSelected
+                                ? 'bg-indigo-50 border-l-indigo-600'
+                                : 'bg-white hover:bg-slate-50 border border-slate-100 border-l-transparent'
+                            }`}
+                          >
+                            <div className="relative shrink-0">
+                              <div
+                                className={`grid h-10 w-10 place-items-center rounded-full font-black text-xs text-white ${
+                                  isAdminOffice
+                                    ? 'bg-purple-600'
+                                    : isParent
+                                      ? 'bg-[#00a884]'
+                                      : 'bg-indigo-600'
+                                }`}
+                              >
+                                {c.name.slice(0, 2).toUpperCase()}
+                              </div>
+                              <span
+                                className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full ring-2 ring-white ${
+                                  isOnline ? 'bg-emerald-500' : 'bg-slate-300'
+                                }`}
+                              />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-black text-slate-800 truncate">{c.name}</p>
+                                <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700">
+                                  {c.role}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-slate-500 truncate mt-0.5">
+                                {c.studentSummary ||
+                                  (c.assignedSections && c.assignedSections.length > 0
+                                    ? c.assignedSections.join(', ')
+                                    : c.role)}
+                              </p>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-slate-300 shrink-0" />
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           </div>
 
-          {/* 1-on-1 Chat Stream Window */}
-          <div className="md:col-span-2 flex flex-col h-[580px] min-h-0 shrink-0">
-            {/* Contact Header */}
-            <div className="flex items-center justify-between border-b p-4 border-slate-100 bg-white">
-              <div className="flex items-center gap-3">
-                <div className="relative">
-                  <div className="grid h-11 w-11 place-items-center rounded-2xl bg-indigo-600 text-white font-black text-sm shadow-md shadow-indigo-600/20">
-                    {selectedContact?.name.slice(0, 2).toUpperCase() || 'TC'}
+          {/* 1-on-1 Chat Stream Window (WhatsApp Style) */}
+          <div className="md:col-span-2 flex flex-col h-full min-h-0 overflow-hidden bg-[#efeae2]">
+            {/* WhatsApp Contact Header */}
+            <div className="shrink-0 border-b px-4 py-3 border-[#e9edef] bg-[#f0f2f5] select-none flex items-center justify-between shadow-2xs">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="relative shrink-0">
+                  <div className="grid h-10 w-10 place-items-center rounded-full bg-[#00a884] text-white font-black text-sm shadow-xs">
+                    {selectedContact?.name.slice(0, 2).toUpperCase() || 'WA'}
                   </div>
                   <span
-                    className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full ring-2 ring-white ${selectedContact && selectedContact.isOnline ? 'bg-emerald-500' : 'bg-slate-300'
+                    className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ring-2 ring-white ${selectedContact && selectedContact.isOnline ? 'bg-emerald-500' : 'bg-slate-300'
                       }`}
                   />
                 </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-[#111b21] truncate flex items-center gap-2">
                     {selectedContact?.name || 'Select a Contact to Chat'}
                   </h3>
 
                   {/* Role Specific Subtitle Differentiation */}
                   {selectedContact && (
-                    <div className="text-[11px] text-slate-500 font-semibold flex flex-wrap items-center gap-1.5 mt-0.5">
+                    <div className="text-[11px] text-[#667781] font-medium flex flex-wrap items-center gap-1.5 truncate">
                       {/* PARENT VIEWING TEACHER: MENTION SECTION, CLASS & SUBJECTS */}
                       {resolvedRole === 'Parent' && selectedContact.childMappings && selectedContact.childMappings.length > 0 ? (
                         selectedContact.childMappings.map((cm, idx) => (
-                          <span key={idx} className="text-emerald-800 font-bold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                          <span key={idx} className="text-[#008069] font-semibold bg-[#e7f8f5] px-2 py-0.5 rounded-md border border-[#c3ede6]">
                             Teacher for {cm.studentName} ({cm.className.startsWith('Class') ? cm.className : `Class ${cm.className}`} - Sec {cm.sectionName}) · Subjects: {cm.subjects.join(', ')}
                           </span>
                         ))
@@ -2440,29 +2986,29 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         /* TEACHER VIEWING PARENT: DIFFERENTIATE BASED ON STUDENT */
                         selectedContact.students && selectedContact.students.length > 0 ? (
                           selectedContact.students.map((st, idx) => (
-                            <span key={idx} className="text-emerald-800 font-bold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                            <span key={idx} className="text-[#008069] font-semibold bg-[#e7f8f5] px-2 py-0.5 rounded-md border border-[#c3ede6]">
                               Parent of {st.name} ({st.className.startsWith('Class') ? st.className : `Class ${st.className}`} - Sec {st.section}, Roll #{st.rollNo})
                             </span>
                           ))
                         ) : (
-                          <span className="text-emerald-800 font-bold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                          <span className="text-[#008069] font-semibold bg-[#e7f8f5] px-2 py-0.5 rounded-md border border-[#c3ede6]">
                             {selectedContact.studentSummary || 'Parent of Student'}
                           </span>
                         )
                       ) : selectedContact.isOfficeDesk || selectedContact.role === 'School Admin' ? (
-                        <span className="text-purple-800 font-bold bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200">
+                        <span className="text-purple-800 font-semibold bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200">
                           School Administration / Office Desk · Official Coordination
                         </span>
                       ) : (
                         /* ADMIN VIEWING TEACHER: MENTION CLASS, SECTION & SUBJECTS */
                         <>
-                          <span className="text-indigo-600 font-bold">
+                          <span className="text-[#008069] font-semibold">
                             {selectedContact.assignedSections && selectedContact.assignedSections.length > 0
                               ? selectedContact.assignedSections.map(s => s.startsWith('Class') ? s : `Class ${s}`).join(', ')
                               : 'Faculty Member'}
                           </span>
                           {selectedContact.subjects && selectedContact.subjects.length > 0 && (
-                            <span className="text-slate-600">
+                            <span className="text-[#667781]">
                               · {selectedContact.subjects.join(', ')}
                             </span>
                           )}
@@ -2474,13 +3020,13 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
               </div>
 
               {/* Real-Time WebSocket Connection Status Badge */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border transition-colors bg-white shadow-2xs">
                   {socketStatus === 'connected' ? (
                     <>
                       <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                      <span className="text-emerald-700 font-extrabold flex items-center gap-1">
-                        <Wifi className="w-3 h-3 text-emerald-600" /> Live WebSockets
+                      <span className="text-[#008069] font-extrabold flex items-center gap-1">
+                        <Wifi className="w-3 h-3 text-emerald-600" /> Live
                       </span>
                     </>
                   ) : socketStatus === 'connecting' ? (
@@ -2502,21 +3048,49 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
               </div>
             </div>
 
-            {/* Chat Messages Stream */}
-            <div ref={chatStreamContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 pb-8 space-y-4 bg-slate-50/50">
+            {/* WhatsApp Chat Messages Stream with Wallpaper Background */}
+            <div
+              ref={chatStreamContainerRef}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragOver(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                setIsDragOver(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragOver(false);
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                  const droppedFiles = Array.from(e.dataTransfer.files);
+                  setSelectedFiles((prev) => [...prev, ...droppedFiles]);
+                }
+              }}
+              className={`flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-2 bg-[#efeae2] bg-[radial-gradient(#d1d7db_1.2px,transparent_1.2px)] [background-size:20px_20px] relative ${
+                isDragOver ? 'ring-2 ring-[#00a884] bg-emerald-50/40' : ''
+              }`}
+            >
+              {isDragOver && (
+                <div className="absolute inset-4 z-30 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[#00a884] bg-white/95 backdrop-blur-xs shadow-xl pointer-events-none">
+                  <ImageIcon className="h-10 w-10 text-[#00a884] animate-bounce" />
+                  <p className="mt-2 text-sm font-black text-[#111b21]">Drop photos or files here to attach</p>
+                </div>
+              )}
+
               {chatLoading ? (
                 <div className="grid h-full place-items-center text-center p-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-indigo-500 mx-auto" />
-                  <p className="mt-2 text-xs font-bold text-slate-400">Loading conversation messages…</p>
+                  <Loader2 className="h-6 w-6 animate-spin text-[#00a884] mx-auto" />
+                  <p className="mt-2 text-xs font-bold text-[#667781]">Loading messages…</p>
                 </div>
               ) : chatMessages.length === 0 ? (
                 <div className="grid h-full place-items-center text-center p-8">
-                  <div>
-                    <MessageSquare className="mx-auto h-8 w-8 text-slate-300" />
-                    <p className="mt-2 text-xs font-extrabold text-slate-700">
-                      Direct 1-on-1 Conversation with {selectedContact?.name || 'Contact'}
+                  <div className="bg-white/80 backdrop-blur-xs p-5 rounded-2xl border border-black/5 shadow-xs max-w-sm">
+                    <MessageSquare className="mx-auto h-8 w-8 text-[#00a884]" />
+                    <p className="mt-2 text-xs font-extrabold text-[#111b21]">
+                      Conversation with {selectedContact?.name || 'Contact'}
                     </p>
-                    <p className="mt-1 text-[11px] text-slate-400">
+                    <p className="mt-1 text-[11px] text-[#667781] leading-relaxed">
                       {resolvedRole === 'Parent'
                         ? 'Reach out directly to discuss your child’s academic progress, assignments, or inquiries.'
                         : resolvedRole === 'Teacher'
@@ -2526,86 +3100,187 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   </div>
                 </div>
               ) : (
-                chatMessages.map((msg) => {
+                chatMessages.map((msg, idx) => {
                   const isMe = msg.isMe;
+                  const prevMsg = chatMessages[idx - 1];
+                  const currDateLabel = formatChatDate(msg.createdAt);
+                  const prevDateLabel = prevMsg ? formatChatDate(prevMsg.createdAt) : '';
+                  const showDateDivider = currDateLabel && currDateLabel !== prevDateLabel;
+
+                  const isHighlighted = Boolean(
+                    highlightedMessageText &&
+                    msg.body &&
+                    (msg.body.trim() === highlightedMessageText.trim() ||
+                      msg.body.toLowerCase().includes(highlightedMessageText.toLowerCase()) ||
+                      highlightedMessageText.toLowerCase().includes(msg.body.toLowerCase()))
+                  );
+
+                  const timeStr = new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                  const isImageOnly = Boolean(
+                    msg.attachments &&
+                    msg.attachments.length === 1 &&
+                    isImageAttachment(msg.attachments[0]) &&
+                    !msg.body
+                  );
 
                   return (
-                    <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                    <React.Fragment key={msg.id}>
+                      {/* Date Separator Badge */}
+                      {showDateDivider && (
+                        <div className="flex justify-center my-3 sticky top-1 z-10 select-none">
+                          <span className="bg-white/90 backdrop-blur-xs text-[#54656f] text-[11px] font-semibold px-3 py-1 rounded-lg shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] uppercase tracking-wide border border-black/5">
+                            {currDateLabel}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Chat Message Row */}
                       <div
-                        className={`max-w-md rounded-2xl p-3.5 shadow-xs transition ${isMe
-                            ? 'bg-indigo-600 text-white rounded-br-none'
-                            : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none'
-                          }`}
+                        ref={isHighlighted ? highlightedMessageRef : undefined}
+                        className={`flex ${isMe ? 'justify-end' : 'justify-start'} my-1 group`}
                       >
-                        {msg.body && <p className="text-xs leading-relaxed font-normal">{msg.body}</p>}
-
-                        {/* Attachments Display */}
-                        {msg.attachments && msg.attachments.length > 0 && (
-                          <div className="mt-2 space-y-1.5 pt-1 border-t border-white/20">
-                            {msg.attachments.map((att) => (
-                              <a
-                                key={att.id}
-                                href={att.downloadUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`flex items-center gap-2 p-2 rounded-xl text-[11px] font-semibold transition ${
-                                  isMe ? 'bg-indigo-700 hover:bg-indigo-800 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
-                                }`}
-                              >
-                                <FileText className="w-4 h-4 shrink-0" />
-                                <span className="truncate flex-1">{att.originalName}</span>
-                                <span className="text-[9px] opacity-75 shrink-0">
-                                  {Math.round(att.fileSize / 1024)} KB
-                                </span>
-                                <Download className="w-3.5 h-3.5 shrink-0" />
-                              </a>
-                            ))}
-                          </div>
-                        )}
-
                         <div
-                          className={`mt-1.5 flex items-center justify-end gap-1 text-[9px] font-mono ${isMe ? 'text-indigo-200' : 'text-slate-400'
-                            }`}
+                          className={`relative shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] transition-all ${
+                            isImageOnly
+                              ? 'p-1 rounded-2xl w-fit max-w-[260px] sm:max-w-[300px]'
+                              : 'max-w-[85%] sm:max-w-[72%] p-2.5 rounded-2xl'
+                          } ${
+                            isHighlighted ? 'ring-3 ring-[#00a884] shadow-lg shadow-emerald-500/20 scale-[1.01]' : ''
+                          } ${
+                            isMe
+                              ? 'bg-[#d9fdd3] text-[#111b21] rounded-tr-none'
+                              : 'bg-white text-[#111b21] rounded-tl-none'
+                          }`}
                         >
-                          {msg.editedAt && <span className="italic opacity-80">(edited)</span>}
-                          <span>{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          {isMe && (
-                            msg.readAt ? (
-                              <span title="Read"><CheckCheck className="h-3.5 w-3.5 text-indigo-200" /></span>
-                            ) : (
-                              <span title="Delivered"><CheckCircle2 className="h-3 w-3 text-indigo-200/80" /></span>
-                            )
+                          {isHighlighted && (
+                            <div className="mb-1.5 flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-[#008069] bg-[#e7f8f5] px-2 py-0.5 rounded-md w-fit">
+                              <span>★</span>
+                              <span>Selected Notification Message</span>
+                            </div>
+                          )}
+
+                          {/* Image & Document Attachments */}
+                          {msg.attachments && msg.attachments.length > 0 && (
+                            <div className="space-y-1.5 mb-1">
+                              {msg.attachments.map((att) => {
+                                const isImg = isImageAttachment(att);
+
+                                if (isImg) {
+                                  return (
+                                    <ChatImagePreview
+                                      key={att.id}
+                                      url={att.downloadUrl}
+                                      originalName={att.originalName}
+                                      fileSize={att.fileSize}
+                                      timeStr={timeStr}
+                                      isMe={isMe}
+                                      readAt={msg.readAt}
+                                      onOpenLightbox={(imageUrl, title) => setLightboxImage({ url: imageUrl, title })}
+                                    />
+                                  );
+                                }
+
+                                return (
+                                  <div
+                                    key={att.id}
+                                    onClick={() => void downloadSecureAttachment(att.downloadUrl, att.originalName)}
+                                    className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer select-none ${
+                                      isMe
+                                        ? 'bg-[#c5f8be] hover:bg-[#bbf3b3] text-[#111b21]'
+                                        : 'bg-slate-100 hover:bg-slate-200 text-[#111b21]'
+                                    }`}
+                                  >
+                                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-[#00a884]/15 text-[#00a884] shadow-2xs font-bold text-xs uppercase">
+                                      {att.originalName.split('.').pop() || 'DOC'}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-xs font-bold truncate text-[#111b21]">{att.originalName}</p>
+                                      <p className="text-[10px] text-[#667781] font-medium">{Math.round(att.fileSize / 1024)} KB · Document</p>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/80 hover:bg-white text-[#54656f] shadow-2xs transition"
+                                      title="Download file"
+                                    >
+                                      <Download className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* Message Body Text */}
+                          {msg.body && (
+                            <p className="text-[13px] leading-relaxed font-normal whitespace-pre-wrap break-words px-1 select-text">
+                              {msg.body}
+                            </p>
+                          )}
+
+                          {/* WhatsApp Timestamp & Blue Double Checkmarks (Only for text or documents) */}
+                          {!isImageOnly && (
+                            <div className="mt-1 flex items-center justify-end gap-1 text-[10px] font-medium text-[#667781] select-none px-1">
+                              {msg.editedAt && <span className="italic text-[9px] opacity-75">(edited)</span>}
+                              <span>{timeStr}</span>
+                              {isMe && (
+                                msg.readAt ? (
+                                  <span title="Read"><CheckCheck className="w-3.5 h-3.5 text-[#53bdeb]" /></span>
+                                ) : (
+                                  <span title="Delivered"><CheckCheck className="w-3.5 h-3.5 text-[#8696a0]" /></span>
+                                )
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
-                    </div>
+                    </React.Fragment>
                   );
                 })
               )}
               <div ref={chatBottomRef} />
             </div>
 
-            {/* Chat Input Form */}
-            <div className="border-t border-slate-200 bg-white p-3 shrink-0 relative z-10">
+            {/* WhatsApp Chat Input Toolbar */}
+            <div className="border-t border-[#e9edef] bg-[#f0f2f5] p-2.5 sm:p-3 shrink-0 relative z-10">
               {/* Selected Files Preview Chips */}
               {selectedFiles.length > 0 && (
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {selectedFiles.map((file, idx) => (
-                    <div
-                      key={idx}
-                      className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-900 px-2.5 py-1 rounded-xl text-[11px] font-semibold"
-                    >
-                      <Paperclip className="w-3.5 h-3.5 text-indigo-600" />
-                      <span className="truncate max-w-[150px]">{file.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedFiles((prev) => prev.filter((_, i) => i !== idx))}
-                        className="text-slate-400 hover:text-rose-600 transition ml-1"
+                <div className="flex flex-wrap gap-2 mb-2 p-2 rounded-2xl bg-white border border-[#e9edef] shadow-2xs">
+                  {selectedFiles.map((file, idx) => {
+                    const isImg = file.type.startsWith('image/');
+                    const objUrl = isImg ? URL.createObjectURL(file) : null;
+
+                    return (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 bg-[#f0f2f5] border border-slate-200 text-[#111b21] px-2.5 py-1.5 rounded-xl text-[11px] font-semibold"
                       >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
+                        {isImg && objUrl ? (
+                          <img
+                            src={objUrl}
+                            alt={file.name}
+                            className="h-8 w-8 rounded-lg object-cover border border-slate-200"
+                          />
+                        ) : (
+                          <div className="grid h-8 w-8 place-items-center rounded-lg bg-[#00a884]/15 text-[#00a884] font-bold text-[10px] uppercase">
+                            {file.name.split('.').pop() || 'FILE'}
+                          </div>
+                        )}
+                        <div className="flex flex-col min-w-0">
+                          <span className="truncate max-w-[130px] text-xs font-bold text-[#111b21]">{file.name}</span>
+                          <span className="text-[9px] text-[#667781] font-normal">{Math.round(file.size / 1024)} KB</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                          className="text-slate-400 hover:text-rose-600 transition ml-1 cursor-pointer p-0.5 rounded-md hover:bg-rose-50"
+                          title="Remove attachment"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
@@ -2616,32 +3291,83 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   className="hidden"
                   multiple
                   onChange={(e) => {
-                    if (e.target.files) {
-                      setSelectedFiles(Array.from(e.target.files));
+                    if (e.target.files && e.target.files.length > 0) {
+                      const newFiles = Array.from(e.target.files);
+                      setSelectedFiles((prev) => [...prev, ...newFiles]);
                     }
+                    e.target.value = '';
                   }}
                 />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Attach file"
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50/50 transition cursor-pointer"
-                >
-                  <Paperclip className="h-4 w-4" />
-                </button>
                 <input
-                  type="text"
-                  placeholder={`Type a direct message to ${selectedContact?.name || 'contact'}…`}
-                  value={chatMessage}
-                  onChange={(e) => setChatMessage(e.target.value)}
-                  className={`flex-1 rounded-xl border px-4 py-2.5 text-xs ${inputClass}`}
+                  type="file"
+                  ref={imageInputRef}
+                  accept="image/*"
+                  className="hidden"
+                  multiple
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      const newFiles = Array.from(e.target.files);
+                      setSelectedFiles((prev) => [...prev, ...newFiles]);
+                    }
+                    e.target.value = '';
+                  }}
                 />
+
+                {/* WhatsApp Action Icons (Photo, Attachment) */}
+                <div className="flex items-center gap-1 text-[#54656f]">
+                  <button
+                    type="button"
+                    onClick={() => imageInputRef.current?.click()}
+                    title="Attach Photos"
+                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-black/5 transition cursor-pointer text-[#54656f] hover:text-[#00a884]"
+                  >
+                    <ImageIcon className="h-5 w-5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Attach Documents"
+                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-black/5 transition cursor-pointer text-[#54656f] hover:text-[#00a884]"
+                  >
+                    <Paperclip className="h-5 w-5" />
+                  </button>
+                </div>
+
+                {/* WhatsApp Rounded Pill Input */}
+                <div className="flex-1 relative flex items-center">
+                  <input
+                    type="text"
+                    placeholder={`Type a message…`}
+                    value={chatMessage}
+                    onChange={(e) => setChatMessage(e.target.value)}
+                    onPaste={(e) => {
+                      const items = e.clipboardData?.items;
+                      if (items) {
+                        const pastedFiles: File[] = [];
+                        for (let i = 0; i < items.length; i++) {
+                          if (items[i].kind === 'file') {
+                            const file = items[i].getAsFile();
+                            if (file) pastedFiles.push(file);
+                          }
+                        }
+                        if (pastedFiles.length > 0) {
+                          e.preventDefault();
+                          setSelectedFiles((prev) => [...prev, ...pastedFiles]);
+                        }
+                      }
+                    }}
+                    className="w-full rounded-full bg-white px-4 py-2.5 text-xs text-[#111b21] placeholder-[#8696a0] border border-transparent focus:border-[#00a884] focus:ring-1 focus:ring-[#00a884] outline-none shadow-2xs transition"
+                  />
+                </div>
+
+                {/* WhatsApp Signature Circular Green Send Button */}
                 <button
                   type="submit"
                   disabled={isSendingChat || (!chatMessage.trim() && selectedFiles.length === 0) || !selectedConversationId}
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-indigo-600 text-white transition hover:bg-indigo-700 disabled:opacity-50 cursor-pointer shadow-sm"
+                  title="Send message"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#00a884] hover:bg-[#008f6f] text-white transition active:scale-95 disabled:opacity-40 disabled:hover:bg-[#00a884] cursor-pointer shadow-sm"
                 >
-                  {isSendingChat ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  {isSendingChat ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4 -mr-0.5" />}
                 </button>
               </form>
             </div>
@@ -2721,6 +3447,72 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
               </button>
             </div>
           </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ── WhatsApp Image Lightbox Modal ── */}
+      {lightboxImage && createPortal(
+        <div
+          className="fixed inset-0 z-[99999] bg-[#0b141a]/95 backdrop-blur-md flex flex-col justify-between animate-fade-in select-none"
+          onClick={() => setLightboxImage(null)}
+        >
+          {/* WhatsApp Lightbox Top Navigation Bar */}
+          <div
+            className="flex items-center justify-between px-6 py-3.5 bg-[#111b21]/90 backdrop-blur-md border-b border-white/10 text-white z-10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#00a884] font-black text-xs text-white">
+                {selectedContact?.name?.slice(0, 2).toUpperCase() || 'WA'}
+              </div>
+              <div className="min-w-0">
+                <h4 className="text-sm font-bold text-white truncate">{selectedContact?.name || 'Photo Viewer'}</h4>
+                <p className="text-[11px] text-[#8696a0] font-medium truncate max-w-md">{lightboxImage.title || 'Image Preview'}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void downloadSecureAttachment(lightboxImage.url, lightboxImage.title || 'chat-image.jpg')}
+                className="flex items-center gap-1.5 bg-white/10 hover:bg-white/20 text-white px-3.5 py-1.5 rounded-full text-xs font-bold transition cursor-pointer"
+                title="Download full image"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition cursor-pointer"
+                title="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Center Full Image */}
+          <div
+            className="flex-1 flex items-center justify-center p-4 overflow-hidden"
+            onClick={() => setLightboxImage(null)}
+          >
+            <img
+              src={lightboxImage.url}
+              alt={lightboxImage.title || 'Full View'}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[82vh] max-w-[92vw] rounded-xl object-contain shadow-2xl transition duration-200 border border-white/5"
+            />
+          </div>
+
+          {/* Bottom Title Pill */}
+          {lightboxImage.title && (
+            <div className="pb-4 flex justify-center pointer-events-none" onClick={(e) => e.stopPropagation()}>
+              <span className="bg-[#111b21]/80 backdrop-blur-md text-[#d1d7db] text-xs px-4 py-1.5 rounded-full border border-white/10 shadow-lg">
+                {lightboxImage.title}
+              </span>
+            </div>
+          )}
         </div>,
         document.body
       )}

@@ -4,6 +4,7 @@ from django.db import transaction
 from django.db.models import Q, Prefetch, Max
 from django.utils import timezone
 from rest_framework import permissions, status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import serializers
@@ -82,16 +83,41 @@ class ChatContactsListView(APIView):
     def get(self, request):
         user = request.user
         school = user.school
-        if not school or user.role == User.Role.STUDENT:
+        if not school:
             return Response([])
+
+        search_q = request.GET.get('search', '').strip()
 
         # 1. ADMIN
         if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
-            teachers = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
+            contacts = []
+            admin_user = User.objects.filter(school=school, role=User.Role.SCHOOL_ADMIN, is_active=True).first() or user
+            contacts.append({
+                'id': 'admin-office',
+                'userId': admin_user.id,
+                'name': 'School Admin / Office Desk',
+                'role': 'School Admin',
+                'email': admin_user.email,
+                'phone': '',
+                'isOnline': True,
+                'isOfficeDesk': True,
+            })
+
+            teachers_qs = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
                 'sections__class_room', 'subject_records', 'teaching_assignments__section__class_room', 'teaching_assignments__subject'
             )
-            contacts = []
-            for t in teachers:
+            if search_q:
+                teachers_qs = teachers_qs.filter(
+                    Q(user__first_name__icontains=search_q) |
+                    Q(user__last_name__icontains=search_q) |
+                    Q(user__email__icontains=search_q) |
+                    Q(subjects__icontains=search_q) |
+                    Q(phone__icontains=search_q)
+                )[:25]
+            else:
+                teachers_qs = teachers_qs[:35]
+
+            for t in teachers_qs:
                 assigned_sections = list(t.assigned_sections or [])
                 for s in t.sections.all():
                     label = f"{s.class_room.name} - Sec {s.name}" if hasattr(s, 'class_room') and s.class_room else f"Sec {s.name}"
@@ -134,6 +160,49 @@ class ChatContactsListView(APIView):
                     'subjects': subjects,
                     'teachingAssignments': assignments_data,
                 })
+
+            # When Admin searches, also include matching parents so admin can chat with parents with no issue
+            if search_q:
+                parents_qs = ParentProfile.objects.filter(
+                    user__school=school, user__is_active=True
+                ).filter(
+                    Q(user__first_name__icontains=search_q) |
+                    Q(user__last_name__icontains=search_q) |
+                    Q(user__email__icontains=search_q) |
+                    Q(phone__icontains=search_q) |
+                    Q(students__name__icontains=search_q) |
+                    Q(students__admission_no__icontains=search_q)
+                ).distinct().select_related('user').prefetch_related('students')[:25]
+
+                for pp in parents_qs:
+                    p_user = pp.user
+                    if not p_user:
+                        continue
+                    st_list = [
+                        {
+                            'id': s.id,
+                            'name': s.name,
+                            'className': s.class_name,
+                            'section': s.section,
+                            'rollNo': s.roll_no,
+                            'admissionNo': s.admission_no,
+                        }
+                        for s in pp.students.filter(school=school, status='Active')
+                    ]
+                    summaries = [f"{s['name']} ({s['className']} - Sec {s['section']})" for s in st_list]
+                    contacts.append({
+                        'id': f'parent-{p_user.id}',
+                        'userId': p_user.id,
+                        'name': p_user.get_full_name() or p_user.username,
+                        'role': 'Parent',
+                        'email': p_user.email,
+                        'phone': pp.phone or '',
+                        'isOnline': p_user.is_online_computed,
+                        'students': st_list,
+                        'studentSummary': f"Parent of {', '.join(summaries)}" if summaries else 'Parent',
+                        'studentNames': [s['name'] for s in st_list],
+                    })
+
             return Response(contacts)
 
         # 2. TEACHER
@@ -156,7 +225,22 @@ class ChatContactsListView(APIView):
                     'isOfficeDesk': True,
                 })
 
-            permitted_students = get_teacher_permitted_students(teacher_profile, school.id).prefetch_related('parent_profiles__user')
+            permitted_students_qs = get_teacher_permitted_students(teacher_profile, school.id)
+            if search_q:
+                permitted_students_qs = permitted_students_qs.filter(
+                    Q(name__icontains=search_q) |
+                    Q(admission_no__icontains=search_q) |
+                    Q(roll_no__icontains=search_q) |
+                    Q(parent_name__icontains=search_q) |
+                    Q(parent_profiles__user__first_name__icontains=search_q) |
+                    Q(parent_profiles__user__last_name__icontains=search_q) |
+                    Q(parent_profiles__phone__icontains=search_q)
+                ).distinct()[:30]
+            else:
+                # Limit initial contacts scan to 25 to guarantee instant load times without lag
+                permitted_students_qs = permitted_students_qs[:25]
+
+            permitted_students = permitted_students_qs.prefetch_related('parent_profiles__user')
             parent_map = {}
             for student in permitted_students:
                 for pp in student.parent_profiles.all():
@@ -206,15 +290,36 @@ class ChatContactsListView(APIView):
             if not parent_profile:
                 return Response([])
 
+            contacts = []
+            admin_user = User.objects.filter(school=school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN], is_active=True).first()
+            if admin_user:
+                contacts.append({
+                    'id': 'admin-office',
+                    'userId': admin_user.id,
+                    'name': 'School Admin / Office Desk',
+                    'role': 'School Admin',
+                    'email': admin_user.email,
+                    'phone': '',
+                    'isOnline': admin_user.is_online_computed,
+                    'isOfficeDesk': True,
+                })
+
             linked_students = list(parent_profile.students.filter(school=school, status='Active'))
             if not linked_students:
-                return Response([])
+                return Response(contacts)
 
-            teachers = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
+            teachers_qs = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
                 'sections__class_room', 'subject_records', 'teaching_assignments__section__class_room', 'teaching_assignments__subject'
             )
+            if search_q:
+                teachers_qs = teachers_qs.filter(
+                    Q(user__first_name__icontains=search_q) |
+                    Q(user__last_name__icontains=search_q) |
+                    Q(subjects__icontains=search_q)
+                )
 
-            contacts = []
+            teachers = list(teachers_qs)
+
             for t in teachers:
                 child_mappings = []
                 assigned_sections = list(t.assigned_sections or [])
@@ -265,6 +370,58 @@ class ChatContactsListView(APIView):
 
             return Response(contacts)
 
+        # 4. STUDENT
+        if user.role == User.Role.STUDENT:
+            contacts = []
+            admin_user = User.objects.filter(school=school, role=User.Role.SCHOOL_ADMIN, is_active=True).first()
+            if admin_user:
+                contacts.append({
+                    'id': 'admin-office',
+                    'userId': admin_user.id,
+                    'name': 'School Admin / Office Desk',
+                    'role': 'School Admin',
+                    'email': admin_user.email,
+                    'phone': '',
+                    'isOnline': admin_user.is_online_computed,
+                    'isOfficeDesk': True,
+                })
+
+            student_profile = getattr(user, 'student_profile', None)
+            student = getattr(student_profile, 'student', None) if student_profile else None
+            if not student:
+                return Response(contacts)
+
+            teachers_qs = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
+                'sections__class_room', 'subject_records', 'teaching_assignments__section__class_room', 'teaching_assignments__subject'
+            )
+            if search_q:
+                teachers_qs = teachers_qs.filter(
+                    Q(user__first_name__icontains=search_q) |
+                    Q(user__last_name__icontains=search_q) |
+                    Q(subjects__icontains=search_q)
+                )
+
+            for t in teachers_qs:
+                if check_teacher_matches_student(t, student):
+                    assigned_sections = list(t.assigned_sections or [])
+                    teacher_subjects = list(t.subjects or [])
+                    for sub in t.subject_records.all():
+                        if sub.name not in teacher_subjects:
+                            teacher_subjects.append(sub.name)
+
+                    contacts.append({
+                        'id': t.id,
+                        'userId': t.user_id,
+                        'name': t.user.get_full_name() or t.user.username or f"Teacher #{t.id}",
+                        'role': 'Teacher',
+                        'email': t.user.email,
+                        'phone': t.phone or '',
+                        'isOnline': t.user.is_online_computed,
+                        'assignedSections': assigned_sections,
+                        'subjects': teacher_subjects,
+                    })
+            return Response(contacts)
+
         return Response([])
 
 
@@ -274,9 +431,6 @@ class ConversationListView(APIView):
 
     @extend_schema(responses=ConversationSerializer(many=True))
     def get(self, request):
-        if request.user.role == User.Role.STUDENT:
-            return Response([])
-
         conversations = Conversation.objects.filter(
             Q(participant1=request.user) | Q(participant2=request.user),
             school=request.user.school,
@@ -294,7 +448,7 @@ class ConversationListView(APIView):
         if request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             conversations = [
                 c for c in conversations
-                if c.get_other_participant(request.user).role == User.Role.TEACHER
+                if c.get_other_participant(request.user).role in [User.Role.TEACHER, User.Role.PARENT, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
             ]
         elif request.user.role == User.Role.TEACHER:
             teacher_profile = getattr(request.user, 'teacher_profile', None)
@@ -323,9 +477,28 @@ class ConversationListView(APIView):
             allowed_teacher_user_ids = {
                 t.user_id for t in teachers if any(check_teacher_matches_student(t, st) for st in linked_students)
             }
+            admin_user_ids = set(
+                User.objects.filter(school=request.user.school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]).values_list('id', flat=True)
+            )
+            allowed_partner_ids = allowed_teacher_user_ids | admin_user_ids
             conversations = [
                 c for c in conversations
-                if c.get_other_participant(request.user).id in allowed_teacher_user_ids
+                if c.get_other_participant(request.user).id in allowed_partner_ids
+            ]
+        elif request.user.role == User.Role.STUDENT:
+            student_profile = getattr(request.user, 'student_profile', None)
+            student = getattr(student_profile, 'student', None) if student_profile else None
+            teachers = Teacher.objects.filter(school=request.user.school, status='Active').select_related('user')
+            allowed_teacher_user_ids = {
+                t.user_id for t in teachers if student and check_teacher_matches_student(t, student)
+            }
+            admin_user_ids = set(
+                User.objects.filter(school=request.user.school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]).values_list('id', flat=True)
+            )
+            allowed_partner_ids = allowed_teacher_user_ids | admin_user_ids
+            conversations = [
+                c for c in conversations
+                if c.get_other_participant(request.user).id in allowed_partner_ids
             ]
 
         serializer = ConversationSerializer(conversations, many=True, context={'request': request})
@@ -376,9 +549,6 @@ class StartConversationView(APIView):
         responses={200: ConversationSerializer},
     )
     def post(self, request):
-        if request.user.role == User.Role.STUDENT:
-            return Response({'detail': 'Direct chat is not available for student accounts.'}, status=status.HTTP_403_FORBIDDEN)
-
         target_user_id = request.data.get('targetUserId') or request.data.get('target_user_id')
         teacher_id = request.data.get('teacherId') or request.data.get('teacher_id')
         student_id = request.data.get('studentId') or request.data.get('student_id')
@@ -386,15 +556,25 @@ class StartConversationView(APIView):
         target_user = None
         student_obj = None
 
-        if student_id:
+        if request.user.role == User.Role.STUDENT and not student_id:
+            student_obj = getattr(getattr(request.user, 'student_profile', None), 'student', None)
+        elif student_id:
             student_obj = Student.objects.filter(pk=student_id, school=request.user.school).first()
 
-        if target_user_id:
-            target_user = User.objects.filter(pk=target_user_id, school=request.user.school).first()
+        if str(target_user_id).lower() in ['admin-office', 'admin']:
+            target_user = User.objects.filter(school=request.user.school, role=User.Role.SCHOOL_ADMIN, is_active=True).first()
+        elif target_user_id:
+            try:
+                target_user = User.objects.filter(pk=int(target_user_id), school=request.user.school).first()
+            except (ValueError, TypeError):
+                target_user = None
         elif teacher_id:
-            teacher = Teacher.objects.filter(pk=teacher_id, school=request.user.school).select_related('user').first()
-            if teacher:
-                target_user = teacher.user
+            try:
+                teacher = Teacher.objects.filter(pk=int(teacher_id), school=request.user.school).select_related('user').first()
+                if teacher:
+                    target_user = teacher.user
+            except (ValueError, TypeError):
+                teacher = None
         elif student_obj:
             parent_profile = student_obj.parent_profiles.select_related('user').first()
             if parent_profile and parent_profile.user:
@@ -435,6 +615,7 @@ class StartConversationView(APIView):
 class ConversationMessagesView(APIView):
     """Cursor-paginated message history and idempotent message creation."""
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def get_conversation(self, request, conversation_id):
         conv = Conversation.objects.filter(
@@ -521,8 +702,15 @@ class ConversationMessagesView(APIView):
                 message_type=DirectMessage.MessageType.TEXT if body else DirectMessage.MessageType.ATTACHMENT,
             )
 
-            # Handle file attachments if present
-            for file_obj in request.FILES.values():
+            # Handle file attachments if present (avoid duplicates)
+            uploaded_files = []
+            if 'files' in request.FILES:
+                uploaded_files.extend(request.FILES.getlist('files'))
+            else:
+                for key in request.FILES:
+                    uploaded_files.extend(request.FILES.getlist(key))
+
+            for file_obj in uploaded_files:
                 content_type = file_obj.content_type or mimetypes.guess_type(file_obj.name)[0] or 'application/octet-stream'
                 file_bytes = file_obj.read()
                 MessageAttachment.objects.create(
@@ -537,7 +725,7 @@ class ConversationMessagesView(APIView):
                     dm.save(update_fields=['message_type'])
 
             # Update conversation metadata
-            conv.last_message_preview = body[:120] if body else '[Attachment]'
+            conv.last_message_preview = body[:120] if body else ('[Photo]' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else '[Attachment]')
             conv.last_message_at = timezone.now()
             conv.updated_at = timezone.now()
             conv.save(update_fields=['last_message_preview', 'last_message_at', 'updated_at'])
@@ -560,11 +748,12 @@ class ConversationMessagesView(APIView):
         try:
             from apps.notifications.services import create_notification
             sender_name = request.user.get_full_name() or request.user.email
+            notif_preview = body[:140] if body else ('Sent an image' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else 'Sent an attachment')
             create_notification(
                 school=request.user.school,
                 recipient=recipient,
                 title=f"New Message from {sender_name}",
-                body=body[:140] if body else 'Sent an attachment',
+                body=notif_preview,
                 category='Message',
                 channel='chat',
                 sender=request.user,
@@ -573,6 +762,8 @@ class ConversationMessagesView(APIView):
                     'messageId': dm.id,
                     'studentId': conv.student_id,
                     'studentName': conv.student.name if conv.student else '',
+                    'senderId': request.user.id,
+                    'senderName': sender_name,
                 },
             )
         except Exception:
@@ -712,17 +903,44 @@ class UnreadCountView(APIView):
 
 class AttachmentDownloadView(APIView):
     """Protected attachment download: verifies user is an authorized conversation participant."""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
+
+    def options(self, request, *args, **kwargs):
+        from django.http import HttpResponse
+        response = HttpResponse()
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        return response
 
     @extend_schema(
         responses={200: OpenApiResponse(description='Raw binary file stream')},
     )
     def get(self, request, attachment_id):
-        attachment = MessageAttachment.objects.filter(pk=attachment_id).select_related('message__conversation').first()
+        user = request.user
+        if not user or not user.is_authenticated:
+            token_str = request.query_params.get('token')
+            if token_str:
+                try:
+                    from rest_framework_simplejwt.tokens import AccessToken
+                    access_token = AccessToken(token_str)
+                    user_id = access_token.get('user_id')
+                    user = User.objects.filter(pk=user_id).first()
+                except Exception:
+                    return Response({'detail': 'Invalid or expired token.'}, status=status.HTTP_401_UNAUTHORIZED)
+            if not user or not user.is_authenticated:
+                return Response({'detail': 'Authentication credentials were not provided.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        attachment = MessageAttachment.objects.filter(pk=str(attachment_id).strip()).select_related('message__conversation').first()
         if not attachment:
             return Response({'detail': 'Attachment not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if not is_user_in_conversation(request.user, attachment.message.conversation):
+        if (
+            not is_user_in_conversation(user, attachment.message.conversation)
+            and attachment.message.sender_id != user.id
+            and attachment.message.recipient_id != user.id
+            and user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+        ):
             return Response({'detail': 'Access to this attachment is denied.'}, status=status.HTTP_403_FORBIDDEN)
 
         if not attachment.file_data:
@@ -732,6 +950,9 @@ class AttachmentDownloadView(APIView):
         response = HttpResponse(bytes(attachment.file_data), content_type=attachment.content_type)
         response['Content-Disposition'] = f'inline; filename="{attachment.original_name}"'
         response['Content-Length'] = attachment.file_size
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
         return response
 
 

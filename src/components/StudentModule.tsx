@@ -1052,13 +1052,24 @@ export default function StudentModule({
     }
     setIsDownloadingDocId(document.id ?? null);
     try {
-      const { blob, filename } = await apiDownload(document.downloadUrl);
+      const { blob, filename, contentType } = await apiDownload(document.downloadUrl);
       const url = URL.createObjectURL(blob);
       const link = window.document.createElement('a');
       link.href = url;
-      link.download = filename || document.fileName || `${document.name}.${(document.fileType || 'pdf').toLowerCase()}`;
+      let finalName = filename;
+      if (!finalName || finalName === 'document' || !finalName.includes('.')) {
+        if (document.fileName && document.fileName.includes('.')) {
+          finalName = document.fileName;
+        } else {
+          const ext = contentType.includes('pdf') ? 'pdf' : contentType.includes('png') ? 'png' : (contentType.includes('jpeg') || contentType.includes('jpg')) ? 'jpg' : (document.fileType || 'pdf').toLowerCase();
+          finalName = `${document.fileName || document.name || 'document'}.${ext}`;
+        }
+      }
+      link.download = finalName;
+      window.document.body.appendChild(link);
       link.click();
-      URL.revokeObjectURL(url);
+      window.document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Document download failed.');
     } finally {
@@ -1178,7 +1189,8 @@ export default function StudentModule({
     }
     setIsPreviewLoadingDocId(doc.id ?? null);
     try {
-      const { blob, filename, contentType } = await apiDownload(doc.downloadUrl);
+      const previewUrl = doc.downloadUrl + (doc.downloadUrl.includes('?') ? '&view=1' : '?view=1');
+      const { blob, filename, contentType } = await apiDownload(previewUrl);
       const isPdf = contentType.includes('pdf') || (doc.fileType || '').toUpperCase() === 'PDF' || (doc.fileName || '').toLowerCase().endsWith('.pdf');
       const url = URL.createObjectURL(blob);
       setPreviewDoc({
@@ -3693,6 +3705,50 @@ export default function StudentModule({
                   <p className="text-slate-700 leading-relaxed mt-0.5">{selectedApplication.address || 'Not provided'}</p>
                 </div>
               </div>
+
+              {/* Supporting Document Section */}
+              {selectedApplication.hasDocument && selectedApplication.documentUrl && (
+                <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="p-2 rounded-xl bg-emerald-100 text-emerald-700 shrink-0">
+                      <FileText className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] uppercase font-bold text-emerald-800">Supporting Document</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">Attached</span>
+                      </div>
+                      <p className="text-xs font-bold text-slate-800 mt-0.5 truncate" title={selectedApplication.documentName}>
+                        {selectedApplication.documentCategory || 'Document'}: {selectedApplication.documentName || 'Attachment'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const { blob, filename } = await apiDownload(selectedApplication.documentUrl!);
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = filename || selectedApplication.documentName || 'supporting-document';
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          setTimeout(() => URL.revokeObjectURL(url), 60000);
+                        } catch (err) {
+                          alert(err instanceof Error ? err.message : 'Failed to download document');
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition flex items-center gap-1.5 text-xs cursor-pointer shadow-xs"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download File</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Provisional Credentials Notice */}
               <div className="p-3 rounded-lg border border-indigo-100 bg-indigo-50/60 text-xs space-y-1">

@@ -21,15 +21,36 @@ from .tasks import enqueue_fcm_notification
 import uuid
 
 def create_rows(sender, recipients, channel, category, title, body, related=None):
-    recipient_ids = {
-        user.id for user in recipients
-        if user and getattr(user, 'id', None) and getattr(user, 'school_id', None) == getattr(sender, 'school_id', None)
-    }
+    sender_school_id = getattr(sender, 'school_id', None)
+    recipient_ids = set()
+    for user in recipients:
+        if not user or not getattr(user, 'id', None):
+            continue
+        user_school_id = getattr(user, 'school_id', None)
+        if sender_school_id is None or user_school_id == sender_school_id or user_school_id is None:
+            recipient_ids.add(user.id)
+
     b_id = uuid.uuid4()
-    rows = [
-        Notification(school=sender.school, sender=sender, recipient_id=user_id, channel=channel, category=category, title=title, body=body, broadcast_id=b_id, related_object=related or {})
-        for user_id in recipient_ids
-    ]
+    school = getattr(sender, 'school', None)
+    rows = []
+    for user_id in recipient_ids:
+        target_school = school
+        if target_school is None:
+            target_user = next((u for u in recipients if getattr(u, 'id', None) == user_id), None)
+            target_school = getattr(target_user, 'school', None) if target_user else None
+        rows.append(
+            Notification(
+                school=target_school,
+                sender=sender,
+                recipient_id=user_id,
+                channel=channel,
+                category=category,
+                title=title,
+                body=body,
+                broadcast_id=b_id,
+                related_object=related or {},
+            )
+        )
     Notification.objects.bulk_create(rows)
     if recipient_ids:
         # FCM delivery only starts after the database notification transaction
@@ -185,9 +206,12 @@ class NotificationListView(APIView):
 
     @extend_schema(responses=NotificationSerializer(many=True))
     def get(self, request):
-        base_qs = Notification.objects.filter(
-            school_id=request.user.school_id
-        ).select_related('sender', 'recipient')
+        if request.user.role == User.Role.SUPER_ADMIN:
+            base_qs = Notification.objects.all().select_related('sender', 'recipient')
+        else:
+            base_qs = Notification.objects.filter(
+                Q(school_id=request.user.school_id) | Q(school__isnull=True)
+            ).select_related('sender', 'recipient')
 
         box_type = request.query_params.get('type', 'inbox')
         if box_type == 'sent':
@@ -208,15 +232,42 @@ class NotificationListView(APIView):
                 unique_sent.append(item)
             return Response(NotificationSerializer(unique_sent[:50], many=True).data)
 
-        # Default inbox: only notifications where the logged-in user is the recipient!
-        # The sender must NEVER receive incoming notification alerts for their own outgoing messages.
-        received_qs = base_qs.filter(recipient=request.user).exclude(status='Acknowledged')
+        # Default inbox:
+        if request.user.role == User.Role.SUPER_ADMIN:
+            received_qs = base_qs.filter(
+                Q(recipient=request.user) | Q(recipient__isnull=True)
+            ).exclude(status='Acknowledged')
+            if not received_qs.exists():
+                received_qs = base_qs.exclude(sender=request.user).exclude(status='Acknowledged')
+        else:
+            received_qs = base_qs.filter(
+                Q(recipient=request.user) | Q(recipient__isnull=True)
+            ).exclude(status='Acknowledged')
+
         if request.user.role == User.Role.PARENT:
             cutoff = timezone.now() - timedelta(days=7)
             received_qs = received_qs.filter(
                 Q(sender__school_id=request.user.school_id) | Q(sender__isnull=True),
                 created_at__gte=cutoff,
             )
+            profile = getattr(request.user, 'parent_profile', None)
+            ward_ids = {int(sid) for sid in profile.students.values_list('id', flat=True)} if profile else set()
+            filtered_items = []
+            for item in received_qs.order_by('-created_at')[:100]:
+                if item.category == 'Attendance Alert' or item.channel == 'attendance-alert':
+                    # Attendance alerts must be strictly addressed to this parent
+                    if item.recipient_id != request.user.id:
+                        continue
+                    rel = item.related_object or {}
+                    s_id = rel.get('studentId')
+                    if s_id is not None:
+                        try:
+                            if int(s_id) not in ward_ids:
+                                continue
+                        except (ValueError, TypeError):
+                            continue
+                filtered_items.append(item)
+            return Response(NotificationSerializer(filtered_items[:50], many=True).data)
 
         recent_received = list(received_qs.order_by('-created_at')[:50])
         return Response(NotificationSerializer(recent_received, many=True).data)
@@ -227,11 +278,10 @@ class NotificationReadView(APIView):
 
     @extend_schema(request=None, responses={200: NotificationSerializer, 404: OpenApiResponse(description='Not found')})
     def patch(self, request, notification_id):
-        notification = Notification.objects.filter(
-            pk=notification_id,
-            recipient=request.user,
-            school_id=request.user.school_id,
-        ).first()
+        qs = Notification.objects.filter(pk=notification_id)
+        if request.user.role != User.Role.SUPER_ADMIN:
+            qs = qs.filter(Q(recipient=request.user) | Q(school_id=request.user.school_id))
+        notification = qs.first()
         if not notification:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if notification.read_at is None:
@@ -244,26 +294,70 @@ class NotificationDecisionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     @extend_schema(
-        request=inline_serializer('NotificationDecisionRequest', {'status': serializers.ChoiceField(choices=['Approved', 'Declined'])}),
+        request=inline_serializer('NotificationDecisionRequest', {
+            'status': serializers.ChoiceField(choices=['Approved', 'Declined', 'Rejected'], required=False),
+            'action': serializers.ChoiceField(choices=['Approve', 'Reject', 'Decline', 'Approved', 'Declined'], required=False),
+            'note': serializers.CharField(required=False, allow_blank=True),
+        }),
         responses={200: NotificationSerializer},
     )
     def patch(self, request, notification_id):
-        if request.user.role != User.Role.SCHOOL_ADMIN:
-            return Response({'detail': 'Only school admins can resolve leave requests.'}, status=status.HTTP_403_FORBIDDEN)
+        return self._handle_decision(request, notification_id)
 
-        notification = Notification.objects.filter(
-            pk=notification_id,
-            school_id=request.user.school_id,
-        ).first()
+    def post(self, request, notification_id):
+        return self._handle_decision(request, notification_id)
+
+    def _handle_decision(self, request, notification_id):
+        if request.user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'detail': 'Only school administrators can resolve leave requests.'}, status=status.HTTP_403_FORBIDDEN)
+
+        qs = Notification.objects.filter(pk=notification_id)
+        if request.user.school_id:
+            qs = qs.filter(school_id=request.user.school_id)
+        notification = qs.first()
         if not notification:
-            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'Notification not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        new_status = request.data.get('status')
-        if new_status not in ['Approved', 'Declined']:
+        raw_action = str(request.data.get('action') or request.data.get('status') or '').strip().lower()
+        if raw_action in ['approve', 'approved']:
+            new_status = 'Approved'
+        elif raw_action in ['reject', 'rejected', 'decline', 'declined']:
+            new_status = 'Declined'
+        else:
             return Response({'detail': 'Status must be Approved or Declined.'}, status=status.HTTP_400_BAD_REQUEST)
 
         notification.status = new_status
-        notification.save(update_fields=['status'])
+        if not notification.read_at:
+            notification.read_at = timezone.now()
+
+        related = dict(notification.related_object or {})
+        admin_name = request.user.get_full_name() or request.user.email
+        related['decision'] = new_status
+        related['decision_by'] = admin_name
+        related['decision_at'] = timezone.now().isoformat()
+        if request.data.get('note'):
+            related['decision_note'] = str(request.data.get('note')).strip()
+        notification.related_object = related
+        notification.save(update_fields=['status', 'read_at', 'related_object'])
+
+        # Notify the requesting teacher/staff member
+        if notification.sender and notification.sender != request.user:
+            try:
+                create_rows(
+                    request.user,
+                    [notification.sender],
+                    'school-to-teachers',
+                    'Leave Request',
+                    f"Leave Request {new_status}: {notification.title}",
+                    f"Your request '{notification.title}' has been {new_status.lower()} by {admin_name}.",
+                    related={
+                        'decision': new_status,
+                        'originalNotificationId': notification.id,
+                        'category': 'Leave Request',
+                    }
+                )
+            except Exception:
+                pass
 
         return Response(NotificationSerializer(notification).data)
 
@@ -273,11 +367,10 @@ class NotificationAcknowledgeView(APIView):
 
     @extend_schema(request=None, responses={200: NotificationSerializer})
     def patch(self, request, notification_id):
-        notification = Notification.objects.filter(
-            pk=notification_id,
-            recipient=request.user,
-            school_id=request.user.school_id,
-        ).first()
+        qs = Notification.objects.filter(pk=notification_id)
+        if request.user.role != User.Role.SUPER_ADMIN:
+            qs = qs.filter(Q(recipient=request.user) | Q(school_id=request.user.school_id))
+        notification = qs.first()
         if not notification:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -291,29 +384,14 @@ class NotificationClearAllView(APIView):
 
     @extend_schema(responses={204: None})
     def delete(self, request):
-        if request.user.role != User.Role.SCHOOL_ADMIN:
-            return Response({'detail': 'Only school admins can clear all notifications.'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'detail': 'Only administrators can clear all notifications.'}, status=status.HTTP_403_FORBIDDEN)
 
-        Notification.objects.filter(school_id=request.user.school_id).delete()
+        if request.user.role == User.Role.SUPER_ADMIN:
+            Notification.objects.all().delete()
+        else:
+            Notification.objects.filter(school_id=request.user.school_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-class NotificationReadView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    @extend_schema(request=None, responses={200: NotificationSerializer, 404: OpenApiResponse(description='Not found')})
-    def patch(self, request, notification_id):
-        notification = Notification.objects.filter(
-            pk=notification_id,
-            recipient=request.user,
-            school_id=request.user.school_id,
-        ).first()
-        if not notification:
-            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if notification.read_at is None:
-            notification.read_at = timezone.now()
-            notification.save(update_fields=['read_at'])
-        return Response(NotificationSerializer(notification).data)
 
 
 class AdminScopedComposerBase(APIView):

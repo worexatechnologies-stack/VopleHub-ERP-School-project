@@ -72,15 +72,29 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
     if user.school_id != target_user.school_id:
         return False, 'Cross-school messaging is prohibited.', None
 
-    # Student accounts blocked from direct chat
-    if user.role == User.Role.STUDENT or target_user.role == User.Role.STUDENT:
-        return False, 'Direct messaging is not available for student accounts.', None
+    # Peer-to-peer student-student messaging is restricted for school safety
+    if user.role == User.Role.STUDENT and target_user.role == User.Role.STUDENT:
+        return False, 'Student-to-student direct messaging is not permitted.', None
 
-    # 1. School Admin
+    # 1. School Admin / Super Admin
     if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
-        if target_user.role != User.Role.TEACHER:
-            return False, 'School Admins can only direct chat with teachers.', None
-        return True, '', None
+        if target_user.role in [User.Role.TEACHER, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return True, '', None
+        if target_user.role == User.Role.PARENT:
+            parent_profile = getattr(target_user, 'parent_profile', None)
+            matched_student = None
+            if parent_profile:
+                linked_students = list(parent_profile.students.filter(school_id=user.school_id, status='Active'))
+                if student and student in linked_students:
+                    matched_student = student
+                elif linked_students:
+                    matched_student = linked_students[0]
+            return True, '', matched_student
+        if target_user.role == User.Role.STUDENT:
+            student_profile = getattr(target_user, 'student_profile', None)
+            matched_student = getattr(student_profile, 'student', None) if student_profile else None
+            return True, '', matched_student
+        return False, 'Admins can direct chat with teachers, parents, students, and administrative staff.', None
 
     # 2. Teacher
     if user.role == User.Role.TEACHER:
@@ -91,6 +105,14 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
         # Teacher to Admin
         if target_user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return True, '', None
+
+        # Teacher to Student
+        if target_user.role == User.Role.STUDENT:
+            student_profile = getattr(target_user, 'student_profile', None)
+            st = getattr(student_profile, 'student', None) if student_profile else None
+            if not st or not check_teacher_matches_student(teacher_profile, st):
+                return False, 'You are not assigned to teach this student.', None
+            return True, '', st
 
         # Teacher to Parent
         if target_user.role == User.Role.PARENT:
@@ -117,12 +139,24 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
 
             return True, '', matched_student
 
-        return False, 'Teachers may only message School Admins or parents of assigned students.', None
+        return False, 'Teachers may only message School Admins, parents of assigned students, or assigned students.', None
 
     # 3. Parent
     if user.role == User.Role.PARENT:
+        # Parent to School Admin / Office Desk
+        if target_user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            parent_profile = getattr(user, 'parent_profile', None)
+            matched_student = None
+            if parent_profile:
+                linked_students = list(parent_profile.students.filter(school_id=user.school_id, status='Active'))
+                if student and student in linked_students:
+                    matched_student = student
+                elif linked_students:
+                    matched_student = linked_students[0]
+            return True, '', matched_student
+
         if target_user.role != User.Role.TEACHER:
-            return False, "Parents can only direct chat with their children's teachers.", None
+            return False, "Parents can only direct chat with their children's teachers or school administration.", None
 
         parent_profile = getattr(user, 'parent_profile', None)
         if not parent_profile:
@@ -150,6 +184,28 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
             return False, 'You can only message teachers currently assigned to your children.', None
 
         return True, '', matched_student
+
+    # 4. Student
+    if user.role == User.Role.STUDENT:
+        student_profile = getattr(user, 'student_profile', None)
+        st = getattr(student_profile, 'student', None) if student_profile else None
+        if not st or st.status != 'Active':
+            return False, 'Active student profile required.', None
+
+        # Student to Admin / Office Desk
+        if target_user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return True, '', st
+
+        # Student to Teacher
+        if target_user.role == User.Role.TEACHER:
+            teacher_profile = getattr(target_user, 'teacher_profile', None)
+            if not teacher_profile or teacher_profile.status != Teacher.Status.ACTIVE:
+                return False, 'Teacher profile not found or inactive.', None
+            if not check_teacher_matches_student(teacher_profile, st):
+                return False, 'You can only message teachers assigned to your class.', None
+            return True, '', st
+
+        return False, 'Students can message their assigned teachers and school administration.', None
 
     return False, 'Unauthorized role for messaging.', None
 

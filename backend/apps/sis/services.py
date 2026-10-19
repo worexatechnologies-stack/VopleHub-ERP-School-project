@@ -89,36 +89,59 @@ def create_student_login(student, password=None, email=None):
 
 
 def create_or_link_parent_login(student, password=None, email=None):
-    # Parent accounts and their wards must stay inside one school tenant.
-    # Never link on a globally matching phone number.
-    existing_profile = ParentProfile.objects.select_related('user').filter(
-        phone=student.parent_phone,
-        user__school=student.school,
-    ).first()
-    if existing_profile:
-        existing_profile.students.add(student)
-        return {
-            'created': False,
-            'email': existing_profile.user.email,
-            'userId': existing_profile.user_id,
-            'message': 'Existing parent account linked to the new student. No new password was generated.',
-        }
+    parent_email_query = (email or student.parent_email or '').strip()
 
-    parent_email_query = email or student.parent_email
-    existing_parent_user = User.objects.filter(
-        email__iexact=parent_email_query,
-        role=User.Role.PARENT,
-        school=student.school,
-    ).first()
-    if existing_parent_user and not hasattr(existing_parent_user, 'parent_profile'):
-        profile = ParentProfile.objects.create(user=existing_parent_user, phone=student.parent_phone)
-        profile.students.add(student)
-        return {
-            'created': False,
-            'email': existing_parent_user.email,
-            'userId': existing_parent_user.id,
-            'message': 'Existing parent account linked to the new student. No new password was generated.',
-        }
+    # 1. Match by email first within the school tenant (primary account identity)
+    if parent_email_query:
+        existing_profile = ParentProfile.objects.select_related('user').filter(
+            user__email__iexact=parent_email_query,
+            user__school=student.school,
+        ).first()
+        if existing_profile:
+            existing_profile.students.add(student)
+            return {
+                'created': False,
+                'email': existing_profile.user.email,
+                'userId': existing_profile.user_id,
+                'message': 'Existing parent account linked to the new student. No new password was generated.',
+            }
+
+        existing_parent_user = User.objects.filter(
+            email__iexact=parent_email_query,
+            role=User.Role.PARENT,
+            school=student.school,
+        ).first()
+        if existing_parent_user:
+            profile, _ = ParentProfile.objects.get_or_create(
+                user=existing_parent_user,
+                defaults={'phone': student.parent_phone or ''}
+            )
+            profile.students.add(student)
+            return {
+                'created': False,
+                'email': existing_parent_user.email,
+                'userId': existing_parent_user.id,
+                'message': 'Existing parent account linked to the new student. No new password was generated.',
+            }
+
+    # 2. Only consider phone matching if NO email is specified, and names align,
+    # to avoid false-positive linking of different families who enter placeholder/dummy phones.
+    if not parent_email_query and student.parent_phone:
+        existing_profile = ParentProfile.objects.select_related('user').filter(
+            phone=student.parent_phone,
+            user__school=student.school,
+        ).first()
+        if existing_profile:
+            existing_name = (existing_profile.user.get_full_name() or '').lower().strip()
+            new_name = (student.parent_name or '').lower().strip()
+            if not existing_name or not new_name or existing_name == new_name or new_name in existing_name or existing_name in new_name:
+                existing_profile.students.add(student)
+                return {
+                    'created': False,
+                    'email': existing_profile.user.email,
+                    'userId': existing_profile.user_id,
+                    'message': 'Existing parent account linked to the new student. No new password was generated.',
+                }
 
     try:
         candidate_email = email

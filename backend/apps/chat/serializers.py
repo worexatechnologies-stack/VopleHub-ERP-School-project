@@ -25,11 +25,7 @@ class MessageAttachmentSerializer(serializers.ModelSerializer):
         fields = ['id', 'originalName', 'contentType', 'fileSize', 'downloadUrl']
 
     def get_downloadUrl(self, obj) -> str:
-        request = self.context.get('request')
-        url = f"/api/v1/attachments/{obj.id}/download/"
-        if request:
-            return request.build_absolute_uri(url)
-        return url
+        return f"/api/v1/attachments/{obj.id}/download/"
 
 
 class UserParticipantSerializer(serializers.ModelSerializer):

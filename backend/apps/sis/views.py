@@ -1452,39 +1452,55 @@ class StudentViewSet(TenantScopedViewSet):
 class StudentDocumentDownloadView(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
+    def _get_student_id(self, request, student_id):
+        if not student_id or str(student_id).lower() == 'me' or (request.user.role == User.Role.STUDENT and str(student_id) == '0'):
+            if hasattr(request.user, 'student_profile') and request.user.student_profile:
+                return request.user.student_profile.student_id
+        return student_id
+
     @extend_schema(responses={
         200: OpenApiResponse(response=OpenApiTypes.BINARY, description='Authorized student document download'),
         403: OpenApiResponse(description='Forbidden'),
         404: OpenApiResponse(description='Not found'),
     })
     def retrieve(self, request, student_id=None, doc_id=None):
-        document = StudentDocument.objects.select_related('student').filter(pk=doc_id, student_id=student_id).first()
+        resolved_student_id = self._get_student_id(request, student_id)
+        query = StudentDocument.objects.select_related('student')
+        if doc_id:
+            query = query.filter(pk=doc_id)
+        if resolved_student_id and str(resolved_student_id).lower() != 'me':
+            query = query.filter(student_id=resolved_student_id)
+        document = query.first()
         if not document:
             raise Http404
         student, user = document.student, request.user
         if user.role == User.Role.SUPER_ADMIN:
             return Response({'detail': 'Super Admins cannot access student documents.'}, status=status.HTTP_403_FORBIDDEN)
-        if user.school_id != student.school_id:
+        if str(user.school_id or '') != str(student.school_id or ''):
             raise Http404
-        allowed = user.role == User.Role.SCHOOL_ADMIN
+        allowed = user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]
         if user.role == User.Role.PARENT:
             allowed = hasattr(user, 'parent_profile') and user.parent_profile.students.filter(pk=student.pk).exists()
         elif user.role == User.Role.STUDENT:
             allowed = hasattr(user, 'student_profile') and user.student_profile.student_id == student.pk
         if not allowed:
             raise Http404
+
+        as_attachment = request.query_params.get('inline') != '1' and request.query_params.get('view') != '1'
         from apps.common.storage import open_file, file_exists
         if document.file_key and file_exists(document.file_key):
             try:
                 handle = open_file(document.file_key)
                 response = FileResponse(
                     handle,
-                    as_attachment=True,
+                    as_attachment=as_attachment,
                     filename=document.file_name or document.name,
                     content_type=document.file_content_type or 'application/octet-stream',
                 )
                 response['Cache-Control'] = 'private, no-store'
                 response['X-Content-Type-Options'] = 'nosniff'
+                response['X-Frame-Options'] = 'SAMEORIGIN'
+                response['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type, Content-Length'
                 return response
             except Exception:
                 pass
@@ -1492,12 +1508,14 @@ class StudentDocumentDownloadView(viewsets.ViewSet):
             raise Http404
         response = FileResponse(
             BytesIO(bytes(document.file_data)),
-            as_attachment=True,
+            as_attachment=as_attachment,
             filename=document.file_name or document.name,
             content_type=document.file_content_type or 'application/octet-stream',
         )
         response['Cache-Control'] = 'private, no-store'
         response['X-Content-Type-Options'] = 'nosniff'
+        response['X-Frame-Options'] = 'SAMEORIGIN'
+        response['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type, Content-Length'
         return response
 
     @extend_schema(request=DocumentSerializer, responses={
@@ -1509,7 +1527,11 @@ class StudentDocumentDownloadView(viewsets.ViewSet):
     def partial_update(self, request, student_id=None, doc_id=None):
         if request.user.role != User.Role.SCHOOL_ADMIN:
             return Response({'detail': 'Only school administrators can verify or reject student documents.'}, status=status.HTTP_403_FORBIDDEN)
-        document = StudentDocument.objects.select_related('student').filter(pk=doc_id, student_id=student_id).first()
+        resolved_student_id = self._get_student_id(request, student_id)
+        query = StudentDocument.objects.select_related('student').filter(pk=doc_id)
+        if resolved_student_id and str(resolved_student_id).lower() != 'me':
+            query = query.filter(student_id=resolved_student_id)
+        document = query.first()
         if not document or str(document.student.school_id or '') != str(request.user.school_id or ''):
             raise Http404
         new_status = request.data.get('status')
@@ -1533,9 +1555,13 @@ class StudentDocumentDownloadView(viewsets.ViewSet):
         404: OpenApiResponse(description='Not found'),
     })
     def destroy(self, request, student_id=None, doc_id=None):
-        document = StudentDocument.objects.select_related('student').filter(
-            pk=doc_id, student_id=student_id, student__school_id=request.user.school_id
-        ).first()
+        resolved_student_id = self._get_student_id(request, student_id)
+        query = StudentDocument.objects.select_related('student').filter(
+            pk=doc_id, student__school_id=request.user.school_id
+        )
+        if resolved_student_id and str(resolved_student_id).lower() != 'me':
+            query = query.filter(student_id=resolved_student_id)
+        document = query.first()
         if not document:
             raise Http404
         allowed = (request.user.role == User.Role.SCHOOL_ADMIN) or (
@@ -1556,12 +1582,19 @@ class StudentDocumentCollectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'credential_management'
 
+    def _get_student_id(self, request, student_id):
+        if not student_id or str(student_id).lower() == 'me' or (request.user.role == User.Role.STUDENT and str(student_id) == '0'):
+            if hasattr(request.user, 'student_profile') and request.user.student_profile:
+                return request.user.student_profile.student_id
+        return student_id
+
     @extend_schema(responses={200: DocumentSerializer(many=True), 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Not found')})
     def get(self, request, student_id=None):
-        student = Student.objects.filter(pk=student_id, school_id=request.user.school_id).first()
+        resolved_student_id = self._get_student_id(request, student_id)
+        student = Student.objects.filter(pk=resolved_student_id, school_id=request.user.school_id).first()
         if not student:
             raise Http404
-        allowed = (request.user.role == User.Role.SCHOOL_ADMIN) or (
+        allowed = (request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]) or (
             request.user.role == User.Role.STUDENT and hasattr(request.user, 'student_profile') and request.user.student_profile.student_id == student.pk
         ) or (
             request.user.role == User.Role.PARENT and hasattr(request.user, 'parent_profile') and request.user.parent_profile.students.filter(pk=student.pk).exists()
@@ -1573,7 +1606,8 @@ class StudentDocumentCollectionView(APIView):
 
     @extend_schema(request=StudentDocumentUploadSerializer, responses={201: DocumentSerializer, 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Not found')})
     def post(self, request, student_id=None):
-        student = Student.objects.filter(pk=student_id, school_id=request.user.school_id).first()
+        resolved_student_id = self._get_student_id(request, student_id)
+        student = Student.objects.filter(pk=resolved_student_id, school_id=request.user.school_id).first()
         if not student:
             raise Http404
         allowed = (request.user.role == User.Role.SCHOOL_ADMIN) or (
@@ -1585,6 +1619,101 @@ class StudentDocumentCollectionView(APIView):
         serializer.is_valid(raise_exception=True)
         document = serializer.save()
         return Response(DocumentSerializer(document, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class SchoolDocumentQueueView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(responses={200: OpenApiResponse(description='All student and teacher documents for the school')})
+    def get(self, request):
+        user = request.user
+        if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'detail': 'Only school administrators can access document verification queues.'}, status=status.HTTP_403_FORBIDDEN)
+
+        school_id = request.user.school_id
+        if not school_id and user.role == User.Role.SUPER_ADMIN:
+            school_id = request.query_params.get('school_id')
+        if not school_id:
+            return Response({'detail': 'A school context is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Fetch Student Documents
+        student_docs_qs = StudentDocument.objects.filter(
+            student__school_id=school_id
+        ).select_related('student', 'verified_by').order_by('-created_at')
+
+        # 2. Fetch Teacher Documents
+        from apps.staff.models import TeacherDocument
+        teacher_docs_qs = TeacherDocument.objects.filter(
+            teacher__school_id=school_id
+        ).select_related('teacher', 'teacher__user', 'verified_by').order_by('-created_at')
+
+        student_list = []
+        for d in student_docs_qs:
+            student_list.append({
+                'id': d.id,
+                'docType': 'student',
+                'studentId': d.student_id,
+                'studentName': d.student.name if d.student else 'Student',
+                'admissionNo': d.student.admission_no or '' if d.student else '',
+                'className': d.student.class_name or '' if d.student else '',
+                'sectionName': d.student.section or '' if d.student else '',
+                'name': d.name,
+                'category': d.category,
+                'status': d.status,
+                'remarks': d.remarks or '',
+                'fileType': d.file_type or 'PDF',
+                'fileName': d.file_name or '',
+                'uploadedAt': d.created_at.isoformat() if d.created_at else None,
+                'verifiedAt': d.verified_at.isoformat() if d.verified_at else None,
+                'verifiedByName': (d.verified_by.get_full_name() or d.verified_by.username) if d.verified_by else None,
+                'downloadUrl': f'/api/v1/students/{d.student_id}/documents/{d.id}/',
+            })
+
+        teacher_list = []
+        for d in teacher_docs_qs:
+            t_user = d.teacher.user if d.teacher else None
+            t_name = f"{t_user.first_name or ''} {t_user.last_name or ''}".strip() if t_user else 'Teacher'
+            if not t_name and t_user:
+                t_name = t_user.username
+            teacher_list.append({
+                'id': d.id,
+                'docType': 'teacher',
+                'teacherId': d.teacher_id,
+                'teacherName': t_name or 'Teacher',
+                'qualification': d.teacher.qualification or '' if d.teacher else '',
+                'department': getattr(d.teacher, 'department', '') or '',
+                'name': d.name,
+                'category': d.category,
+                'status': d.status,
+                'remarks': d.remarks or '',
+                'fileType': d.file_type or 'PDF',
+                'fileName': d.file_name or '',
+                'uploadedAt': d.created_at.isoformat() if d.created_at else None,
+                'verifiedAt': d.verified_at.isoformat() if d.verified_at else None,
+                'verifiedByName': (d.verified_by.get_full_name() or d.verified_by.username) if d.verified_by else None,
+                'downloadUrl': f'/api/v1/teachers/{d.teacher_id}/documents/{d.id}/',
+            })
+
+        all_docs = student_list + teacher_list
+        all_docs.sort(key=lambda x: x.get('uploadedAt') or '', reverse=True)
+
+        pending_count = sum(1 for d in all_docs if d['status'] == 'Pending')
+        verified_count = sum(1 for d in all_docs if d['status'] == 'Verified')
+        rejected_count = sum(1 for d in all_docs if d['status'] == 'Rejected')
+
+        return Response({
+            'documents': all_docs,
+            'studentDocuments': student_list,
+            'teacherDocuments': teacher_list,
+            'summary': {
+                'totalDocs': len(all_docs),
+                'totalPending': pending_count,
+                'totalVerified': verified_count,
+                'totalRejected': rejected_count,
+                'totalStudentDocs': len(student_list),
+                'totalTeacherDocs': len(teacher_list),
+            }
+        })
 
 
 class EnrollmentLinkViewSet(TenantScopedViewSet):
@@ -1871,6 +2000,7 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
                 handle = open_file(app.photo_key)
                 response = FileResponse(handle, content_type=app.photo_content_type or 'image/jpeg')
                 response['Cache-Control'] = 'private, max-age=300'
+                response['Access-Control-Expose-Headers'] = 'Content-Type'
                 return response
             except Exception:
                 pass
@@ -1878,12 +2008,16 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
             raise Http404('No photo found for this application.')
         response = HttpResponse(bytes(app.photo_data), content_type=app.photo_content_type or 'image/jpeg')
         response['Cache-Control'] = 'private, max-age=300'
+        response['Access-Control-Expose-Headers'] = 'Content-Type'
         return response
 
     @action(detail=True, methods=['get'], url_path='document')
     def document(self, request, pk=None):
         app = self.get_object()
         from apps.common.storage import open_file, file_exists
+        is_download = request.query_params.get('download') in ['1', 'true']
+        disp = 'attachment' if is_download else 'inline'
+        filename = app.document_name or "document"
         if app.document_key and file_exists(app.document_key):
             try:
                 handle = open_file(app.document_key)
@@ -1891,8 +2025,9 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
                     handle,
                     content_type=app.document_content_type or 'application/octet-stream',
                 )
-                response['Content-Disposition'] = f'inline; filename="{app.document_name or "document"}"'
+                response['Content-Disposition'] = f'{disp}; filename="{filename}"'
                 response['Cache-Control'] = 'private, max-age=300'
+                response['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type'
                 return response
             except Exception:
                 pass
@@ -1902,8 +2037,9 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
             bytes(app.document_data),
             content_type=app.document_content_type or 'application/octet-stream',
         )
-        response['Content-Disposition'] = f'inline; filename="{app.document_name or "document"}"'
+        response['Content-Disposition'] = f'{disp}; filename="{filename}"'
         response['Cache-Control'] = 'private, max-age=300'
+        response['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type'
         return response
 
     @action(detail=True, methods=['post'], url_path='approve')

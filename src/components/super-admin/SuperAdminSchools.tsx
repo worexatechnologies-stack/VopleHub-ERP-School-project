@@ -5,9 +5,11 @@ import {
   useCreateSchoolMutation,
   useUpdateSchoolMutation,
   useDeleteSchoolMutation,
+  schoolApi,
   type SchoolRecord,
 } from '../../store/api/schoolApi';
-import { getErrorMessage } from '../../utils/apiError';
+import { useAppDispatch } from '../../store';
+import { getErrorMessage, getErrorStatus } from '../../utils/apiError';
 import { ACCESS_TOKEN_STORAGE_KEY } from '../../utils/auth';
 import AuthenticatedImage from '../AuthenticatedImage';
 import { formatBytes, optimizeImageForUpload } from '../../services/imageOptimizer';
@@ -19,6 +21,7 @@ const normalizeCode = (value: string) => value
   .replace(/^-+|-+$/g, '');
 
 export default function SuperAdminSchools() {
+  const dispatch = useAppDispatch();
   const tokenExists = Boolean(localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY));
   const { data: rawSchools = [], isLoading, error: queryError } = useGetSchoolsQuery(undefined, {
     skip: !tokenExists,
@@ -145,7 +148,12 @@ export default function SuperAdminSchools() {
         } catch {}
       }
     } catch (requestError) {
-      setActionError(getErrorMessage(requestError, 'Could not update the school.'));
+      if (getErrorStatus(requestError) === 404) {
+        setActionError('This school has already been removed.');
+        dispatch(schoolApi.util.invalidateTags(['School']));
+      } else {
+        setActionError(getErrorMessage(requestError, 'Could not update the school.'));
+      }
     }
   };
 
@@ -192,7 +200,12 @@ export default function SuperAdminSchools() {
         } catch {}
       }
     } catch (requestError) {
-      setActionError(getErrorMessage(requestError, 'Could not permanently delete the school.'));
+      if (getErrorStatus(requestError) === 404) {
+        setActionError('This school has already been deleted.');
+        dispatch(schoolApi.util.invalidateTags(['School']));
+      } else {
+        setActionError(getErrorMessage(requestError, 'Could not permanently delete the school.'));
+      }
     }
   };
 

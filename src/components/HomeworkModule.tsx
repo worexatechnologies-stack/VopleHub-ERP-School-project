@@ -125,6 +125,21 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
     return Array.isArray(rawHomeworkData) ? rawHomeworkData : (rawHomeworkData as any)?.results || [];
   }, [rawHomeworkData]);
 
+  // Dynamic list of all subjects for filter dropdown (from Academic Catalog + actual Homework assignments)
+  const availableFilterSubjects = useMemo(() => {
+    const set = new Set<string>();
+    academicSubjects.forEach((s) => {
+      if (s.name && s.name.trim()) set.add(s.name.trim());
+    });
+    homeworkList.forEach((hw) => {
+      if (hw.subjectName && hw.subjectName.trim()) set.add(hw.subjectName.trim());
+    });
+    if (set.size === 0) {
+      ['English', 'Mathematics', 'Science', 'Social Studies', 'Hindi', 'Computer Science'].forEach((s) => set.add(s));
+    }
+    return Array.from(set).sort();
+  }, [academicSubjects, homeworkList]);
+
   const [createHomework, { isLoading: isCreating }] = useCreateHomeworkMutation();
   const [updateHomework, { isLoading: isUpdating }] = useUpdateHomeworkMutation();
   const [deleteHomework] = useDeleteHomeworkMutation();
@@ -965,12 +980,11 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
             className="p-2.5 rounded-xl border border-slate-200 font-bold text-indigo-700 bg-indigo-50/50 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
           >
             <option value="All">All Subjects</option>
-            <option value="English">English</option>
-            <option value="Mathematics">Mathematics</option>
-            <option value="Science">Science</option>
-            <option value="Social Studies">Social Studies</option>
-            <option value="Hindi">Hindi</option>
-            <option value="Computer Science">Computer Science</option>
+            {availableFilterSubjects.map((subj) => (
+              <option key={subj} value={subj}>
+                {subj}
+              </option>
+            ))}
           </select>
 
           {/* Status Filter */}
@@ -1276,228 +1290,251 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       {/* MODAL 1: ASSIGN / EDIT HOMEWORK (TEACHER & ADMIN)                          */}
       {/* ─────────────────────────────────────────────────────────────────────────── */}
       {isCreateModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full border border-slate-200 shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            {/* Modal Header */}
-            <div className="p-5 bg-gradient-to-r from-indigo-600 to-violet-600 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 bg-white/10 rounded-xl">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-hidden">
+          <div className="bg-white rounded-3xl max-w-lg w-full border border-slate-200/80 shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[calc(100vh-2rem)] sm:max-h-[90vh]">
+            {/* Modal Header (Pinned) */}
+            <div className="px-5 py-4 sm:px-6 sm:py-4.5 bg-gradient-to-r from-indigo-600 via-indigo-600 to-violet-600 text-white flex items-center justify-between shrink-0 shadow-xs">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="p-2.5 bg-white/15 backdrop-blur-xs rounded-xl shadow-inner shrink-0">
                   <BookOpen className="w-5 h-5 text-white" />
                 </div>
-                <div>
-                  <h3 className="font-extrabold text-base">
+                <div className="min-w-0">
+                  <h3 className="font-extrabold text-base tracking-tight truncate">
                     {editingHomework ? 'Edit Class Homework' : 'Assign New Class Homework'}
                   </h3>
-                  <p className="text-xs text-indigo-100 mt-0.5">
+                  <p className="text-xs text-indigo-100/90 truncate mt-0.5">
                     {editingHomework
                       ? 'Update assignment details and instructions'
-                      : 'Publishes task and sends automatic notifications to students & parents'}
+                      : 'Publishes task and sends automatic notifications'}
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setIsCreateModalOpen(false)}
-                className="p-1.5 hover:bg-white/20 rounded-xl transition cursor-pointer"
+                className="p-1.5 hover:bg-white/20 active:scale-95 text-white/80 hover:text-white rounded-xl transition cursor-pointer shrink-0 ml-2"
+                aria-label="Close modal"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Form */}
-            <form onSubmit={handleSaveHomework} className="p-6 space-y-4 text-xs">
-              {/* Teacher Scope Warning / Status */}
-              {isTeacher && !teacherScope.hasAssignments && (
-                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2.5 text-amber-800">
-                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <form onSubmit={handleSaveHomework} className="flex flex-col flex-1 min-h-0">
+              {/* Scrollable Form Body */}
+              <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                {/* Teacher Scope Warning / Status */}
+                {isTeacher && !teacherScope.hasAssignments && (
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2.5 text-amber-800">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-extrabold text-xs">No Teaching Classes Assigned</p>
+                      <p className="mt-0.5 text-[11px] text-amber-700 leading-relaxed">
+                        You are not currently assigned to teach any classes or sections. Under school policy, only class-taking teachers can assign homework for their classes. Please contact the administrator to assign your class schedule.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {isTeacher && teacherScope.hasAssignments && (
+                  <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-indigo-900">
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-5 h-5 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                        <Check className="w-3 h-3 text-indigo-600 shrink-0" />
+                      </div>
+                      <span className="text-xs font-bold">Authorized Classes:</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {teacherScope.classes.map((c) => (
+                        <span key={c} className="text-[11px] font-extrabold text-indigo-700 bg-white px-2 py-0.5 rounded-lg border border-indigo-200/80 shadow-2xs">
+                          Class {c}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Class & Section Row */}
+                <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <p className="font-extrabold text-xs">No Teaching Classes Assigned</p>
-                    <p className="mt-0.5 text-[11px] text-amber-700 leading-relaxed">
-                      You are not currently assigned to teach any classes or sections. Under school policy, only class-taking teachers can assign homework for their classes. Please contact the administrator to assign your class schedule.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {isTeacher && teacherScope.hasAssignments && (
-                <div className="p-2.5 bg-indigo-50/70 border border-indigo-100 rounded-xl flex items-center justify-between text-indigo-900">
-                  <div className="flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                    <span className="text-[11px] font-bold">Authorized Teaching Classes:</span>
-                  </div>
-                  <span className="text-[11px] font-extrabold text-indigo-700 bg-white px-2 py-0.5 rounded-lg border border-indigo-200">
-                    {teacherScope.classes.map((c) => `Class ${c}`).join(', ')}
-                  </span>
-                </div>
-              )}
-
-              {/* Class & Section Row */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Target Class *</label>
-                  <select
-                    value={formClass}
-                    onChange={(e) => handleFormClassChange(e.target.value)}
-                    required
-                    disabled={isTeacher && !teacherScope.hasAssignments}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    {modalClassOptions.map((c) => (
-                      <option key={c} value={c}>
-                        {c === 'All Classes' ? '🌐 All Classes (School-wide)' : `Class ${c}`}
-                      </option>
-                    ))}
-                    {modalClassOptions.length === 0 && (
-                      <option value="">No Classes Assigned</option>
-                    )}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Section</label>
-                  <select
-                    value={formSection}
-                    onChange={(e) => handleFormSectionChange(e.target.value)}
-                    disabled={(isTeacher && !teacherScope.hasAssignments) || formClass === 'All Classes'}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    {formClass === 'All Classes' ? (
-                      <option value="All">All Sections (School-wide)</option>
-                    ) : (
-                      modalSectionOptions.map((sec) => (
-                        <option key={sec} value={sec}>
-                          {sec === 'All' ? 'All Sections' : `Section ${sec}`}
+                    <label className="block font-bold text-slate-700 mb-1.5">
+                      Target Class <span className="text-rose-500">*</span>
+                    </label>
+                    <select
+                      value={formClass}
+                      onChange={(e) => handleFormClassChange(e.target.value)}
+                      required
+                      disabled={isTeacher && !teacherScope.hasAssignments}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 transition"
+                    >
+                      {modalClassOptions.map((c) => (
+                        <option key={c} value={c}>
+                          {c === 'All Classes' ? '🌐 All Classes (School-wide)' : `Class ${c}`}
                         </option>
-                      ))
-                    )}
-                  </select>
-                </div>
-              </div>
+                      ))}
+                      {modalClassOptions.length === 0 && (
+                        <option value="">No Classes Assigned</option>
+                      )}
+                    </select>
+                  </div>
 
-              {formClass === 'All Classes' && (
-                <div className="p-3 bg-gradient-to-r from-violet-50 to-indigo-50 border border-indigo-200 rounded-2xl flex items-start gap-2.5 text-indigo-900 shadow-2xs">
-                  <Globe2 className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
-                  <div className="text-xs">
-                    <p className="font-extrabold text-indigo-950">School-Wide Broadcast Homework</p>
-                    <p className="text-[11px] text-indigo-700 mt-0.5 leading-relaxed">
-                      This homework assignment will be published to all classes and sections across the entire school. All students and parents will receive instant notifications.
-                    </p>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1.5">Section</label>
+                    <select
+                      value={formSection}
+                      onChange={(e) => handleFormSectionChange(e.target.value)}
+                      disabled={(isTeacher && !teacherScope.hasAssignments) || formClass === 'All Classes'}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 transition"
+                    >
+                      {formClass === 'All Classes' ? (
+                        <option value="All">All Sections (School-wide)</option>
+                      ) : (
+                        modalSectionOptions.map((sec) => (
+                          <option key={sec} value={sec}>
+                            {sec === 'All' ? 'All Sections' : `Section ${sec}`}
+                          </option>
+                        ))
+                      )}
+                    </select>
                   </div>
                 </div>
-              )}
 
-              {/* Subject & Max Marks */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Subject *</label>
-                  <select
-                    value={formSubject}
-                    onChange={(e) => setFormSubject(e.target.value)}
-                    required
-                    disabled={isTeacher && !teacherScope.hasAssignments}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    {modalSubjectOptions.map((subj) => (
-                      <option key={subj} value={subj}>
-                        {subj}
-                      </option>
-                    ))}
-                    {modalSubjectOptions.length === 0 && (
-                      <option value="">No Subjects</option>
-                    )}
-                  </select>
+                {formClass === 'All Classes' && (
+                  <div className="p-3 bg-gradient-to-r from-violet-50 to-indigo-50 border border-indigo-200 rounded-2xl flex items-start gap-2.5 text-indigo-900 shadow-2xs">
+                    <Globe2 className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                    <div className="text-xs">
+                      <p className="font-extrabold text-indigo-950">School-Wide Broadcast Homework</p>
+                      <p className="text-[11px] text-indigo-700 mt-0.5 leading-relaxed">
+                        This homework assignment will be published to all classes and sections across the entire school. All students and parents will receive instant notifications.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Subject & Max Marks */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1.5">
+                      Subject <span className="text-rose-500">*</span>
+                    </label>
+                    <select
+                      value={formSubject}
+                      onChange={(e) => setFormSubject(e.target.value)}
+                      required
+                      disabled={isTeacher && !teacherScope.hasAssignments}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 transition"
+                    >
+                      {modalSubjectOptions.map((subj) => (
+                        <option key={subj} value={subj}>
+                          {subj}
+                        </option>
+                      ))}
+                      {modalSubjectOptions.length === 0 && (
+                        <option value="">No Subjects</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1.5">Max Marks</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={formMaxMarks}
+                      onChange={(e) => setFormMaxMarks(Number(e.target.value))}
+                      disabled={isTeacher && !teacherScope.hasAssignments}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none disabled:bg-slate-100 transition"
+                    />
+                  </div>
                 </div>
 
+                {/* Homework Title */}
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">Max Marks</label>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Homework Title <span className="text-rose-500">*</span>
+                  </label>
                   <input
-                    type="number"
-                    min="1"
-                    max="100"
-                    value={formMaxMarks}
-                    onChange={(e) => setFormMaxMarks(Number(e.target.value))}
-                    disabled={isTeacher && !teacherScope.hasAssignments}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-slate-100"
+                    type="text"
+                    placeholder="e.g. Chapter 4 - Algebraic Expressions & Problem Set"
+                    value={formTitle}
+                    onChange={(e) => setFormTitle(e.target.value)}
+                    required
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none transition placeholder:font-normal placeholder:text-slate-400"
                   />
                 </div>
+
+                {/* Due Date */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Submission Due Date <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={formDueDate}
+                    onChange={(e) => setFormDueDate(e.target.value)}
+                    required
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none transition"
+                  />
+                </div>
+
+                {/* Instructions / Description */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Task Instructions & Questions <span className="text-rose-500">*</span>
+                  </label>
+                  <textarea
+                    rows={3}
+                    placeholder="Detail the questions to answer, textbook pages to read, or project guidelines..."
+                    value={formDescription}
+                    onChange={(e) => setFormDescription(e.target.value)}
+                    required
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-medium text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none transition placeholder:text-slate-400 resize-none"
+                  />
+                </div>
+
+                {/* Optional Attachment Link */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="font-bold text-slate-700">Worksheet / Reference Document Name</label>
+                    <span className="text-[10px] text-slate-400 font-semibold">(Optional)</span>
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="e.g. Math_Worksheet_Unit4.pdf"
+                    value={formAttachmentName}
+                    onChange={(e) => setFormAttachmentName(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 text-slate-800 bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none transition placeholder:text-slate-400"
+                  />
+                </div>
+
+                {/* Notification Banner */}
+                <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl flex items-start gap-2.5 text-indigo-900">
+                  <Bell className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                  <span className="text-[11px] leading-relaxed">
+                    <strong className="font-bold">Automatic Notifications:</strong>{' '}
+                    {formClass === 'All Classes'
+                      ? 'All enrolled students and their registered parents in every class across the school will receive an instant notification in their portal.'
+                      : `All enrolled students and their registered parents in Class ${formClass} will receive an instant notification in their portal.`}
+                  </span>
+                </div>
               </div>
 
-              {/* Homework Title */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Homework Title *</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Chapter 4 - Algebraic Expressions & Problem Set"
-                  value={formTitle}
-                  onChange={(e) => setFormTitle(e.target.value)}
-                  required
-                  className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                />
-              </div>
-
-              {/* Due Date */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Submission Due Date *</label>
-                <input
-                  type="date"
-                  value={formDueDate}
-                  onChange={(e) => setFormDueDate(e.target.value)}
-                  required
-                  className="w-full p-2.5 rounded-xl border border-slate-200 font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                />
-              </div>
-
-              {/* Instructions / Description */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Task Instructions & Questions *</label>
-                <textarea
-                  rows={3}
-                  placeholder="Detail the questions to answer, textbook pages to read, or project guidelines..."
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  required
-                  className="w-full p-2.5 rounded-xl border border-slate-200 font-medium text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                />
-              </div>
-
-              {/* Optional Attachment Link */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Worksheet / Reference Document Name (Optional)</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Math_Worksheet_Unit4.pdf"
-                  value={formAttachmentName}
-                  onChange={(e) => setFormAttachmentName(e.target.value)}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                />
-              </div>
-
-              {/* Notification Banner */}
-              <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl flex items-center gap-2 text-indigo-900">
-                <Bell className="w-4 h-4 text-indigo-600 shrink-0" />
-                <span className="text-[11px]">
-                  <strong>Automatic Notifications:</strong>{' '}
-                  {formClass === 'All Classes'
-                    ? 'All enrolled students and their registered parents in every class across the school will receive an instant notification in their portal.'
-                    : `All enrolled students and their registered parents in Class ${formClass} will receive an instant notification in their portal.`}
-                </span>
-              </div>
-
-              {/* Modal Buttons */}
-              <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-100">
+              {/* Pinned Modal Action Footer */}
+              <div className="p-4 sm:px-6 bg-slate-50/90 backdrop-blur-xs border-t border-slate-100 flex items-center justify-end gap-2.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsCreateModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition cursor-pointer"
+                  className="px-4 py-2.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl font-bold transition-all active:scale-95 cursor-pointer shadow-2xs"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isCreating || isUpdating || (isTeacher && !teacherScope.hasAssignments)}
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-extrabold shadow-sm transition cursor-pointer flex items-center gap-1.5"
+                  className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 active:scale-95 disabled:opacity-50 disabled:pointer-events-none text-white rounded-xl font-extrabold shadow-md shadow-indigo-500/20 transition-all cursor-pointer flex items-center gap-2"
                 >
-                  <Send className="w-3.5 h-3.5" />
+                  <Send className="w-4 h-4" />
                   <span>{editingHomework ? 'Update Homework' : 'Publish & Notify Class'}</span>
                 </button>
               </div>
@@ -1510,60 +1547,62 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       {/* MODAL 2: STUDENT SUBMIT / MARK DONE                                       */}
       {/* ─────────────────────────────────────────────────────────────────────────── */}
       {submitModalHw && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full border border-slate-200 shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 bg-white/10 rounded-xl">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-hidden">
+          <div className="bg-white rounded-3xl max-w-md w-full border border-slate-200 shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[calc(100vh-2rem)] sm:max-h-[85vh]">
+            <div className="p-4 sm:p-5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white flex items-center justify-between shrink-0 shadow-xs">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="p-2 bg-white/10 rounded-xl shrink-0">
                   <CheckSquare className="w-5 h-5 text-white" />
                 </div>
-                <div>
-                  <h3 className="font-extrabold text-base">Submit Class Homework</h3>
-                  <p className="text-xs text-emerald-100">{submitModalHw.subjectName} · {submitModalHw.title}</p>
+                <div className="min-w-0">
+                  <h3 className="font-extrabold text-base truncate">Submit Class Homework</h3>
+                  <p className="text-xs text-emerald-100 truncate">{submitModalHw.subjectName} · {submitModalHw.title}</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setSubmitModalHw(null)}
-                className="p-1.5 hover:bg-white/20 rounded-xl transition cursor-pointer"
+                className="p-1.5 hover:bg-white/20 active:scale-95 rounded-xl transition cursor-pointer text-white/80 hover:text-white shrink-0 ml-2"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmitWork} className="p-6 space-y-4 text-xs">
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-1">
-                <p className="font-bold text-slate-500 uppercase text-[10px]">Homework Instructions:</p>
-                <p className="text-slate-800 font-medium">{submitModalHw.description}</p>
+            <form onSubmit={handleSubmitWork} className="flex flex-col flex-1 min-h-0">
+              <div className="p-5 sm:p-6 space-y-4 text-xs flex-1 overflow-y-auto">
+                <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 space-y-1">
+                  <p className="font-bold text-slate-500 uppercase text-[10px] tracking-wider">Homework Instructions:</p>
+                  <p className="text-slate-800 font-medium leading-relaxed">{submitModalHw.description}</p>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Submission Notes / Completion Remarks:
+                  </label>
+                  <textarea
+                    rows={3}
+                    placeholder="e.g. Completed all exercises in my science notebook. Attached sheet is with class representative."
+                    value={submissionText}
+                    onChange={(e) => setSubmissionText(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 font-medium text-slate-800 bg-white focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 focus:outline-none transition placeholder:text-slate-400 resize-none"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Submission Notes / Completion Remarks:
-                </label>
-                <textarea
-                  rows={3}
-                  placeholder="e.g. Completed all exercises in my science notebook. Attached sheet is with class representative."
-                  value={submissionText}
-                  onChange={(e) => setSubmissionText(e.target.value)}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 font-medium text-slate-800 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                />
-              </div>
-
-              <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-100">
+              <div className="p-4 sm:px-6 bg-slate-50/90 backdrop-blur-xs border-t border-slate-100 flex items-center justify-end gap-2.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => setSubmitModalHw(null)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition cursor-pointer"
+                  className="px-4 py-2.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl font-bold transition-all active:scale-95 cursor-pointer shadow-2xs"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl font-extrabold shadow-sm transition cursor-pointer flex items-center gap-1.5"
+                  className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 active:scale-95 disabled:opacity-50 disabled:pointer-events-none text-white rounded-xl font-extrabold shadow-md shadow-emerald-500/20 transition-all cursor-pointer flex items-center gap-1.5"
                 >
-                  <Check className="w-3.5 h-3.5" />
+                  <Check className="w-4 h-4" />
                   <span>Confirm Completion</span>
                 </button>
               </div>

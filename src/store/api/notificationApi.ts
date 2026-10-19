@@ -46,13 +46,17 @@ export const notificationApi = baseApi.injectEndpoints({
       invalidatesTags: ['Notification'],
     }),
     respondNotificationDecision: build.mutation<
-      { detail: string },
-      { id: number; action: 'Approve' | 'Reject'; note?: string }
+      any,
+      { id: number; action: 'Approve' | 'Reject' | 'Approved' | 'Declined'; status?: 'Approved' | 'Declined'; note?: string }
     >({
       query: ({ id, ...body }) => ({
         url: `/notifications/${id}/decision/`,
         method: 'POST',
-        body,
+        body: {
+          ...body,
+          action: body.action,
+          status: (body.action === 'Approve' || body.action === 'Approved' || body.status === 'Approved') ? 'Approved' : 'Declined',
+        },
       }),
       invalidatesTags: ['Notification'],
     }),

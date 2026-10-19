@@ -305,7 +305,8 @@ export default function StudentDocuments({ user, schoolName = 'School Management
     const currentIndex = list.findIndex((d) => d.id === doc.id);
     setIsPreviewLoadingId(Number(doc.id));
     try {
-      const { blob, filename, contentType } = await apiDownload(doc.downloadUrl);
+      const previewUrl = doc.downloadUrl + (doc.downloadUrl.includes('?') ? '&view=1' : '?view=1');
+      const { blob, filename, contentType } = await apiDownload(previewUrl);
       const isPdf = contentType.includes('pdf') || (doc.fileType || '').toUpperCase() === 'PDF' || (doc.fileName || '').toLowerCase().endsWith('.pdf');
       const url = URL.createObjectURL(blob);
       setPreviewDoc((prev) => {
@@ -362,11 +363,20 @@ export default function StudentDocuments({ user, schoolName = 'School Management
 
     setIsDownloadingId(Number(doc.id));
     try {
-      const { blob, filename } = await apiDownload(doc.downloadUrl);
+      const { blob, filename, contentType } = await apiDownload(doc.downloadUrl);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename || doc.fileName || `${doc.name}.${(doc.fileType || 'pdf').toLowerCase()}`;
+      let finalName = filename;
+      if (!finalName || finalName === 'document' || !finalName.includes('.')) {
+        if (doc.fileName && doc.fileName.includes('.')) {
+          finalName = doc.fileName;
+        } else {
+          const ext = contentType.includes('pdf') ? 'pdf' : contentType.includes('png') ? 'png' : (contentType.includes('jpeg') || contentType.includes('jpg')) ? 'jpg' : (doc.fileType || 'pdf').toLowerCase();
+          finalName = `${doc.fileName || doc.name || 'document'}.${ext}`;
+        }
+      }
+      a.download = finalName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);

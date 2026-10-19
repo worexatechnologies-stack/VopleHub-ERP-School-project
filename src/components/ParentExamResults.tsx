@@ -254,13 +254,20 @@ export default function ParentExamResults({
               <select
                 value={activeSchedule?.id || ''}
                 onChange={(e) => setSelectedScheduleId(Number(e.target.value))}
-                className="rounded-2xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-800 shadow-2xs focus:outline-none focus:ring-2 focus:ring-indigo-400 cursor-pointer"
+                disabled={schedulesLoading || schedules.length === 0}
+                className="min-w-[200px] sm:min-w-[250px] rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-400 cursor-pointer transition"
               >
-                {schedules.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.class_name})
-                  </option>
-                ))}
+                {schedulesLoading ? (
+                  <option value="">Loading Examination Schedules...</option>
+                ) : schedules.length === 0 ? (
+                  <option value="">No Examination Schedules Found</option>
+                ) : (
+                  schedules.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.class_name})
+                    </option>
+                  ))
+                )}
               </select>
             </div>
 
@@ -273,7 +280,7 @@ export default function ParentExamResults({
                 <select
                   value={selectedWardId}
                   onChange={(e) => setSelectedWardId(e.target.value)}
-                  className="rounded-2xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-800 shadow-2xs focus:outline-none focus:ring-2 focus:ring-indigo-400 cursor-pointer"
+                  className="min-w-[180px] sm:min-w-[220px] rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer transition"
                 >
                   {students.map((w) => (
                     <option key={w.id} value={String(w.id)}>

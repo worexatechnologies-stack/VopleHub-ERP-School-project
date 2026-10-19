@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Navigate, Route, Routes, useLocation } from 'react-router';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Grid,
@@ -43,7 +43,6 @@ import StudentModule from './components/StudentModule';
 import AcademicModule from './components/AcademicModule';
 import AttendanceModule from './components/AttendanceModule';
 import ParentAttendance from './components/ParentAttendance';
-import ParentNotifications from './components/ParentNotifications';
 import LearningModule from './components/LearningModule';
 import FeesModule from './components/FeesModule';
 import FamilyFees from './components/FamilyFees';
@@ -96,6 +95,7 @@ import { useAppDispatch, useAppSelector } from './store';
 import { logout as reduxLogout, setAccessToken as reduxSetAccessToken, setCredentials as reduxSetCredentials, setUser as reduxSetUser } from './store/slices/authSlice';
 import { setActiveTab as reduxSetActiveTab, setCredentialSlip as reduxSetCredentialSlip } from './store/slices/uiSlice';
 import { copyToClipboard } from './utils/clipboard';
+import { getUrlForTab, getTabForUrl } from './utils/portalRouting';
 
 function adjustColorBrightness(hex: string, percent: number): string {
   const cleanHex = hex.replace('#', '');
@@ -114,6 +114,8 @@ function adjustColorBrightness(hex: string, percent: number): string {
 }
 
 function AuthenticatedApp() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const dispatch = useAppDispatch();
   const token = useAppSelector((state) => state.auth.accessToken);
   const user = useAppSelector((state) => state.auth.user);
@@ -123,6 +125,42 @@ function AuthenticatedApp() {
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+
+  const navigateToTab = (tabId: string) => {
+    dispatch(reduxSetActiveTab(tabId));
+    const targetUrl = getUrlForTab(tabId, user?.role);
+    if (location.pathname !== targetUrl) {
+      navigate(targetUrl);
+    }
+  };
+
+  // Synchronize browser URL with activeTab on initial mount and route changes
+  useEffect(() => {
+    const rawPath = location.pathname;
+    const isLoginOrApp = rawPath === '/login' || rawPath === '/app';
+
+    if (!user || !token) {
+      if (!isLoginOrApp && !getTabForUrl(rawPath)) {
+        navigate('/', { replace: true });
+      }
+      return;
+    }
+
+    const mappedTab = getTabForUrl(rawPath, user.role);
+
+    if (mappedTab) {
+      if (mappedTab !== activeTab) {
+        dispatch(reduxSetActiveTab(mappedTab));
+      }
+      const canonicalUrl = getUrlForTab(mappedTab, user.role);
+      if (rawPath !== canonicalUrl && decodeURIComponent(rawPath) !== canonicalUrl) {
+        navigate(canonicalUrl, { replace: true });
+      }
+    } else if (isLoginOrApp || rawPath === '/') {
+      const canonicalUrl = getUrlForTab(activeTab, user.role);
+      navigate(canonicalUrl, { replace: true });
+    }
+  }, [location.pathname, user, token, activeTab, navigate, dispatch]);
 
   // White-Label / Brand settings state
   const [brandSettings, setBrandSettings] = useState<BrandSettings>(() => {
@@ -203,7 +241,13 @@ function AuthenticatedApp() {
       .then((authenticatedUser) => {
         storeAuthenticatedUser(authenticatedUser);
         dispatch(reduxSetUser(authenticatedUser));
-        dispatch(reduxSetActiveTab(getDefaultTabForRole(authenticatedUser.role)));
+        const matchedTab = getTabForUrl(window.location.pathname, authenticatedUser.role);
+        const initialTab = matchedTab || getDefaultTabForRole(authenticatedUser.role);
+        dispatch(reduxSetActiveTab(initialTab));
+        const targetUrl = getUrlForTab(initialTab, authenticatedUser.role);
+        if (window.location.pathname !== targetUrl) {
+          navigate(targetUrl, { replace: true });
+        }
       })
       .catch(() => {
         clearAuthenticatedSession();
@@ -338,7 +382,10 @@ function AuthenticatedApp() {
       source: 'auth',
     });
 
-    dispatch(reduxSetActiveTab(getDefaultTabForRole(newUser.role)));
+    const matchedTab = getTabForUrl(window.location.pathname, newUser.role);
+    const initialTab = matchedTab || getDefaultTabForRole(newUser.role);
+    dispatch(reduxSetActiveTab(initialTab));
+    navigate(getUrlForTab(initialTab, newUser.role), { replace: true });
   };
 
   // Logout handler
@@ -361,6 +408,7 @@ function AuthenticatedApp() {
     setStudents([]);
     setAccountDirectory([]);
     dispatch(reduxSetActiveTab('dashboard'));
+    navigate('/login', { replace: true });
   };
 
   const handleTemporaryPasswordChanged = () => {
@@ -368,7 +416,8 @@ function AuthenticatedApp() {
     const updatedUser = { ...user, mustChangePassword: false };
     storeAuthenticatedUser(updatedUser);
     dispatch(reduxSetUser(updatedUser));
-    dispatch(reduxSetActiveTab(getDefaultTabForRole(updatedUser.role)));
+    const defaultTab = getDefaultTabForRole(updatedUser.role);
+    navigateToTab(defaultTab);
   };
 
   // Simulation handlers
@@ -1137,7 +1186,6 @@ function AuthenticatedApp() {
           { id: 'academic', label: "Child's Timetable", icon: GraduationCap },
           { id: 'homework', label: 'Class Homework', icon: BookOpen },
           { id: 'attendance', label: 'Ward Attendance', icon: CheckSquare },
-          { id: 'notifications', label: 'School Notices', icon: Bell },
           { id: 'fees', label: 'School Fee Desk', icon: CreditCard },
           { id: 'exams', label: 'Exam Reports', icon: FileText },
           { id: 'communication', label: 'Teacher Chat', icon: MessageSquare },
@@ -1175,7 +1223,7 @@ function AuthenticatedApp() {
   useEffect(() => {
     if (!user) return;
     if (allowedTabIds.length > 0 && !allowedTabIds.includes(activeTab)) {
-      dispatch(reduxSetActiveTab(getDefaultTabForRole(user.role)));
+      navigateToTab(getDefaultTabForRole(user.role));
     }
     if (mainScrollRef.current) {
       mainScrollRef.current.scrollTop = 0;
@@ -1326,7 +1374,7 @@ function AuthenticatedApp() {
             volpeLogo={volpeLogo}
             menuItems={menuItems}
             activeTab={activeTab}
-            onSelectTab={(tabId) => dispatch(reduxSetActiveTab(tabId))}
+            onSelectTab={(tabId) => navigateToTab(tabId)}
             user={user}
           />
 
@@ -1407,7 +1455,7 @@ function AuthenticatedApp() {
                   </button>
                 </div>
 
-                <NotificationCenter logs={logs} isGlass={isGlass} is3D={is3D} />
+                <NotificationCenter logs={logs} isGlass={isGlass} is3D={is3D} onNavigateToTab={(tab: string) => navigateToTab(tab)} />
               </div>
             </header>
 
@@ -1431,7 +1479,7 @@ function AuthenticatedApp() {
                   {canAccessActiveTab && activeTab.startsWith('super-admin-') && (
                     <SuperAdminModule
                       activeTab={activeTab}
-                      onNavigateToTab={(tab: string) => dispatch(reduxSetActiveTab(tab))}
+                      onNavigateToTab={(tab: string) => navigateToTab(tab)}
                     />
                   )}
 
@@ -1439,12 +1487,12 @@ function AuthenticatedApp() {
                   {canAccessActiveTab && activeTab === 'academic-setup' && user?.role === 'School Admin' && (
                     <AcademicSetupManager
                       onChanged={handleAcademicSetupChanged}
-                      onOpenTeachers={() => dispatch(reduxSetActiveTab('teachers'))}
+                      onOpenTeachers={() => navigateToTab('teachers')}
                     />
                   )}
                   {canAccessActiveTab && activeTab === 'dashboard' && user && (
                     <Dashboard
-                      onNavigateToTab={(tab: string) => dispatch(reduxSetActiveTab(tab))}
+                      onNavigateToTab={(tab: string) => navigateToTab(tab)}
                       isGlass={isGlass}
                       role={user.role}
                       userName={user.name}
@@ -1461,7 +1509,7 @@ function AuthenticatedApp() {
                       academicClasses={academicClasses}
                       academicYears={academicYears}
                       schoolName={user.schoolName || brandSettings.schoolName}
-                      onNavigateToTab={(tab: string) => dispatch(reduxSetActiveTab(tab))}
+                      onNavigateToTab={(tab: string) => navigateToTab(tab)}
                     />
                   )}
                   {canAccessActiveTab && activeTab === 'student' && (
@@ -1478,9 +1526,9 @@ function AuthenticatedApp() {
                       currentAcademicYear={currentAcademicYear}
                       canManageStudents={user?.role === 'School Admin'}
                       viewerRole={user?.role}
-                      onOpenAcademicSetup={user?.role === 'School Admin' ? () => dispatch(reduxSetActiveTab('academic-setup')) : undefined}
+                      onOpenAcademicSetup={user?.role === 'School Admin' ? () => navigateToTab('academic-setup') : undefined}
                       onStudentApproved={handleStudentApproved}
-                      onNavigateToAdmissions={() => dispatch(reduxSetActiveTab('admissions'))}
+                      onNavigateToAdmissions={() => navigateToTab('admissions')}
                       onDeleteAllStudents={handleDeleteAllStudents}
                     />
                   )}
@@ -1503,16 +1551,13 @@ function AuthenticatedApp() {
                     <HomeworkModule
                       user={user}
                       students={students}
-                      onNavigateToTab={(tab: string) => dispatch(reduxSetActiveTab(tab))}
+                      onNavigateToTab={(tab: string) => navigateToTab(tab)}
                     />
                   )}
                   {canAccessActiveTab && activeTab === 'attendance' && (
                     user?.role === 'Parent'
                       ? <ParentAttendance />
                       : <AttendanceModule students={students.filter(s => s.academicYear === currentAcademicYear)} />
-                  )}
-                  {canAccessActiveTab && activeTab === 'notifications' && user?.role === 'Parent' && (
-                    <ParentNotifications onNavigateToTab={(tab: string) => dispatch(reduxSetActiveTab(tab))} />
                   )}
                   {canAccessActiveTab && activeTab === 'learning' && <LearningModule />}
                   {canAccessActiveTab && activeTab === 'fees' && (user?.role === 'Parent' || user?.role === 'Student'
@@ -1549,7 +1594,7 @@ function AuthenticatedApp() {
                     />
                   )}
                   {canAccessActiveTab && activeTab === 'communication' && (
-                    <CommunicationModule user={user} isGlass={isGlass} onNavigateToTab={(tab: string) => dispatch(reduxSetActiveTab(tab))} />
+                    <CommunicationModule user={user} isGlass={isGlass} onNavigateToTab={(tab: string) => navigateToTab(tab)} />
                   )}
                   {canAccessActiveTab && activeTab === 'community-events' && <CommunityEventsModule user={user} />}
                   {canAccessActiveTab && activeTab === 'notify-teachers' && user?.role === 'School Admin' && (
@@ -1571,7 +1616,7 @@ function AuthenticatedApp() {
           {/* Mobile Bottom Navigation Bar (rendered on smaller screens) */}
           <div className="md:hidden !fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur-md border-t border-slate-200 text-slate-500 grid grid-cols-5 h-16 z-50 px-1 py-1 shadow-[0_-4px_20px_rgba(0,0,0,0.08)]">
             <button
-              onClick={() => dispatch(reduxSetActiveTab(getFirstAllowedTab(['dashboard', 'super-admin-dashboard'])))}
+              onClick={() => navigateToTab(getFirstAllowedTab(['dashboard', 'super-admin-dashboard']))}
               className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none ${
                 activeTab === 'dashboard' || activeTab === 'super-admin-dashboard' ? 'text-indigo-600' : 'text-slate-500'
               }`}
@@ -1588,7 +1633,7 @@ function AuthenticatedApp() {
             </button>
 
             <button
-              onClick={() => dispatch(reduxSetActiveTab(getFirstAllowedTab(['super-admin-schools', 'student', 'teachers', 'academic'])))}
+              onClick={() => navigateToTab(getFirstAllowedTab(['super-admin-schools', 'student', 'teachers', 'academic']))}
               className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none ${
                 ['student', 'teachers', 'academic', 'super-admin-schools'].includes(activeTab) ? 'text-indigo-600' : 'text-slate-500'
               }`}
@@ -1605,7 +1650,7 @@ function AuthenticatedApp() {
             </button>
 
             <button
-              onClick={() => dispatch(reduxSetActiveTab(getFirstAllowedTab(['super-admin-admins', 'attendance', 'exams'])))}
+              onClick={() => navigateToTab(getFirstAllowedTab(['super-admin-admins', 'attendance', 'exams']))}
               className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none ${
                 ['attendance', 'exams', 'super-admin-admins'].includes(activeTab) ? 'text-indigo-600' : 'text-slate-500'
               }`}
@@ -1622,7 +1667,7 @@ function AuthenticatedApp() {
             </button>
 
             <button
-              onClick={() => dispatch(reduxSetActiveTab(getFirstAllowedTab(['super-admin-sys-settings', 'learning', 'communication', 'transport'])))}
+              onClick={() => navigateToTab(getFirstAllowedTab(['super-admin-sys-settings', 'learning', 'communication', 'transport']))}
               disabled={!allowedTabIds.some(id => ['super-admin-sys-settings', 'learning', 'communication', 'transport'].includes(id))}
               className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none disabled:opacity-30 ${
                 ['learning', 'communication', 'transport', 'super-admin-sys-settings'].includes(activeTab) ? 'text-indigo-600' : 'text-slate-500'
@@ -1697,11 +1742,13 @@ export default function App() {
         <Route path="/how-it-works" element={<ProductPage kind="how-it-works" />} />
         <Route path="/security" element={<ProductPage kind="security" />} />
         <Route path="/login" element={<AuthenticatedApp />} />
+        <Route path="/app/*" element={<AuthenticatedApp />} />
         <Route path="/app" element={<AuthenticatedApp />} />
         <Route path="/enroll" element={<StudentEnrollmentPage />} />
         <Route path="/enrollment" element={<StudentEnrollmentPage />} />
         <Route path="/admission" element={<StudentEnrollmentPage />} />
         <Route path="/admissions" element={<StudentEnrollmentPage />} />
+        <Route path="/:portalPath" element={<AuthenticatedApp />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </React.Suspense>

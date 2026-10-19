@@ -107,6 +107,8 @@ class SchoolViewSet(viewsets.ModelViewSet):
             school_name, school_code, school_id = school.name, school.code, school.pk
             school.delete()
 
+        bump_cache_version('schools')
+
         logger.warning(
             'school_permanently_deleted actor_user_id=%s school_id=%s school_code=%s deleted_user_count=%s',
             request.user.pk, school_id, school_code, user_count,

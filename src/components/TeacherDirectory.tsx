@@ -756,7 +756,8 @@ export default function TeacherDirectory() {
     const currentIndex = list.findIndex((d) => d.id === teacherDocument.id);
     setIsPreviewLoadingDocId(teacherDocument.id);
     try {
-      const { blob, filename, contentType } = await apiDownload(teacherDocument.downloadUrl);
+      const previewUrl = teacherDocument.downloadUrl + (teacherDocument.downloadUrl.includes('?') ? '&view=1' : '?view=1');
+      const { blob, filename, contentType } = await apiDownload(previewUrl);
       const isPdf = contentType.includes('pdf') || (teacherDocument.fileType || '').toUpperCase() === 'PDF' || (teacherDocument.fileName || '').toLowerCase().endsWith('.pdf');
       const url = URL.createObjectURL(blob);
       setPreviewDoc((prev) => {
@@ -817,11 +818,20 @@ export default function TeacherDirectory() {
     }
     setIsDownloadingDocId(teacherDocument.id);
     try {
-      const { blob, filename } = await apiDownload(teacherDocument.downloadUrl);
+      const { blob, filename, contentType } = await apiDownload(teacherDocument.downloadUrl);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = filename || teacherDocument.fileName || `${teacherDocument.name}.${teacherDocument.fileType.toLowerCase()}`;
+      let finalName = filename;
+      if (!finalName || finalName === 'document' || !finalName.includes('.')) {
+        if (teacherDocument.fileName && teacherDocument.fileName.includes('.')) {
+          finalName = teacherDocument.fileName;
+        } else {
+          const ext = contentType.includes('pdf') ? 'pdf' : contentType.includes('png') ? 'png' : (contentType.includes('jpeg') || contentType.includes('jpg')) ? 'jpg' : (teacherDocument.fileType || 'pdf').toLowerCase();
+          finalName = `${teacherDocument.fileName || teacherDocument.name || 'document'}.${ext}`;
+        }
+      }
+      anchor.download = finalName;
       document.body.appendChild(anchor);
       anchor.click();
       document.body.removeChild(anchor);

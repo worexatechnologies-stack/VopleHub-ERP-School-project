@@ -90,9 +90,15 @@ const baseQueryWithAuth: BaseQueryFn<
       }
       // If the request body is FormData, do not set application/json so the browser
       // can automatically inject the multipart/form-data boundary.
-      const isFormData = typeof args === 'object' && args !== null && 'body' in args && args.body instanceof FormData;
+      const isFormData =
+        typeof args === 'object' &&
+        args !== null &&
+        'body' in args &&
+        (args.body instanceof FormData || (Boolean(args.body) && typeof (args.body as any).append === 'function'));
       if (!isFormData) {
         headers.set('Content-Type', 'application/json');
+      } else {
+        headers.delete('Content-Type');
       }
       return headers;
     },

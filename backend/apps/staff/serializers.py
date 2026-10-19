@@ -110,7 +110,8 @@ class TeacherDocumentUploadSerializer(serializers.Serializer):
                 'application/pdf': 'PDF',
                 'image/jpeg': 'JPG',
                 'image/png': 'PNG',
-            }[content_type],
+                'image/webp': 'JPG',
+            }.get(content_type, 'PDF' if 'pdf' in str(content_type).lower() else 'JPG'),
             status=TeacherDocument.Status.PENDING,
         )
 
@@ -378,23 +379,6 @@ class TeacherCreateSerializer(serializers.Serializer):
         for section_id, subject_id in pairs:
             if not sections[section_id].class_room.subjects.filter(pk=subject_id).exists():
                 raise serializers.ValidationError('A selected subject is not assigned to its section class.')
-        if TeacherTeachingAssignment.objects.filter(
-            school_id=school_id,
-            section_id__in=section_ids,
-            subject_id__in=subject_ids,
-        ).exists():
-            conflicts = [
-                {'sectionId': section_id, 'subjectId': subject_id}
-                for section_id, subject_id in pairs
-                if TeacherTeachingAssignment.objects.filter(
-                    school_id=school_id, section_id=section_id, subject_id=subject_id,
-                ).exists()
-            ]
-            if conflicts:
-                raise serializers.ValidationError({
-                    'conflicts': conflicts,
-                    'detail': 'A selected class section and subject is already assigned to another teacher.',
-                })
         return [{'sectionId': section_id, 'subjectId': subject_id} for section_id, subject_id in pairs]
 
     def validate(self, attrs):

@@ -14,7 +14,8 @@ from .base import *
 
 # Permit this development machine to serve the API to devices on local network.
 ALLOWED_HOSTS = ['*']
-CORS_ALLOWED_ORIGINS = [*CORS_ALLOWED_ORIGINS, 'http://192.168.1.4:3000']
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOWED_ORIGINS = [*CORS_ALLOWED_ORIGINS, 'http://192.168.1.4:3000', 'http://localhost:5173', 'http://127.0.0.1:5173']
 
 DEBUG = True
 SECURE_SSL_REDIRECT = False

@@ -133,9 +133,14 @@ class ChatSocketClient {
         }
       };
 
-      this.socket.onclose = () => {
+      this.socket.onclose = (event: CloseEvent) => {
         this.stopHeartbeat();
         this.setStatus('disconnected');
+        // Do not auto-reconnect if rejected for authorization or permission
+        if (event && (event.code === 4001 || event.code === 4003)) {
+          this.isIntentionallyClosed = true;
+          return;
+        }
         if (!this.isIntentionallyClosed) {
           this.scheduleReconnect();
         }

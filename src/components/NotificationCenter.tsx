@@ -25,6 +25,7 @@ interface NotificationCenterProps {
   logs?: string[];
   isGlass?: boolean;
   is3D?: boolean;
+  onNavigateToTab?: (tabId: string) => void;
 }
 
 function isUserFacingItem(item: AppNotification): boolean {
@@ -54,7 +55,7 @@ function loadNotifications(): AppNotification[] {
   }
 }
 
-export default function NotificationCenter({ logs = [], isGlass = false, is3D = false }: NotificationCenterProps) {
+export default function NotificationCenter({ logs = [], isGlass = false, is3D = false, onNavigateToTab }: NotificationCenterProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>(loadNotifications);
   const [isOpen, setIsOpen] = useState(false);
   const currentUser = useAppSelector((state) => state.auth.user);
@@ -84,7 +85,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
 
     const unsubChat = chatSocket.on('message.created', (newMsg: any) => {
       // 1. If I am the sender, NEVER show an alert/toast to myself!
-      if (newMsg.senderId === currentUser.id || newMsg.isMe) {
+      if (String(newMsg.senderId) === String(currentUser.id) || newMsg.isMe) {
         return;
       }
 
@@ -99,6 +100,9 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
         message: newMsg.body || 'Sent an attachment',
         tone: 'info',
         source: 'chat',
+        conversationId: newMsg.conversationId,
+        senderId: newMsg.senderId,
+        senderName: newMsg.senderName,
       });
     });
 
@@ -116,8 +120,8 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
       : serverNotifications.filter((n) => {
           if (knownServerIds.current.has(n.id)) return false;
           // Crucial: The sender must NEVER receive incoming notification alerts for their own message or notice!
-          if (currentUser?.id && n.senderId && n.senderId === currentUser.id) return false;
-          if (currentUser?.id && n.recipientId && n.recipientId !== currentUser.id) return false;
+          if (currentUser?.id && n.senderId && String(n.senderId) === String(currentUser.id)) return false;
+          if (currentUser?.id && n.recipientId && String(n.recipientId) !== String(currentUser.id)) return false;
           return true;
         });
 
@@ -128,21 +132,33 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
     // Convert server notices to app notification models (filtering out outgoing items)
     const serverItems: AppNotification[] = serverNotifications
       .filter((n) => {
-        if (currentUser?.id && n.senderId && n.senderId === currentUser.id && n.recipientId !== currentUser.id) {
+        if (currentUser?.id && n.senderId && String(n.senderId) === String(currentUser.id) && n.recipientId && String(n.recipientId) !== String(currentUser.id)) {
           return false;
         }
         return true;
       })
       .map((n): AppNotification => {
         let tone: NotificationTone = 'info';
-        if (n.category === 'Urgent' || n.category === 'Attendance Alert') {
+        if (n.category === 'Urgent') {
           tone = 'danger';
+        } else if (n.category === 'Attendance Alert') {
+          const text = `${n.title || ''} ${n.body || ''}`.toUpperCase();
+          if (text.includes('ABSENT')) {
+            tone = 'danger';
+          } else if (text.includes('LATE')) {
+            tone = 'warning';
+          } else if (text.includes('PRESENT')) {
+            tone = 'success';
+          } else {
+            tone = 'info';
+          }
         } else if (n.category === 'Finance' || n.category === 'Salary') {
           tone = 'success';
         } else if (n.category === 'Homework' || n.category === 'Academic') {
           tone = 'info';
         }
 
+        const rel = (n as any).relatedObject || (n as any).related_object;
         return {
           id: `server-${n.id}`,
           title: n.title || 'School Notice',
@@ -151,6 +167,10 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
           timestamp: n.createdAt || n.created_at || new Date().toISOString(),
           read: Boolean(n.readAt || n.read_at),
           source: n.channel || 'school-server',
+          conversationId: rel?.conversationId,
+          senderId: n.senderId || rel?.senderId,
+          senderName: n.senderName || rel?.senderName,
+          related: rel,
         };
       })
       .filter(isUserFacingItem);
@@ -170,10 +190,19 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
     // Alert for newly incoming notices
     if (brandNewItems.length > 0) {
       brandNewItems.forEach((n) => {
+        let alertTone: NotificationTone = 'info';
+        if (n.category === 'Urgent') {
+          alertTone = 'danger';
+        } else if (n.category === 'Attendance Alert') {
+          const text = `${n.title || ''} ${n.body || ''}`.toUpperCase();
+          if (text.includes('ABSENT')) alertTone = 'danger';
+          else if (text.includes('LATE')) alertTone = 'warning';
+          else if (text.includes('PRESENT')) alertTone = 'success';
+        }
         emitNotification({
           title: n.title || 'New school notice',
           message: n.body || 'Open the notifications panel for full details.',
-          tone: n.category === 'Urgent' || n.category === 'Attendance Alert' ? 'danger' : 'info',
+          tone: alertTone,
           source: 'school-server',
         });
       });
@@ -271,6 +300,55 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
       }
     }
     setNotifications((prev) => prev.map((item) => (item.id === id ? { ...item, read: true } : item)));
+  };
+
+  const handleNotificationClick = (item: AppNotification) => {
+    handleMarkItemRead(item.id);
+
+    const isChat =
+      item.source === 'chat' ||
+      item.source === 'CHAT' ||
+      (item.title && item.title.toLowerCase().startsWith('new message from')) ||
+      Boolean(item.conversationId);
+
+    if (isChat) {
+      setIsOpen(false);
+      let sName = item.senderName;
+      if (!sName && item.title && item.title.toLowerCase().startsWith('new message from ')) {
+        sName = item.title.slice(17).trim();
+      }
+
+      const chatDetail = {
+        conversationId: item.conversationId,
+        senderId: item.senderId,
+        senderName: sName,
+        highlightMessageText: item.message,
+      };
+
+      try {
+        sessionStorage.setItem('pending_open_chat', JSON.stringify(chatDetail));
+      } catch {
+        // ignore
+      }
+
+      if (onNavigateToTab) {
+        onNavigateToTab('communication');
+      }
+
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('open-chat', { detail: chatDetail }));
+      }, 60);
+      return;
+    }
+
+    const content = `${item.title} ${item.message}`.toLowerCase();
+    if (content.includes('attendance') && onNavigateToTab) {
+      setIsOpen(false);
+      onNavigateToTab('attendance');
+    } else if (content.includes('homework') && onNavigateToTab) {
+      setIsOpen(false);
+      onNavigateToTab('homework');
+    }
   };
 
   const markAllRead = () => {
@@ -413,8 +491,8 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
               notifications.map((item) => (
                 <div
                   key={item.id}
-                  onClick={() => handleMarkItemRead(item.id)}
-                  className={`notification-popover__item mb-2.5 rounded-xl p-3 transition border cursor-pointer hover:border-indigo-400/40 ${
+                  onClick={() => handleNotificationClick(item)}
+                  className={`notification-popover__item mb-2.5 rounded-xl p-3 transition border cursor-pointer hover:border-indigo-400 hover:bg-slate-900/60 active:scale-[0.99] ${
                     item.read
                       ? 'border-white/5 bg-slate-900/30 opacity-70'
                       : 'border-indigo-500/40 bg-indigo-950/30 shadow-xs'
@@ -482,9 +560,17 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
             >
               <Bell className="h-4 w-4" />
             </span>
-            <div className="min-w-0 flex-1">
+            <div
+              onClick={() => {
+                if (toast) {
+                  handleNotificationClick(toast);
+                  setToast(null);
+                }
+              }}
+              className="min-w-0 flex-1 cursor-pointer group"
+            >
               <div className="flex items-center gap-1.5">
-                <p className="text-sm font-extrabold text-slate-900 truncate">{toast.title}</p>
+                <p className="text-sm font-extrabold text-slate-900 truncate group-hover:text-indigo-600 transition">{toast.title}</p>
                 {soundEnabled && (
                   <span
                     className="inline-flex items-center text-indigo-600"

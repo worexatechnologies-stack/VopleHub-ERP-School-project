@@ -9,7 +9,6 @@ django.setup()
 from apps.accounts.models import User
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
-
 # Pick an active school admin
 user = User.objects.filter(role=User.Role.SCHOOL_ADMIN, is_active=True).first()
 if not user:

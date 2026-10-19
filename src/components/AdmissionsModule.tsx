@@ -17,6 +17,7 @@ import {
   LayoutGrid,
   Table as TableIcon,
   ChevronRight,
+  ChevronDown,
   GraduationCap,
   User,
   Phone,
@@ -31,7 +32,13 @@ import {
   FileText,
   BadgeCheck,
   Send,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  Loader2,
 } from 'lucide-react';
+import { apiDownload } from '../services/api';
+import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
 import {
   useGetEnrollmentApplicationsQuery,
   useApproveEnrollmentApplicationMutation,
@@ -104,6 +111,22 @@ export default function AdmissionsModule({
   const [copiedLinkToken, setCopiedLinkToken] = useState<string | null>(null);
   const [copiedSlip, setCopiedSlip] = useState(false);
   const [photoZoomUrl, setPhotoZoomUrl] = useState<{ url: string; name: string } | null>(null);
+
+  // Document Viewer & Download State
+  const [docPreviewModal, setDocPreviewModal] = useState<{
+    isOpen: boolean;
+    app: EnrollmentApplicationItem | null;
+    blobUrl?: string;
+    isPdf?: boolean;
+    filename?: string;
+    category?: string;
+    isLoading: boolean;
+    error?: string | null;
+    scale: number;
+    rotation: number;
+  } | null>(null);
+  const [downloadingDocAppId, setDownloadingDocAppId] = useState<number | null>(null);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
 
   // Backend RTK Queries & Mutations
   const {
@@ -325,11 +348,18 @@ export default function AdmissionsModule({
   };
 
   // Export Applicants to CSV
-  const handleExportCSV = () => {
-    if (filteredApplications.length === 0) {
-      alert('No applications to export for current filter.');
+  const handleExportCSV = (targetList?: EnrollmentApplicationItem[], customFilename?: string) => {
+    setIsExportMenuOpen(false);
+
+    // If a specific target list is passed (e.g. from dropdown), use it.
+    // Otherwise, prefer current filtered applications if any exist; if empty, fallback to all applications.
+    const listToExport = targetList || (filteredApplications.length > 0 ? filteredApplications : enrollmentApplications);
+
+    if (!listToExport || listToExport.length === 0) {
+      alert('No admission applications found to export.');
       return;
     }
+
     const headers = [
       'Application No',
       'Student Name',
@@ -344,41 +374,129 @@ export default function AdmissionsModule({
       'Address',
       'Aadhaar No',
       'Medical Conditions',
+      'Academic Year',
       'Document Attached',
       'Provisional Username',
       'Status',
       'Submitted At',
+      'Approved At',
       'Approved By',
+      'Rejection Remarks',
     ];
-    const rows = filteredApplications.map((app) => [
-      `"${app.applicationNo}"`,
-      `"${app.name}"`,
-      `"${app.className}"`,
-      `"${app.section}"`,
-      `"${app.gender}"`,
-      `"${app.dob}"`,
-      `"${app.bloodGroup || ''}"`,
-      `"${app.parentName}"`,
-      `"${app.parentPhone}"`,
-      `"${app.parentEmail}"`,
+
+    const rows = listToExport.map((app) => [
+      `"${(app.applicationNo || '').replace(/"/g, '""')}"`,
+      `"${(app.name || '').replace(/"/g, '""')}"`,
+      `"${(app.className || '').replace(/"/g, '""')}"`,
+      `"${(app.section || '').replace(/"/g, '""')}"`,
+      `"${(app.gender || '').replace(/"/g, '""')}"`,
+      `"${(app.dob || '').replace(/"/g, '""')}"`,
+      `"${(app.bloodGroup || '').replace(/"/g, '""')}"`,
+      `"${(app.parentName || '').replace(/"/g, '""')}"`,
+      `"${(app.parentPhone || '').replace(/"/g, '""')}"`,
+      `"${(app.parentEmail || '').replace(/"/g, '""')}"`,
       `"${(app.address || '').replace(/"/g, '""')}"`,
-      `"${app.aadhaarNo || ''}"`,
+      `"${(app.aadhaarNo || '').replace(/"/g, '""')}"`,
       `"${(app.medicalConditions || '').replace(/"/g, '""')}"`,
-      `"${app.hasDocument ? `${app.documentCategory || 'Document'} (${app.documentName || ''})` : 'None'}"`,
-      `"${app.provisionalUsername}"`,
-      `"${app.status}"`,
-      `"${new Date(app.submittedAt).toLocaleString()}"`,
-      `"${app.approvedBy || ''}"`,
+      `"${(app.academicYear || '').replace(/"/g, '""')}"`,
+      `"${app.hasDocument ? `${app.documentCategory || 'Document'} (${(app.documentName || '').replace(/"/g, '""')})` : 'None'}"`,
+      `"${(app.provisionalUsername || '').replace(/"/g, '""')}"`,
+      `"${(app.status || '').replace(/"/g, '""')}"`,
+      `"${app.submittedAt ? new Date(app.submittedAt).toLocaleString().replace(/"/g, '""') : ''}"`,
+      `"${app.approvedAt ? new Date(app.approvedAt).toLocaleString().replace(/"/g, '""') : ''}"`,
+      `"${(app.approvedBy || '').replace(/"/g, '""')}"`,
+      `"${(app.rejectionRemarks || '').replace(/"/g, '""')}"`,
     ]);
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n');
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `admissions_applications_${new Date().toISOString().slice(0, 10)}.csv`);
+    const filterTag = customFilename || (targetList ? 'custom' : (filteredApplications.length > 0 ? statusFilter.toLowerCase() : 'all'));
+    link.setAttribute('download', `admissions_applications_${filterTag}_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  // Authenticated Document Preview & Download Handlers
+  const handleOpenDocPreview = async (app: EnrollmentApplicationItem) => {
+    if (!app.documentUrl) return;
+
+    if (docPreviewModal?.blobUrl) {
+      URL.revokeObjectURL(docPreviewModal.blobUrl);
+    }
+
+    setDocPreviewModal({
+      isOpen: true,
+      app,
+      filename: app.documentName || 'Supporting Document',
+      category: app.documentCategory || 'Identity / Document',
+      isLoading: true,
+      error: null,
+      scale: 1,
+      rotation: 0,
+    });
+
+    try {
+      const { blob, filename, contentType } = await apiDownload(app.documentUrl);
+      const isPdf =
+        contentType.toLowerCase().includes('pdf') ||
+        (filename || '').toLowerCase().endsWith('.pdf') ||
+        (app.documentName || '').toLowerCase().endsWith('.pdf');
+      const blobUrl = URL.createObjectURL(blob);
+
+      setDocPreviewModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              blobUrl,
+              isPdf,
+              filename: filename || prev.filename,
+              isLoading: false,
+            }
+          : null
+      );
+    } catch (err) {
+      setDocPreviewModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              isLoading: false,
+              error: err instanceof Error ? err.message : 'Failed to load document for preview.',
+            }
+          : null
+      );
+    }
+  };
+
+  const closeDocPreview = () => {
+    if (docPreviewModal?.blobUrl) {
+      URL.revokeObjectURL(docPreviewModal.blobUrl);
+    }
+    setDocPreviewModal(null);
+  };
+
+  const handleDownloadDoc = async (app: EnrollmentApplicationItem) => {
+    if (!app.documentUrl) return;
+    setDownloadingDocAppId(app.id);
+    try {
+      const { blob, filename } = await apiDownload(app.documentUrl);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || app.documentName || `application-${app.applicationNo}-document`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Could not download document. Please try again.');
+    } finally {
+      setDownloadingDocAppId(null);
+    }
   };
 
   return (
@@ -421,15 +539,115 @@ export default function AdmissionsModule({
               <span>+ Generate 24h Link</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleExportCSV}
-              className="px-3.5 py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-2 cursor-pointer transition"
-              title="Download applications CSV"
-            >
-              <Download className="w-4 h-4 text-slate-300" />
-              <span>Export CSV</span>
-            </button>
+            {/* Split Export CSV Button with Dropdown Options */}
+            <div className="relative inline-flex items-stretch rounded-xl shadow-xs">
+              <button
+                type="button"
+                onClick={() => handleExportCSV()}
+                className="px-3.5 py-2.5 rounded-l-xl bg-slate-800/80 hover:bg-slate-700 border border-r-0 border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-2 cursor-pointer transition"
+                title={`Export applications to CSV (${filteredApplications.length > 0 ? `${filteredApplications.length} in current view` : `${enrollmentApplications.length} total`})`}
+              >
+                <Download className="w-4 h-4 text-slate-300" />
+                <span>Export CSV</span>
+                {enrollmentApplications.length > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-700/80 text-indigo-300 font-mono">
+                    {filteredApplications.length > 0 ? filteredApplications.length : enrollmentApplications.length}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsExportMenuOpen((prev) => !prev)}
+                className="px-2 py-2.5 rounded-r-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white cursor-pointer transition"
+                title="More export options"
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+
+              {/* Dropdown Menu */}
+              {isExportMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setIsExportMenuOpen(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-1.5 z-50 text-xs text-slate-200 animate-in fade-in zoom-in-95 duration-100">
+                    <div className="px-2.5 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      Export Options
+                    </div>
+                    {filteredApplications.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleExportCSV(filteredApplications, statusFilter.toLowerCase())}
+                        className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-200 cursor-pointer transition"
+                      >
+                        <span>Current Filter ({statusFilter})</span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-indigo-400 border border-slate-700">
+                          {filteredApplications.length}
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleExportCSV(enrollmentApplications, 'all')}
+                      className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-200 cursor-pointer transition"
+                    >
+                      <span>All Applications</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+                        {stats.total}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleExportCSV(
+                          enrollmentApplications.filter((a) => a.status === 'Approved'),
+                          'approved'
+                        )
+                      }
+                      className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-200 cursor-pointer transition"
+                    >
+                      <span>Approved &amp; Enrolled</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-blue-400 border border-slate-700">
+                        {stats.approved}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleExportCSV(
+                          enrollmentApplications.filter((a) => a.status === 'Pending'),
+                          'pending'
+                        )
+                      }
+                      className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-200 cursor-pointer transition"
+                    >
+                      <span>Pending Review</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-amber-400 border border-slate-700">
+                        {stats.pending}
+                      </span>
+                    </button>
+                    {stats.rejected > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleExportCSV(
+                            enrollmentApplications.filter((a) => a.status === 'Rejected'),
+                            'rejected'
+                          )
+                        }
+                        className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-200 cursor-pointer transition"
+                      >
+                        <span>Rejected Submissions</span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-rose-400 border border-slate-700">
+                          {stats.rejected}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
 
             <button
               type="button"
@@ -757,17 +975,31 @@ export default function AdmissionsModule({
                       : 'No applications match your selected filters or search query.'}
                   </p>
                   {(statusFilter !== 'All' || classFilter || searchQuery) && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStatusFilter('All');
-                        setClassFilter('');
-                        setSearchQuery('');
-                      }}
-                      className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-indigo-600 hover:bg-slate-50 transition cursor-pointer"
-                    >
-                      Clear Filters
-                    </button>
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter('All');
+                          setClassFilter('');
+                          setSearchQuery('');
+                        }}
+                        className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-indigo-600 hover:bg-slate-50 transition cursor-pointer"
+                      >
+                        {statusFilter === 'Pending' && stats.total > 0
+                          ? `View All Applications (${stats.total})`
+                          : 'Clear Filters'}
+                      </button>
+                      {enrollmentApplications.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => handleExportCSV(enrollmentApplications, 'all')}
+                          className="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-xs font-bold text-indigo-700 transition cursor-pointer flex items-center gap-1.5"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Export All CSV ({stats.total})</span>
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               ) : (
@@ -860,16 +1092,15 @@ export default function AdmissionsModule({
                               </div>
                               {app.hasDocument && (
                                 <div className="pt-0.5">
-                                  <a
-                                    href={app.documentUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
-                                    title={`Click to view/download: ${app.documentName || app.documentCategory}`}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDocPreview(app)}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition cursor-pointer"
+                                    title={`Click to preview: ${app.documentName || app.documentCategory}`}
                                   >
                                     <FileText className="w-2.5 h-2.5 text-emerald-600" />
                                     <span>{app.documentCategory || 'Document'}</span>
-                                  </a>
+                                  </button>
                                 </div>
                               )}
                               <span className="text-[10px] font-mono text-slate-400 block">
@@ -1039,7 +1270,23 @@ export default function AdmissionsModule({
                         <div className="text-[11px] text-slate-500 space-y-0.5">
                           <div>Guardian: <strong>{app.parentName}</strong></div>
                           <div>Phone: <strong className="font-mono">{app.parentPhone}</strong></div>
-                          <div>DOB: {app.dob}</div>
+                          <div className="flex items-center justify-between gap-1">
+                            <span>DOB: {app.dob}</span>
+                            {app.hasDocument && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenDocPreview(app);
+                                }}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition cursor-pointer"
+                                title={`Click to preview: ${app.documentName || app.documentCategory}`}
+                              >
+                                <FileText className="w-2.5 h-2.5 text-emerald-600" />
+                                <span>{app.documentCategory || 'Doc'}</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
 
                         <button
@@ -1087,9 +1334,25 @@ export default function AdmissionsModule({
                           </span>
                         </div>
 
-                        <div className="text-[11px] text-slate-500">
+                        <div className="text-[11px] text-slate-500 space-y-0.5">
                           <div>Guardian: {app.parentName}</div>
-                          <div>User ID: <strong className="font-mono text-slate-700">{app.provisionalUsername}</strong></div>
+                          <div className="flex items-center justify-between gap-1">
+                            <div>User ID: <strong className="font-mono text-slate-700">{app.provisionalUsername}</strong></div>
+                            {app.hasDocument && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenDocPreview(app);
+                                }}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition cursor-pointer"
+                                title={`Click to preview: ${app.documentName || app.documentCategory}`}
+                              >
+                                <FileText className="w-2.5 h-2.5 text-emerald-600" />
+                                <span>{app.documentCategory || 'Doc'}</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
 
                         <button
@@ -1138,7 +1401,23 @@ export default function AdmissionsModule({
                         </div>
 
                         <div className="text-[11px] text-slate-500">
-                          <div>Reason: {app.rejectionRemarks || 'None specified'}</div>
+                          <div className="flex items-center justify-between gap-1">
+                            <span>Reason: {app.rejectionRemarks || 'None specified'}</span>
+                            {app.hasDocument && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenDocPreview(app);
+                                }}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition cursor-pointer"
+                                title={`Click to preview: ${app.documentName || app.documentCategory}`}
+                              >
+                                <FileText className="w-2.5 h-2.5 text-emerald-600" />
+                                <span>{app.documentCategory || 'Doc'}</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
 
                         <button
@@ -1554,15 +1833,30 @@ export default function AdmissionsModule({
                       </div>
 
                       {selectedApplication.hasDocument && selectedApplication.documentUrl && (
-                        <a
-                          href={selectedApplication.documentUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-xs shrink-0 cursor-pointer"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>View / Download</span>
-                        </a>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenDocPreview(selectedApplication)}
+                            className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-xs cursor-pointer active:scale-95"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>View / Preview</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={downloadingDocAppId === selectedApplication.id}
+                            onClick={() => handleDownloadDoc(selectedApplication)}
+                            className="px-3 py-2 rounded-xl bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-700 text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-xs cursor-pointer disabled:opacity-50"
+                            title="Download document directly"
+                          >
+                            {downloadingDocAppId === selectedApplication.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5" />
+                            )}
+                            <span>Download</span>
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -1840,6 +2134,187 @@ export default function AdmissionsModule({
                   alt={photoZoomUrl.name}
                   className="w-full h-full object-cover"
                 />
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* =========================================================================
+          8b. DOCUMENT FULLSCREEN PREVIEW MODAL
+          ========================================================================= */}
+      {docPreviewModal?.isOpen &&
+        createPortal(
+          <div
+            onClick={closeDocPreview}
+            className="fixed inset-0 z-[10000] bg-slate-950/85 backdrop-blur-md flex flex-col p-3 sm:p-6 cursor-pointer"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-4xl mx-auto my-auto bg-slate-900 rounded-3xl overflow-hidden shadow-2xl border border-slate-700/60 flex flex-col max-h-[92vh] cursor-default"
+            >
+              {/* Modal Header */}
+              <div className="px-5 sm:px-6 py-3.5 border-b border-slate-800 bg-slate-900/90 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono uppercase font-black tracking-wider px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
+                        {docPreviewModal.category || 'Supporting Document'}
+                      </span>
+                      <span className="text-xs text-slate-400 truncate">
+                        Applicant: <strong className="text-white">{docPreviewModal.app?.name}</strong> ({docPreviewModal.app?.applicationNo})
+                      </span>
+                    </div>
+                    <h3 className="text-sm font-bold text-white truncate mt-0.5" title={docPreviewModal.filename}>
+                      {docPreviewModal.filename}
+                    </h3>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {!docPreviewModal.isPdf && docPreviewModal.blobUrl && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDocPreviewModal((prev) =>
+                            prev ? { ...prev, scale: Math.max(0.5, +(prev.scale - 0.25).toFixed(2)) } : null
+                          )
+                        }
+                        className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition cursor-pointer"
+                        title="Zoom Out"
+                      >
+                        <ZoomOut className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDocPreviewModal((prev) =>
+                            prev ? { ...prev, scale: Math.min(3, +(prev.scale + 0.25).toFixed(2)) } : null
+                          )
+                        }
+                        className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition cursor-pointer"
+                        title="Zoom In"
+                      >
+                        <ZoomIn className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDocPreviewModal((prev) =>
+                            prev ? { ...prev, rotation: (prev.rotation + 90) % 360 } : null
+                          )
+                        }
+                        className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition cursor-pointer"
+                        title="Rotate 90°"
+                      >
+                        <RotateCw className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDocPreviewModal((prev) => (prev ? { ...prev, scale: 1, rotation: 0 } : null))
+                        }
+                        className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition cursor-pointer"
+                        title="Reset Zoom"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
+
+                  {docPreviewModal.blobUrl && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (docPreviewModal.app) handleDownloadDoc(docPreviewModal.app);
+                        }}
+                        className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition flex items-center gap-1.5 px-3 text-xs cursor-pointer shadow-xs"
+                        title="Download File to Computer"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span className="hidden sm:inline">Download</span>
+                      </button>
+                      <a
+                        href={docPreviewModal.blobUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition"
+                        title="Open in new window"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    </>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={closeDocPreview}
+                    className="p-2 rounded-xl bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 transition ml-1 cursor-pointer"
+                    title="Close Preview"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Modal Body */}
+              <div className="flex-1 overflow-auto bg-slate-950 p-4 sm:p-6 flex items-center justify-center min-h-[420px]">
+                {docPreviewModal.isLoading ? (
+                  <div className="flex flex-col items-center justify-center gap-3 text-slate-400 py-12">
+                    <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
+                    <p className="text-xs font-semibold">Loading secure document preview...</p>
+                  </div>
+                ) : docPreviewModal.error ? (
+                  <div className="p-6 max-w-md bg-rose-950/40 border border-rose-800/60 rounded-2xl text-center space-y-3">
+                    <AlertCircle className="w-8 h-8 text-rose-400 mx-auto" />
+                    <p className="text-xs text-rose-200">{docPreviewModal.error}</p>
+                    <button
+                      type="button"
+                      onClick={() => docPreviewModal.app && handleOpenDocPreview(docPreviewModal.app)}
+                      className="px-4 py-2 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-500 transition cursor-pointer"
+                    >
+                      Retry Loading
+                    </button>
+                  </div>
+                ) : docPreviewModal.isPdf && docPreviewModal.blobUrl ? (
+                  <iframe
+                    src={docPreviewModal.blobUrl}
+                    title={docPreviewModal.filename}
+                    className="w-full h-[65vh] rounded-2xl bg-white shadow-xl border-0"
+                  />
+                ) : docPreviewModal.blobUrl ? (
+                  <div className="overflow-auto max-h-[70vh] max-w-full flex items-center justify-center p-2">
+                    <img
+                      src={docPreviewModal.blobUrl}
+                      alt={docPreviewModal.filename}
+                      style={{
+                        transform: `scale(${docPreviewModal.scale}) rotate(${docPreviewModal.rotation}deg)`,
+                        transition: 'transform 0.15s ease-out',
+                      }}
+                      className="max-h-[65vh] max-w-full rounded-xl object-contain shadow-2xl"
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">No document content available.</p>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="px-6 py-3 border-t border-slate-800 bg-slate-900/80 flex items-center justify-between text-xs text-slate-400">
+                <span>
+                  Application #{docPreviewModal.app?.applicationNo} • Submitted{' '}
+                  {docPreviewModal.app?.submittedAt
+                    ? new Date(docPreviewModal.app.submittedAt).toLocaleDateString()
+                    : ''}
+                </span>
+                <span className="font-mono text-[11px] text-slate-400 font-bold">
+                  {docPreviewModal.isPdf ? 'PDF Document' : 'Image File'}
+                </span>
               </div>
             </div>
           </div>,

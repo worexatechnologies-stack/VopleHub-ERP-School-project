@@ -219,6 +219,28 @@ export async function apiDownload(path: string): Promise<{ blob: Blob; filename:
   if (!response.ok) throw new Error(`Document download failed (${response.status}).`);
   const header = response.headers.get('Content-Disposition') || '';
   const contentType = response.headers.get('Content-Type') || '';
-  const filename = /filename="?([^";]+)"?/i.exec(header)?.[1] || 'document';
-  return { blob: await response.blob(), filename, contentType };
+
+  // Extract filename safely handling RFC 5987 / 6266 utf-8 encoded filenames and standard quotes
+  let filename = '';
+  const utf8Match = /filename\*=utf-8''([^;]+)/i.exec(header);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      filename = decodeURIComponent(utf8Match[1].trim());
+    } catch {
+      filename = utf8Match[1].trim();
+    }
+  }
+  if (!filename) {
+    const match = /filename="?([^";]+)"?/i.exec(header);
+    if (match && match[1]) {
+      filename = match[1].trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  if (!filename) {
+    filename = 'document';
+  }
+
+  const rawBlob = await response.blob();
+  const blob = new Blob([rawBlob], { type: contentType || rawBlob.type || 'application/octet-stream' });
+  return { blob, filename, contentType };
 }

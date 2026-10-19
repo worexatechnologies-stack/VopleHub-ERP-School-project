@@ -10,6 +10,10 @@ export interface AppNotification {
   timestamp: string;
   read: boolean;
   source?: string;
+  conversationId?: number;
+  senderId?: number;
+  senderName?: string;
+  related?: any;
 }
 
 export const NOTIFICATION_EVENT = 'volpehub:notification';
@@ -35,6 +39,10 @@ export function emitNotification(input: {
   tone?: NotificationTone;
   source?: string;
   skipSound?: boolean;
+  conversationId?: number;
+  senderId?: number;
+  senderName?: string;
+  related?: any;
 }): AppNotification | null {
   if (!isUserFacingNotificationContent(input.title, input.message)) {
     return null;
@@ -48,6 +56,10 @@ export function emitNotification(input: {
     timestamp: new Date().toISOString(),
     read: false,
     source: input.source,
+    conversationId: input.conversationId,
+    senderId: input.senderId,
+    senderName: input.senderName,
+    related: input.related,
   };
 
   // Play pleasant audible notification chime for every dashboard / in-app notification

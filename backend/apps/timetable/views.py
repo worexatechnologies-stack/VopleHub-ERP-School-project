@@ -101,7 +101,7 @@ class TimetableSlotViewSet(TenantScopedViewSet):
         elif user.role == User.Role.TEACHER:
             teacher = getattr(user, 'teacher_profile', None)
             queryset = queryset.filter(
-                teacher_id=teacher.pk, published=True,
+                teacher_id=teacher.pk,
             ) if (
                 teacher
                 and teacher.user_id == user.pk
@@ -138,6 +138,42 @@ class TimetableSlotViewSet(TenantScopedViewSet):
             queryset = queryset.filter(section_id=section_id)
         return _order_slots(queryset).order_by('section_id', '_day_order', 'period', 'pk')
 
+    def perform_create(self, serializer):
+        slot = serializer.save()
+        try:
+            from apps.notifications.services import notify_teacher_user
+            cls_name = slot.section.class_room.name if slot.section and slot.section.class_room else 'Class'
+            sec_name = slot.section.name if slot.section else ''
+            notify_teacher_user(
+                slot.teacher,
+                title="Class Schedule Assigned",
+                body=f"You have been scheduled for {slot.subject.name} ({cls_name} - {sec_name}) on {slot.day} (Period {slot.period}).",
+                category="Timetable",
+                channel="timetable",
+                sender=self.request.user,
+                related={'sectionId': slot.section_id, 'day': slot.day, 'period': slot.period},
+            )
+        except Exception:
+            pass
+
+    def perform_update(self, serializer):
+        slot = serializer.save()
+        try:
+            from apps.notifications.services import notify_teacher_user
+            cls_name = slot.section.class_room.name if slot.section and slot.section.class_room else 'Class'
+            sec_name = slot.section.name if slot.section else ''
+            notify_teacher_user(
+                slot.teacher,
+                title="Class Schedule Updated",
+                body=f"Your schedule for {slot.subject.name} ({cls_name} - {sec_name}) on {slot.day} (Period {slot.period}) has been updated.",
+                category="Timetable",
+                channel="timetable",
+                sender=self.request.user,
+                related={'sectionId': slot.section_id, 'day': slot.day, 'period': slot.period},
+            )
+        except Exception:
+            pass
+
     @extend_schema(
         request=TimetablePublishSerializer,
         responses={status.HTTP_200_OK: TimetablePublishResponseSerializer},
@@ -156,10 +192,11 @@ class TimetableSlotViewSet(TenantScopedViewSet):
         with transaction.atomic():
             updated = slots.filter(published=False).update(published=True)
 
-        # Notify students and parents of published timetable
+        # Notify students, parents, and teachers of published timetable
         try:
             from apps.sis.models import Student
-            from apps.notifications.services import notify_class_students_and_parents
+            from apps.staff.models import Teacher
+            from apps.notifications.services import notify_class_students_and_parents, notify_teacher_user
             section_obj = Section.objects.filter(pk=data['sectionId'], school_id=request.user.school_id).select_related('class_room').first()
             if section_obj:
                 cls_name = section_obj.class_room.name if section_obj.class_room else 'Class'
@@ -174,6 +211,18 @@ class TimetableSlotViewSet(TenantScopedViewSet):
                     sender=request.user,
                     related={'sectionId': section_obj.id, 'className': cls_name, 'sectionName': section_obj.name},
                 )
+                teacher_ids = list(slots.values_list('teacher_id', flat=True).distinct())
+                teachers = Teacher.objects.filter(pk__in=teacher_ids, school_id=request.user.school_id).select_related('user', 'school')
+                for t in teachers:
+                    notify_teacher_user(
+                        t,
+                        title="Timetable Published",
+                        body=f"The official teaching schedule for {cls_name} - Section {section_obj.name} has been published.",
+                        category="Timetable",
+                        channel="timetable",
+                        sender=request.user,
+                        related={'sectionId': section_obj.id, 'className': cls_name, 'sectionName': section_obj.name},
+                    )
         except Exception:
             pass
 

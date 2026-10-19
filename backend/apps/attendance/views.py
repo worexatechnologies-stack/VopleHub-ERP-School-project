@@ -70,12 +70,11 @@ def check_teacher_period_permission(user, student, attendance_date, period, subj
             section=student.section_record,
             day=day_of_week,
             period=period,
-            published=True,
-        ).select_related('subject', 'teacher', 'teacher__user').first()
+        ).order_by('-published', '-id').select_related('subject', 'teacher', 'teacher__user').first()
 
     if slot:
         # Timetable slot exists! Verify that slot teacher matches authenticated teacher
-        if slot.teacher_id != teacher.id:
+        if slot.teacher_id != teacher.id and user.role == User.Role.TEACHER:
             return False, slot, slot.subject, slot.teacher
         return True, slot, slot.subject, slot.teacher
 
@@ -85,10 +84,22 @@ def check_teacher_period_permission(user, student, attendance_date, period, subj
         Student.objects.filter(school_id=user.school_id),
         school_id=user.school_id,
     )
-    if not permitted.filter(pk=student.pk).exists():
+    if not permitted.filter(pk=student.pk).exists() and user.role == User.Role.TEACHER:
         return False, None, None, None
 
     subj = Subject.objects.filter(school_id=user.school_id, pk=subject_id).first() if subject_id else None
+    if not subj and student.section_record and teacher:
+        from apps.staff.models import TeacherTeachingAssignment
+        assign = TeacherTeachingAssignment.objects.filter(
+            school_id=user.school_id,
+            teacher=teacher,
+            section=student.section_record,
+        ).select_related('subject').first()
+        if assign:
+            subj = assign.subject
+    if not subj and teacher:
+        subj = teacher.subject_records.first()
+
     return True, None, subj, teacher
 
 
@@ -107,10 +118,10 @@ class AttendanceViewSet(TenantScopedViewSet):
     queryset = AttendanceRecord.objects.select_related(
         'student', 'subject', 'subject_teacher', 'subject_teacher__user', 'marked_by', 'timetable_slot'
     ).order_by('-date', 'period', '-id')
-    http_method_names = ['get', 'head', 'options', 'put']
+    http_method_names = ['get', 'head', 'options', 'put', 'post', 'patch']
 
     def get_permissions(self):
-        if self.action == 'mark':
+        if self.action in ['mark', 'bulk_mark']:
             return [AttendanceAccess(), CanMarkAttendance()]
         return [AttendanceAccess()]
 
@@ -244,24 +255,36 @@ class AttendanceViewSet(TenantScopedViewSet):
                 reason=reason,
             )
 
-            # 6. Trigger Subject/Period Parent Absent Notification on transition to Absent
+            # 6. Trigger Subject/Period Parent Notification on status update (Present, Absent, Late)
+            subj_title = final_subject.name if final_subject else None
+            teacher_title = get_teacher_display_name(final_teacher) or (user.get_full_name() or user.email)
+            if subj_title:
+                desc = f"{subj_title} (Period {period})"
+            else:
+                desc = f"Period {period}"
+
             if attendance_status == AttendanceRecord.Status.ABSENT:
-                parent_profiles = student.parent_profiles.select_related('user').all()
-                parent_users = [p.user for p in parent_profiles if p.user]
-                if parent_users:
-                    subj_title = final_subject.name if final_subject else f'Period {period}'
-                    teacher_title = get_teacher_display_name(final_teacher) or (user.get_full_name() or user.email)
-                    try:
-                        create_rows(
-                            sender=user,
-                            recipients=parent_users,
-                            channel='attendance-alert',
-                            category='Attendance Alert',
-                            title=f'Absence Alert: {student.name} ({subj_title})',
-                            body=f'Dear Parent, your ward {student.name} was marked ABSENT for {subj_title} during Period {period} today ({day_str}, {attendance_date}). Teacher: {teacher_title}.',
-                        )
-                    except Exception:
-                        pass
+                alert_title = f'Absence Alert: {student.name} · {desc}'
+                alert_body = f'Dear Parent, your ward {student.name} was marked ABSENT for {desc} today on {day_str}, {attendance_date}. Teacher: {teacher_title}.'
+            elif attendance_status == AttendanceRecord.Status.LATE:
+                alert_title = f'Late Arrival Alert: {student.name} · {desc}'
+                alert_body = f'Dear Parent, your ward {student.name} was marked LATE for {desc} today on {day_str}, {attendance_date}. Teacher: {teacher_title}.'
+            else:
+                alert_title = f'Attendance: {student.name} · {desc}'
+                alert_body = f'Dear Parent, your ward {student.name} was marked PRESENT for {desc} today on {day_str}, {attendance_date}. Teacher: {teacher_title}.'
+
+            try:
+                notify_parents_of_student(
+                    student,
+                    title=alert_title,
+                    body=alert_body,
+                    category='Attendance Alert',
+                    channel='attendance-alert',
+                    sender=user,
+                    related={'studentId': student.id, 'status': attendance_status, 'period': period, 'date': attendance_date},
+                )
+            except Exception:
+                pass
 
         return Response(self.get_serializer(record).data)
 
@@ -298,7 +321,7 @@ class AttendanceViewSet(TenantScopedViewSet):
         }
 
         updated_count = 0
-        absent_notifications = {}
+        attendance_notifications = {}
         with transaction.atomic():
             for it in work_items:
                 s_id = int(it.get('studentId'))
@@ -349,19 +372,43 @@ class AttendanceViewSet(TenantScopedViewSet):
                         old_status=old_status,
                         new_status=st,
                         changed_by=user,
-                        reason='Full Day Bulk Attendance Mark',
+                        reason='Bulk Attendance Mark',
                     )
-                    if st in [AttendanceRecord.Status.ABSENT, AttendanceRecord.Status.LATE]:
-                        absent_notifications[student.id] = (student, st)
+                attendance_notifications[student.id] = (student, st)
 
-        # Dispatch alerts to parents for absent/late students
-        for s_id, (student, st_val) in absent_notifications.items():
+        # Dispatch alerts/notices to parents for all marked students (Present, Absent, Late)
+        for s_id, (student, st_val) in attendance_notifications.items():
             try:
                 subj_tag = f"Class {student.class_name}-{student.section}" if student.class_name else "School"
+                last_rec = AttendanceRecord.objects.filter(student=student, date=attendance_date).select_related('subject', 'subject_teacher', 'subject_teacher__user').order_by('-id').first()
+                subj_name = last_rec.subject.name if (last_rec and last_rec.subject) else None
+                p_num = last_rec.period if last_rec else None
+
+                if subj_name and p_num:
+                    target_desc = f"{subj_name} (Period {p_num})"
+                elif subj_name:
+                    target_desc = subj_name
+                elif p_num:
+                    target_desc = f"Period {p_num}"
+                else:
+                    target_desc = subj_tag
+
+                teacher_title = get_teacher_display_name(last_rec.subject_teacher if last_rec else None) or (user.get_full_name() or user.email)
+
+                if st_val == AttendanceRecord.Status.ABSENT:
+                    n_title = f'Absence Alert: {student.name} · {target_desc}'
+                    n_body = f'Dear Parent, your ward {student.name} was marked ABSENT for {target_desc} today on {day_str}, {attendance_date}. Teacher: {teacher_title}.'
+                elif st_val == AttendanceRecord.Status.LATE:
+                    n_title = f'Late Arrival Alert: {student.name} · {target_desc}'
+                    n_body = f'Dear Parent, your ward {student.name} was marked LATE for {target_desc} today on {day_str}, {attendance_date}. Teacher: {teacher_title}.'
+                else:
+                    n_title = f'Attendance: {student.name} · {target_desc}'
+                    n_body = f'Dear Parent, your ward {student.name} was marked PRESENT for {target_desc} today on {day_str}, {attendance_date}. Teacher: {teacher_title}.'
+
                 notify_parents_of_student(
                     student,
-                    title=f'Attendance Alert: {student.name} marked {st_val.upper()}',
-                    body=f'Dear Parent, your ward {student.name} was marked {st_val.upper()} for {subj_tag} on {day_str}, {attendance_date}.',
+                    title=n_title,
+                    body=n_body,
                     category='Attendance Alert',
                     channel='attendance-alert',
                     sender=user,
@@ -434,8 +481,7 @@ class AttendanceViewSet(TenantScopedViewSet):
                 school_id=user.school_id,
                 section=students_qs.first().section_record,
                 day=day_of_week,
-                published=True,
-            ).select_related('subject', 'teacher', 'teacher__user')
+            ).order_by('-published', '-id').select_related('subject', 'teacher', 'teacher__user')
 
             teacher_profile = getattr(user, 'teacher_profile', None)
             for s in slots:
@@ -449,6 +495,21 @@ class AttendanceViewSet(TenantScopedViewSet):
                         period_data[s.period]['isEditable'] = True
                     elif teacher_profile and s.teacher_id == teacher_profile.id:
                         period_data[s.period]['isEditable'] = True
+
+            # Fallback for periods without slot: check TeacherTeachingAssignment
+            from apps.staff.models import TeacherTeachingAssignment
+            teaching_assignments = TeacherTeachingAssignment.objects.filter(
+                school_id=user.school_id,
+                section=students_qs.first().section_record,
+            ).select_related('subject', 'teacher', 'teacher__user')
+            first_assign = teaching_assignments.first()
+            if first_assign:
+                for p in range(1, 7):
+                    if not period_data[p]['subjectId']:
+                        period_data[p]['subjectId'] = first_assign.subject_id
+                        period_data[p]['subjectName'] = first_assign.subject.name
+                        if not period_data[p]['teacherName']:
+                            period_data[p]['teacherName'] = get_teacher_display_name(first_assign.teacher)
 
         for r in records_qs:
             p = r.period

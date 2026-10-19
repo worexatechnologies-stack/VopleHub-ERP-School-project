@@ -33,11 +33,53 @@ async function fetchAllPages<T>(
   return { data: rows };
 }
 
+export interface SchoolDocumentItem {
+  id: number;
+  docType: 'student' | 'teacher';
+  studentId?: number;
+  studentName?: string;
+  admissionNo?: string;
+  className?: string;
+  sectionName?: string;
+  teacherId?: number;
+  teacherName?: string;
+  qualification?: string;
+  department?: string;
+  name: string;
+  category: string;
+  status: 'Pending' | 'Verified' | 'Rejected';
+  remarks?: string;
+  fileType: string;
+  fileName: string;
+  uploadedAt: string;
+  verifiedAt?: string | null;
+  verifiedByName?: string | null;
+  downloadUrl: string;
+}
+
+export interface SchoolDocumentsQueueResponse {
+  documents: SchoolDocumentItem[];
+  studentDocuments: SchoolDocumentItem[];
+  teacherDocuments: SchoolDocumentItem[];
+  summary: {
+    totalDocs: number;
+    totalPending: number;
+    totalVerified: number;
+    totalRejected: number;
+    totalStudentDocs: number;
+    totalTeacherDocs: number;
+  };
+}
+
 export const schoolApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
     getSchools: build.query<SchoolRecord[], void>({
       queryFn: (_arg, _api, _extra, baseQuery) => fetchAllPages<SchoolRecord>('/schools/', baseQuery),
       providesTags: ['School'],
+    }),
+    getSchoolDocumentsQueue: build.query<SchoolDocumentsQueueResponse, void>({
+      query: () => ({ url: '/school/documents/queue/' }),
+      providesTags: ['Student', 'Teacher'],
     }),
     createSchool: build.mutation<SchoolRecord, FormData>({
       query: (body) => ({ url: '/schools/', method: 'POST', body }),
@@ -60,6 +102,7 @@ export const schoolApi = baseApi.injectEndpoints({
 
 export const {
   useGetSchoolsQuery,
+  useGetSchoolDocumentsQueueQuery,
   useCreateSchoolMutation,
   useUpdateSchoolMutation,
   useDeleteSchoolMutation,

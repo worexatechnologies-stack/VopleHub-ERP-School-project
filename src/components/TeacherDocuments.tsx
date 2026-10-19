@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FileText,
@@ -29,6 +29,7 @@ import { emitNotification } from '../services/notificationBus';
 import { apiDownload } from '../services/api';
 import {
   useGetTeachersQuery,
+  useGetTeacherDocumentsQuery,
   useUploadTeacherDocumentMutation,
   useDeleteTeacherDocumentMutation,
   TeacherApiDocument
@@ -85,8 +86,11 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
   const currentTeacher = useMemo(() => {
     if (isServerBacked && teachers.length) {
       return (
-        teachers.find((t) => t.email?.toLowerCase() === user?.email?.toLowerCase()) ||
-        teachers[0]
+        teachers.find(
+          (t) =>
+            (user?.id && t.userId === user.id) ||
+            (user?.email && t.email?.toLowerCase() === user.email.toLowerCase())
+        ) || teachers[0]
       );
     }
     try {
@@ -94,7 +98,11 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
       if (raw) {
         const parsed = JSON.parse(raw);
         return (
-          parsed.find((t: any) => t.email?.toLowerCase() === user?.email?.toLowerCase()) ||
+          parsed.find(
+            (t: any) =>
+              (user?.id && t.userId === user.id) ||
+              (user?.email && t.email?.toLowerCase() === user.email.toLowerCase())
+          ) ||
           parsed[0] ||
           null
         );
@@ -105,10 +113,20 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
     return null;
   }, [teachers, user, isServerBacked]);
 
+  const teacherId = currentTeacher?.id ? Number(currentTeacher.id) : 0;
+  const {
+    data: liveDocuments,
+    refetch: refetchLiveDocs,
+  } = useGetTeacherDocumentsQuery(teacherId, {
+    skip: !isServerBacked || !teacherId,
+  });
+
   const [uploadMutation, { isLoading: isUploading }] = useUploadTeacherDocumentMutation();
   const [deleteMutation, { isLoading: isDeleting }] = useDeleteTeacherDocumentMutation();
 
-  // Local state for uploading form
+  // Local state for uploading form & modal
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('Aadhaar Card');
   const [customDocName, setCustomDocName] = useState<string>('Aadhaar Card');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -127,23 +145,28 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
   }
   const [previewDoc, setPreviewDoc] = useState<PreviewDocState | null>(null);
 
-  // Documents list
+  // Documents list - prioritize real-time documents from dedicated documents endpoint
   const documents: TeacherApiDocument[] = useMemo(() => {
-    if (!currentTeacher) return [];
-    return currentTeacher.documents || [];
-  }, [currentTeacher]);
+    if (liveDocuments && Array.isArray(liveDocuments)) {
+      return liveDocuments;
+    }
+    return currentTeacher?.documents || [];
+  }, [liveDocuments, currentTeacher]);
 
   // Handle Preset selection
-  const handleSelectPreset = (preset: typeof DOCUMENT_PRESETS[0]) => {
+  const handleSelectPreset = (preset: typeof DOCUMENT_PRESETS[0], openUpload: boolean = false) => {
     setSelectedCategory(preset.category);
     setCustomDocName(preset.name);
     setUploadError('');
     setUploadSuccess('');
+    if (openUpload) {
+      setIsUploadModalOpen(true);
+    }
   };
 
   // Upload handler
-  const handleUpload = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleUpload = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!selectedFile) {
       setUploadError('Please select a document file to upload.');
       return;
@@ -152,13 +175,15 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
       setUploadError('File size exceeds the 5 MB limit.');
       return;
     }
-    if (!currentTeacher) {
+    if (!currentTeacher && !user) {
       setUploadError('Teacher profile could not be identified. Please contact the administrator.');
       return;
     }
 
     setUploadError('');
     setUploadSuccess('');
+
+    const tid = currentTeacher?.id ? Number(currentTeacher.id) : 0;
 
     if (isServerBacked) {
       try {
@@ -168,19 +193,22 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
         formData.append('file', selectedFile);
 
         await uploadMutation({
-          teacherId: Number(currentTeacher.id),
+          teacherId: tid,
           body: formData,
         }).unwrap();
 
-        setUploadSuccess(`"${customDocName || selectedCategory}" uploaded successfully. It is now pending admin verification.`);
+        const successMsg = `"${customDocName || selectedCategory}" uploaded successfully. It is now pending admin verification.`;
+        setUploadSuccess(successMsg);
         emitNotification({
           title: 'Teacher Document Uploaded',
-          message: `"${customDocName || selectedCategory}" was uploaded for ${currentTeacher.name}.`,
+          message: `"${customDocName || selectedCategory}" was uploaded for ${currentTeacher?.name || user?.name || 'Staff'}.`,
           tone: 'success',
           source: 'documents',
         });
         setSelectedFile(null);
+        setIsUploadModalOpen(false);
         refetch();
+        refetchLiveDocs();
       } catch (err: any) {
         setUploadError(err?.data?.detail || err?.message || 'Failed to upload document to server.');
       }
@@ -201,7 +229,7 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
         };
 
         const updated = teachersList.map((t: any) => {
-          if (String(t.id) === String(currentTeacher.id)) {
+          if (String(t.id) === String(currentTeacher?.id)) {
             const existing = t.documents || [];
             return { ...t, documents: [newDoc, ...existing] };
           }
@@ -211,6 +239,7 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
         localStorage.setItem('erp_teachers', JSON.stringify(updated));
         setUploadSuccess(`"${customDocName || selectedCategory}" uploaded. It is now pending admin verification.`);
         setSelectedFile(null);
+        setIsUploadModalOpen(false);
         window.location.reload();
       } catch (err) {
         setUploadError('Failed to save document locally.');
@@ -236,6 +265,7 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
           source: 'documents',
         });
         refetch();
+        refetchLiveDocs();
       } catch (err: any) {
         alert(err?.data?.detail || 'Could not delete document.');
       }
@@ -301,7 +331,8 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
     const currentIndex = list.findIndex((d) => d.id === doc.id);
     setIsPreviewLoadingId(doc.id);
     try {
-      const { blob, filename, contentType } = await apiDownload(doc.downloadUrl);
+      const previewUrl = doc.downloadUrl + (doc.downloadUrl.includes('?') ? '&view=1' : '?view=1');
+      const { blob, filename, contentType } = await apiDownload(previewUrl);
       const isPdf = contentType.includes('pdf') || (doc.fileType || '').toUpperCase() === 'PDF' || (doc.fileName || '').toLowerCase().endsWith('.pdf');
       const url = URL.createObjectURL(blob);
       setPreviewDoc((prev) => {
@@ -358,11 +389,20 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
 
     setIsDownloadingId(doc.id);
     try {
-      const { blob, filename } = await apiDownload(doc.downloadUrl);
+      const { blob, filename, contentType } = await apiDownload(doc.downloadUrl);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename || doc.fileName || `${doc.name}.${doc.fileType.toLowerCase()}`;
+      let finalName = filename;
+      if (!finalName || finalName === 'document' || !finalName.includes('.')) {
+        if (doc.fileName && doc.fileName.includes('.')) {
+          finalName = doc.fileName;
+        } else {
+          const ext = contentType.includes('pdf') ? 'pdf' : contentType.includes('png') ? 'png' : (contentType.includes('jpeg') || contentType.includes('jpg')) ? 'jpg' : (doc.fileType || 'pdf').toLowerCase();
+          finalName = `${doc.fileName || doc.name || 'document'}.${ext}`;
+        }
+      }
+      a.download = finalName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -472,11 +512,27 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
               </div>
             )}
             <button
-              onClick={() => refetch()}
+              onClick={() => {
+                refetch();
+                refetchLiveDocs();
+              }}
               className="rounded-2xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50 hover:text-indigo-600 transition-colors cursor-pointer shadow-2xs"
               title="Refresh status"
             >
               <RefreshCw className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedFile(null);
+                setUploadError('');
+                setUploadSuccess('');
+                setIsUploadModalOpen(true);
+              }}
+              className="rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 text-xs font-bold flex items-center gap-2 cursor-pointer shadow-md shadow-indigo-600/20 transition-all"
+            >
+              <UploadCloud className="h-4 w-4" />
+              <span>+ Upload Document</span>
             </button>
           </div>
         </div>
@@ -613,7 +669,7 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
                       </div>
                     </div>
 
-                    <div className="shrink-0 text-right">
+                    <div className="shrink-0 text-right flex flex-col items-end gap-1">
                       {existingDoc ? (
                         <span
                           className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase ${
@@ -627,9 +683,17 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
                           {existingDoc.status === 'Verified' ? '✓ Verified' : existingDoc.status === 'Rejected' ? '! Rejected' : '⧖ Pending'}
                         </span>
                       ) : (
-                        <span className="rounded-full bg-slate-200/70 px-2 py-0.5 text-[9px] font-bold text-slate-600">
-                          Not Uploaded
-                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectPreset(preset, true);
+                          }}
+                          className="rounded-full bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-0.5 text-[9px] font-bold cursor-pointer transition shadow-2xs flex items-center gap-1"
+                        >
+                          <UploadCloud className="w-2.5 h-2.5" />
+                          <span>+ Upload</span>
+                        </button>
                       )}
                     </div>
                   </button>
@@ -726,9 +790,24 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
                   Track current approval status and review remarks from the School Admin.
                 </p>
               </div>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">
-                {documents.length} Item{documents.length !== 1 ? 's' : ''}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">
+                  {documents.length} Item{documents.length !== 1 ? 's' : ''}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedFile(null);
+                    setUploadError('');
+                    setUploadSuccess('');
+                    setIsUploadModalOpen(true);
+                  }}
+                  className="rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition"
+                >
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  <span>Upload</span>
+                </button>
+              </div>
             </div>
 
             {documents.length === 0 ? (
@@ -736,8 +815,21 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
                 <FileText className="mx-auto h-12 w-12 text-slate-300" />
                 <h4 className="mt-2 text-sm font-bold text-slate-700">No documents uploaded yet</h4>
                 <p className="mt-1 text-xs text-slate-400 max-w-sm mx-auto">
-                  Select a document from the left panel to upload your Aadhaar card and Bank Passbook for school verification.
+                  Select a document from the left panel or click below to upload your Aadhaar card and Bank Passbook for school verification.
                 </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedFile(null);
+                    setUploadError('');
+                    setUploadSuccess('');
+                    setIsUploadModalOpen(true);
+                  }}
+                  className="mt-4 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold inline-flex items-center gap-2 cursor-pointer shadow-xs transition"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>Upload Document Now</span>
+                </button>
               </div>
             ) : (
               <div className="mt-4 space-y-3">
@@ -1058,6 +1150,134 @@ export default function TeacherDocuments({ user, schoolName = 'School Management
                 Close
               </button>
             </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Upload Document Modal Dialog */}
+      {isUploadModalOpen && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150">
+          <div
+            className="fixed inset-0"
+            onClick={() => setIsUploadModalOpen(false)}
+          />
+          <div className="relative w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl z-10 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
+                  <UploadCloud className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">Upload Staff Document</h3>
+                  <p className="text-xs text-slate-400">Securely saved in database for school admin verification</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsUploadModalOpen(false)}
+                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {uploadError && (
+              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{uploadError}</span>
+              </div>
+            )}
+            {uploadSuccess && (
+              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{uploadSuccess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleUpload} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700">Document Category</label>
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => {
+                    setSelectedCategory(e.target.value);
+                    const matchedPreset = DOCUMENT_PRESETS.find((p) => p.category === e.target.value);
+                    if (matchedPreset) {
+                      setCustomDocName(matchedPreset.name);
+                    }
+                  }}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs font-semibold text-slate-800 focus:border-indigo-500 focus:bg-white focus:outline-none cursor-pointer"
+                >
+                  {DOCUMENT_PRESETS.map((p) => (
+                    <option key={p.category} value={p.category}>
+                      {p.name} {p.mandatory ? '(Mandatory)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700">Document Title / Label</label>
+                <input
+                  type="text"
+                  value={customDocName}
+                  onChange={(e) => setCustomDocName(e.target.value)}
+                  placeholder="e.g. Aadhaar Card (Front & Back)"
+                  required
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-800 focus:border-indigo-500 focus:bg-white focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700">
+                  Select File (PDF, JPEG, PNG · Max 5MB)
+                </label>
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  className="mt-1 rounded-2xl border-2 border-dashed border-slate-300 p-6 text-center hover:border-indigo-500 hover:bg-indigo-50/30 transition-all cursor-pointer bg-slate-50/60"
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] || null;
+                      setSelectedFile(file);
+                      setUploadError('');
+                    }}
+                    className="hidden"
+                  />
+                  <UploadCloud className="mx-auto h-10 w-10 text-indigo-500" />
+                  <p className="mt-2 text-xs font-bold text-slate-800">
+                    {selectedFile ? selectedFile.name : 'Click to choose file or drag & drop'}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-400">
+                    {selectedFile
+                      ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB · Ready to upload`
+                      : 'Accepts official scanned copies in PDF, JPG, or PNG format'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsUploadModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUploading || !selectedFile}
+                  className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-md shadow-indigo-600/20 hover:bg-indigo-700 disabled:opacity-50 transition flex items-center gap-2 cursor-pointer"
+                >
+                  <UploadCloud className="h-4 w-4" />
+                  {isUploading ? 'Uploading to Database...' : 'Upload for Verification'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>,
         document.body

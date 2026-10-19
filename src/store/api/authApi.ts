@@ -37,7 +37,8 @@ export const authApi = baseApi.injectEndpoints({
     getCurrentUser: build.query<AuthUser, void>({
       query: () => ({ url: '/auth/me/' }),
       providesTags: ['Auth'],
-      transformResponse: (data: AuthUser & { role: string }) => ({
+      transformResponse: (data: AuthUser & { role: string; id?: number | string }) => ({
+        id: data.id,
         email: data.email,
         name: data.name || data.email,
         role: (roleMap[data.role] || data.role) as UserRole,

@@ -63,7 +63,7 @@ def create_teacher_with_login(*, school, data, created_by=None):
                     created_by=created_by,
                 )
                 for assignment in teaching_assignments
-            ])
+            ], ignore_conflicts=True)
         except IntegrityError as exc:
             if email and User.objects.filter(email__iexact=email).exists():
                 raise serializers.ValidationError({
@@ -72,17 +72,6 @@ def create_teacher_with_login(*, school, data, created_by=None):
             if data.get('phone') and Teacher.objects.filter(phone__iexact=data['phone'], school=school).exists():
                 raise serializers.ValidationError({
                     'phone': 'Phone number already exists.',
-                }) from exc
-            if any(
-                TeacherTeachingAssignment.objects.filter(
-                    school=school,
-                    section_id=assignment['sectionId'],
-                    subject_id=assignment['subjectId'],
-                ).exists()
-                for assignment in teaching_assignments
-            ):
-                raise serializers.ValidationError({
-                    'teachingAssignments': 'One or more selected class-section and subject assignments are already assigned to another teacher.',
                 }) from exc
             raise serializers.ValidationError({
                 'detail': 'The teacher account could not be created because a unique record already exists.',

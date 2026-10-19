@@ -33,11 +33,6 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4001)
             return
 
-        if self.user.role == User.Role.STUDENT:
-            logger.warning('Direct messaging rejected for student account %s', self.user.id)
-            await self.close(code=4003)
-            return
-
         await self.accept()
 
         # Join personal user group for direct notifications & messages
