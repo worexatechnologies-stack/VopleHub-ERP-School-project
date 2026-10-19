@@ -173,7 +173,7 @@ jobs:
             IMAGE_TAG="$1"
             GHCR_NAMESPACE="$2"
             GHCR_ACTOR="$3"
-            GHCR_PULL_TOKEN="$4"
+            GHCR_PULL_TOKEN="${4:-}"
             export IMAGE_TAG GHCR_NAMESPACE
 
             cd /opt/volpehub
