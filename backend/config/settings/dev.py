@@ -8,7 +8,7 @@ environ.Env.read_env(_DEV_BASE_DIR / '.env')
 
 # Development only: production settings never receive this fallback.
 os.environ.setdefault('DJANGO_SECRET_KEY', 'development-only-insecure-key-at-least-32-bytes')
-os.environ.setdefault('DATABASE_URL', f'sqlite:///{_DEV_BASE_DIR / "db.sqlite3"}')
+os.environ.setdefault('DATABASE_URL', 'postgres://volpehub_education:worexa@123@localhost:5432/volpehub_education')
 
 from .base import *
 

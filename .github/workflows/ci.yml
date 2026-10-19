@@ -34,6 +34,20 @@ jobs:
   backend-check:
     name: Backend Tests & Django Check
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: volpehub_test
+          POSTGRES_USER: volpehub_test
+          POSTGRES_PASSWORD: volpehub_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -52,7 +66,7 @@ jobs:
 
       - name: Django deployment and model check
         env:
-          DATABASE_URL: sqlite:///tmp/ci_check.sqlite3
+          DATABASE_URL: postgres://volpehub_test:volpehub_test_password@localhost:5432/volpehub_test
           DJANGO_SECRET_KEY: ci-validation-secret-key-at-least-32-chars-long
           DJANGO_SETTINGS_MODULE: config.settings.dev
         run: |
@@ -60,7 +74,7 @@ jobs:
 
       - name: Run automated unit tests
         env:
-          DATABASE_URL: sqlite:///tmp/ci_test.sqlite3
+          DATABASE_URL: postgres://volpehub_test:volpehub_test_password@localhost:5432/volpehub_test
           DJANGO_SECRET_KEY: ci-test-secret-key-at-least-32-chars-long
           DJANGO_SETTINGS_MODULE: config.settings.dev
         run: |
