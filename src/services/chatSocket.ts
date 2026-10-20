@@ -1,7 +1,7 @@
 /**
  * Production-ready WebSocket client for real-time school messaging platform.
- * Supports auto-reconnect with backoff, authentication, group event handling,
- * and connection status subscriptions.
+ * Supports auto-reconnect with backoff, authentication, event deduplication,
+ * typing indicators, presence, read receipts, and connection status subscriptions.
  */
 import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
 
@@ -39,6 +39,25 @@ export interface ChatSocketReadEvent {
   readAt: string;
 }
 
+export interface ChatSocketTypingEvent {
+  conversationId: number;
+  userId: number;
+  userName?: string;
+  isTyping: boolean;
+}
+
+export interface ChatSocketPresenceEvent {
+  userId: number;
+  isOnline: boolean;
+  lastSeenAt?: string;
+}
+
+export interface ChatSocketUnreadEvent {
+  totalUnread: number;
+  conversationId?: number;
+  conversationUnread?: number;
+}
+
 type EventListener = (payload: any) => void;
 type StatusListener = (status: ChatSocketStatus) => void;
 
@@ -52,6 +71,8 @@ class ChatSocketClient {
   private eventListeners: Map<string, Set<EventListener>> = new Map();
   private statusListeners: Set<StatusListener> = new Set();
   private isIntentionallyClosed = false;
+  private processedEventIds: Set<string> = new Set();
+  private processedEventTimestamps: Array<{ key: string; time: number }> = [];
 
   public getStatus(): ChatSocketStatus {
     return this.status;
@@ -87,6 +108,33 @@ class ChatSocketClient {
     }
   }
 
+  private isDuplicateEvent(eventType: string, data: any): boolean {
+    const rawId = data?.eventId || (data?.data && data.data.eventId) || (eventType === 'message.created' && (data?.id || (data?.data && data.data.id)));
+    if (!rawId) return false;
+
+    const dedupeKey = `${eventType}:${rawId}`;
+    if (this.processedEventIds.has(dedupeKey)) {
+      return true;
+    }
+
+    const now = Date.now();
+    this.processedEventIds.add(dedupeKey);
+    this.processedEventTimestamps.push({ key: dedupeKey, time: now });
+
+    // Clean up events older than 30 seconds (keep memory lean)
+    if (this.processedEventTimestamps.length > 200) {
+      const cutoff = now - 30000;
+      while (this.processedEventTimestamps.length > 0 && this.processedEventTimestamps[0].time < cutoff) {
+        const oldest = this.processedEventTimestamps.shift();
+        if (oldest) {
+          this.processedEventIds.delete(oldest.key);
+        }
+      }
+    }
+
+    return false;
+  }
+
   public connect() {
     if (typeof window === 'undefined') return;
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
@@ -102,13 +150,19 @@ class ChatSocketClient {
     this.isIntentionallyClosed = false;
     this.setStatus('connecting');
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Use backend host (port 8000 in dev, or current host)
-    const host = window.location.port === '3000' || window.location.port === '5173'
-      ? `${window.location.hostname}:8000`
-      : window.location.host;
+    const customWsUrl = import.meta.env.VITE_WS_URL as string | undefined;
+    let wsUrl: string;
 
-    const wsUrl = `${protocol}//${host}/ws/chat/?token=${encodeURIComponent(token)}`;
+    if (customWsUrl) {
+      const sep = customWsUrl.includes('?') ? '&' : '?';
+      wsUrl = `${customWsUrl}${sep}token=${encodeURIComponent(token)}`;
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      // In local dev without reverse proxy, port 3000/5173 points to backend 8000
+      const isDevPort = ['3000', '5173'].includes(window.location.port);
+      const host = isDevPort ? `${window.location.hostname}:8000` : window.location.host;
+      wsUrl = `${protocol}//${host}/ws/chat/?token=${encodeURIComponent(token)}`;
+    }
 
     try {
       this.socket = new WebSocket(wsUrl);
@@ -117,6 +171,11 @@ class ChatSocketClient {
         this.reconnectAttempts = 0;
         this.setStatus('connected');
         this.startHeartbeat();
+
+        // Automatically rejoin active conversation if set
+        if (this.activeConversationId) {
+          this.joinConversation(this.activeConversationId);
+        }
       };
 
       this.socket.onmessage = (event) => {
@@ -124,7 +183,11 @@ class ChatSocketClient {
           const data = JSON.parse(event.data);
           const eventType = data.type;
           if (eventType) {
-            this.emit(eventType, data.data || data);
+            if (this.isDuplicateEvent(eventType, data)) {
+              return;
+            }
+            const payload = data.data !== undefined ? data.data : data;
+            this.emit(eventType, payload);
             // Universal wildcard listener
             this.emit('*', data);
           }
@@ -204,6 +267,10 @@ class ChatSocketClient {
 
   public joinConversation(conversationId: number) {
     this.sendAction('join_conversation', { conversationId });
+  }
+
+  public sendTyping(conversationId: number, isTyping: boolean) {
+    this.sendAction('typing', { conversationId, isTyping });
   }
 }
 

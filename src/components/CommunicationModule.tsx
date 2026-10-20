@@ -36,6 +36,7 @@ import {
   X,
 } from 'lucide-react';
 import { chatSocket, type ChatSocketStatus } from '../services/chatSocket';
+import { playNotificationSound } from '../services/notificationSound';
 import { ACCESS_TOKEN_STORAGE_KEY, type AuthUser } from '../utils/auth';
 import type { Student } from '../types';
 import { store } from '../store';
@@ -90,6 +91,7 @@ interface ApiConversation {
     id: number;
     body: string;
     createdAt: string;
+    senderId?: number;
     isMe?: boolean;
     readAt?: string | null;
     attachments?: Array<{ id: string; originalName: string; contentType?: string; fileSize?: number; downloadUrl?: string }>;
@@ -706,52 +708,264 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     );
   };
 
+  // ── Real-Time Typing State & Ref Timers ────────────────────────────────────
+  const [typingMap, setTypingMap] = useState<Record<number, { isTyping: boolean; userName?: string }>>({});
+  const typingTimeoutRefs = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const lastTypingSentRef = useRef<number>(0);
+  const stopTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleChatInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setChatMessage(e.target.value);
+    if (!selectedConversationId) return;
+
+    const now = Date.now();
+    if (now - lastTypingSentRef.current > 2000) {
+      chatSocket.sendTyping(selectedConversationId, true);
+      lastTypingSentRef.current = now;
+    }
+
+    if (stopTypingTimeoutRef.current) {
+      clearTimeout(stopTypingTimeoutRef.current);
+    }
+    stopTypingTimeoutRef.current = setTimeout(() => {
+      if (selectedConversationId) {
+        chatSocket.sendTyping(selectedConversationId, false);
+      }
+    }, 2500);
+  };
+
+  // Load Conversations list (force fresh network fetch)
+  const loadConversations = useCallback(async () => {
+    try {
+      const data = await store
+        .dispatch(chatApi.endpoints.getConversations.initiate(undefined, { forceRefetch: true }))
+        .unwrap();
+      setConversations(data as any);
+    } catch {
+      // silent
+    }
+  }, []);
+
+  // Load Messages for active conversation (force fresh network fetch)
+  const loadMessagesForConversation = useCallback(async (convId: number) => {
+    try {
+      const data = await store
+        .dispatch(chatApi.endpoints.getMessages.initiate(convId, { forceRefetch: true }))
+        .unwrap();
+      setChatMessages(data as any);
+    } catch {
+      // silent
+    }
+  }, []);
+
   // ── Real-Time WebSocket Connection & Event Synchronization ───────────────
   useEffect(() => {
     chatSocket.connect();
-    const unsubStatus = chatSocket.subscribeStatus(setSocketStatus);
 
-    const unsubMsg = chatSocket.on('message.created', (newMsg: ApiDirectMessage) => {
-      if (selectedConversationId && newMsg.conversationId === selectedConversationId) {
-        setChatMessages((prev) => {
-          if (prev.some((m) => m.id === newMsg.id || (m.clientKey && m.clientKey === newMsg.clientKey))) {
-            return prev.map((m) => (m.clientKey && m.clientKey === newMsg.clientKey ? newMsg : m));
-          }
-          return [...prev, newMsg];
-        });
-        chatSocket.markConversationRead(selectedConversationId);
+    const unsubStatus = chatSocket.subscribeStatus((status) => {
+      setSocketStatus(status);
+      if (status === 'connected') {
+        void loadConversations();
+        if (selectedConversationId) {
+          chatSocket.joinConversation(selectedConversationId);
+          chatSocket.markConversationRead(selectedConversationId);
+          void loadMessagesForConversation(selectedConversationId);
+        }
       }
-      void loadConversations();
     });
 
-    const unsubRead = chatSocket.on('conversation.read', (data: { conversationId: number; readAt: string }) => {
+    const unsubMsg = chatSocket.on('message.created', (newMsg: ApiDirectMessage) => {
+      const isFromMe = user ? Number(newMsg.senderId) === Number(user.id) : Boolean(newMsg.isMe);
+      const isCurrentActive = selectedConversationId === newMsg.conversationId;
+
+      if (!isFromMe) {
+        void playNotificationSound({ type: 'message' });
+      }
+
+      if (isCurrentActive) {
+        setChatMessages((prev) => {
+          if (prev.some((m) => m.id === newMsg.id || (m.clientKey && m.clientKey === newMsg.clientKey))) {
+            return prev.map((m) => (m.clientKey && m.clientKey === newMsg.clientKey ? { ...newMsg, isMe: isFromMe } : m));
+          }
+          return [...prev, { ...newMsg, isMe: isFromMe }];
+        });
+        chatSocket.markConversationRead(newMsg.conversationId);
+      }
+
+      setTypingMap((prev) => ({
+        ...prev,
+        [newMsg.conversationId]: { isTyping: false },
+      }));
+
+      setConversations((prev) => {
+        const existingIdx = prev.findIndex((c) => c.id === newMsg.conversationId);
+        if (existingIdx !== -1) {
+          const existing = prev[existingIdx];
+          const newUnread = isCurrentActive || isFromMe ? 0 : (existing.unreadCount || 0) + 1;
+          const updatedConv = {
+            ...existing,
+            lastMessage: {
+              id: newMsg.id,
+              body: newMsg.body,
+              createdAt: newMsg.createdAt,
+              isMe: isFromMe,
+              readAt: isCurrentActive && !isFromMe ? new Date().toISOString() : null,
+              attachments: newMsg.attachments,
+            },
+            updatedAt: newMsg.createdAt,
+            unreadCount: newUnread,
+          };
+          const rest = prev.filter((_, idx) => idx !== existingIdx);
+          return [updatedConv, ...rest];
+        } else {
+          void loadConversations();
+          return prev;
+        }
+      });
+    });
+
+    const unsubRead = chatSocket.on('conversation.read', (data: { conversationId: number; userId: number; readAt: string }) => {
       if (selectedConversationId && data.conversationId === selectedConversationId) {
         setChatMessages((prev) =>
-          prev.map((m) => (m.isMe ? { ...m, readAt: data.readAt } : m))
+          prev.map((m) => {
+            const isMe = user ? Number(m.senderId) === Number(user.id) : Boolean(m.isMe);
+            return isMe ? { ...m, readAt: data.readAt } : m;
+          })
+        );
+      }
+
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id === data.conversationId && c.lastMessage) {
+            const lastMsgIsMe = user ? Number(c.lastMessage.senderId) === Number(user.id) : Boolean(c.lastMessage.isMe);
+            if (lastMsgIsMe) {
+              return {
+                ...c,
+                lastMessage: {
+                  ...c.lastMessage,
+                  readAt: data.readAt,
+                },
+              };
+            }
+          }
+          return c;
+        })
+      );
+    });
+
+    const unsubTyping = chatSocket.on('typing.updated', (data: { conversationId: number; userId: number; userName?: string; isTyping: boolean }) => {
+      if (user && Number(data.userId) === Number(user.id)) return;
+
+      setTypingMap((prev) => ({
+        ...prev,
+        [data.conversationId]: { isTyping: data.isTyping, userName: data.userName },
+      }));
+
+      if (typingTimeoutRefs.current[data.conversationId]) {
+        clearTimeout(typingTimeoutRefs.current[data.conversationId]);
+      }
+      if (data.isTyping) {
+        typingTimeoutRefs.current[data.conversationId] = setTimeout(() => {
+          setTypingMap((prev) => ({
+            ...prev,
+            [data.conversationId]: { isTyping: false },
+          }));
+        }, 4000);
+      }
+    });
+
+    const unsubPresence = chatSocket.on('user.presence', (data: { userId: number; isOnline: boolean; lastSeenAt?: string }) => {
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.otherParticipant && c.otherParticipant.id === data.userId) {
+            return {
+              ...c,
+              otherParticipant: {
+                ...c.otherParticipant,
+                isOnline: data.isOnline,
+              },
+            };
+          }
+          return c;
+        })
+      );
+      setSelectedContact((prev) => {
+        if (prev && (prev.userId === data.userId || Number(prev.id) === Number(data.userId))) {
+          return { ...prev, isOnline: data.isOnline };
+        }
+        return prev;
+      });
+    });
+
+    const unsubUnread = chatSocket.on('unread_count.updated', (data: { totalUnread: number; conversationId?: number; conversationUnread?: number }) => {
+      if (data.conversationId !== undefined) {
+        setConversations((prev) =>
+          prev.map((c) => {
+            if (c.id === data.conversationId) {
+              const count = selectedConversationId === data.conversationId ? 0 : (data.conversationUnread ?? c.unreadCount);
+              return { ...c, unreadCount: count };
+            }
+            return c;
+          })
         );
       }
     });
 
     const unsubUpdate = chatSocket.on('message.updated', (updatedMsg: ApiDirectMessage) => {
-      setChatMessages((prev) =>
-        prev.map((m) => (m.id === updatedMsg.id ? { ...m, body: updatedMsg.body, editedAt: updatedMsg.editedAt } : m))
+      if (selectedConversationId && updatedMsg.conversationId === selectedConversationId) {
+        setChatMessages((prev) =>
+          prev.map((m) => (m.id === updatedMsg.id ? { ...m, body: updatedMsg.body, editedAt: updatedMsg.editedAt } : m))
+        );
+      }
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id === updatedMsg.conversationId && c.lastMessage && c.lastMessage.id === updatedMsg.id) {
+            return {
+              ...c,
+              lastMessage: {
+                ...c.lastMessage,
+                body: updatedMsg.body,
+              },
+            };
+          }
+          return c;
+        })
       );
     });
 
-    const unsubDelete = chatSocket.on('message.deleted', (data: { id: number }) => {
+    const unsubDelete = chatSocket.on('message.deleted', (data: { id: number; conversationId?: number }) => {
       setChatMessages((prev) =>
         prev.map((m) => (m.id === data.id ? { ...m, isDeleted: true, body: 'This message was deleted.' } : m))
       );
+      if (data.conversationId) {
+        setConversations((prev) =>
+          prev.map((c) => {
+            if (c.id === data.conversationId && c.lastMessage && c.lastMessage.id === data.id) {
+              return {
+                ...c,
+                lastMessage: {
+                  ...c.lastMessage,
+                  body: 'This message was deleted.',
+                },
+              };
+            }
+            return c;
+          })
+        );
+      }
     });
 
     return () => {
       unsubStatus();
       unsubMsg();
       unsubRead();
+      unsubTyping();
+      unsubPresence();
+      unsubUnread();
       unsubUpdate();
       unsubDelete();
     };
-  }, [selectedConversationId]);
+  }, [selectedConversationId, user, loadConversations, loadMessagesForConversation]);
 
   useEffect(() => {
     chatSocket.activeConversationId = selectedConversationId;
@@ -821,29 +1035,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     }
   }, []);
 
-  // Load Conversations list
-  const loadConversations = useCallback(async () => {
-    try {
-      const data = await store
-        .dispatch(chatApi.endpoints.getConversations.initiate(undefined))
-        .unwrap();
-      setConversations(data as any);
-    } catch {
-      // silent
-    }
-  }, []);
 
-  // Load Messages for active conversation
-  const loadMessagesForConversation = useCallback(async (convId: number) => {
-    try {
-      const data = await store
-        .dispatch(chatApi.endpoints.getMessages.initiate(convId))
-        .unwrap();
-      setChatMessages(data as any);
-    } catch {
-      // silent
-    }
-  }, []);
 
   // Poll notifications & conversations periodically (do not poll contacts every 3s to prevent lag)
   useEffect(() => {
@@ -1407,10 +1599,17 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     }
   };
 
-  // Send Direct Private 1-on-1 Chat
+  // Send Direct Private 1-on-1 Chat with Instant Optimistic UI
   const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
     if ((!chatMessage.trim() && selectedFiles.length === 0) || !selectedConversationId) return;
+
+    if (stopTypingTimeoutRef.current) {
+      clearTimeout(stopTypingTimeoutRef.current);
+      stopTypingTimeoutRef.current = null;
+    }
+    chatSocket.sendTyping(selectedConversationId, false);
+
     setIsSendingChat(true);
     const msgText = chatMessage.trim();
     const filesToSend = [...selectedFiles];
@@ -1420,6 +1619,47 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     if (imageInputRef.current) imageInputRef.current.value = '';
 
     const idempotencyKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `msg-${Date.now()}`;
+    const tempId = -Date.now();
+
+    // 1. Instantly append optimistic message to chat stream
+    const optimisticMsg: ApiDirectMessage = {
+      id: tempId,
+      conversationId: selectedConversationId,
+      senderId: Number(user?.id) || 0,
+      senderName: user?.name || 'Me',
+      recipientId: Number(selectedContact?.userId) || 0,
+      recipientName: selectedContact?.name || '',
+      isMe: true,
+      body: msgText,
+      messageType: filesToSend.length > 0 ? 'attachment' : 'text',
+      clientKey: idempotencyKey,
+      createdAt: new Date().toISOString(),
+      readAt: null,
+      isDeleted: false,
+    };
+    setChatMessages((prev) => [...prev, optimisticMsg]);
+
+    // 2. Instantly update sidebar preview to top
+    setConversations((prev) => {
+      const existingIdx = prev.findIndex((c) => c.id === selectedConversationId);
+      if (existingIdx !== -1) {
+        const existing = prev[existingIdx];
+        const updatedConv = {
+          ...existing,
+          lastMessage: {
+            id: tempId,
+            body: msgText || (filesToSend.length > 0 ? '[Attachment]' : ''),
+            createdAt: optimisticMsg.createdAt,
+            isMe: true,
+            readAt: null,
+          },
+          updatedAt: optimisticMsg.createdAt,
+        };
+        const rest = prev.filter((_, idx) => idx !== existingIdx);
+        return [updatedConv, ...rest];
+      }
+      return prev;
+    });
 
     try {
       const newMsg = await store
@@ -1433,14 +1673,29 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         )
         .unwrap();
 
-      setChatMessages((prev) => {
-        if (prev.some((m) => m.id === newMsg.id || (m.clientKey && m.clientKey === newMsg.clientKey))) {
-          return prev;
-        }
-        return [...prev, newMsg as any];
-      });
-      void loadConversations();
+      const serverMsg = { ...newMsg, isMe: true };
+      setChatMessages((prev) =>
+        prev.map((m) =>
+          m.id === tempId || (m.clientKey && m.clientKey === idempotencyKey) ? (serverMsg as any) : m
+        )
+      );
+
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id === selectedConversationId && c.lastMessage && c.lastMessage.id === tempId) {
+            return {
+              ...c,
+              lastMessage: {
+                ...c.lastMessage,
+                id: newMsg.id,
+              },
+            };
+          }
+          return c;
+        })
+      );
     } catch (err: any) {
+      setChatMessages((prev) => prev.filter((m) => m.id !== tempId));
       const detail = err?.data?.detail || err?.data?.message || (err instanceof Error ? err.message : 'Could not deliver chat message.');
       emitNotification({ title: 'Message failed', message: detail, tone: 'danger', source: 'communication' });
     } finally {
@@ -2788,18 +3043,26 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
 
                           <div className="flex items-center justify-between gap-1 mt-1">
                             <p className="text-[11px] text-[#667781] truncate flex items-center gap-1">
-                              {lastMsg?.isMe && (
-                                <CheckCheck
-                                  className={`w-3.5 h-3.5 inline shrink-0 ${
-                                    lastMsg.readAt ? 'text-sky-500' : 'text-slate-400'
-                                  }`}
-                                />
+                              {typingMap[conv.id]?.isTyping ? (
+                                <span className="text-[#00a884] font-medium italic flex items-center gap-1">
+                                  typing...
+                                </span>
+                              ) : (
+                                <>
+                                  {(user && lastMsg ? Number(lastMsg.senderId) === Number(user.id) : Boolean(lastMsg?.isMe)) && (
+                                    <CheckCheck
+                                      className={`w-3.5 h-3.5 inline shrink-0 ${
+                                        lastMsg?.readAt ? 'text-sky-500' : 'text-slate-400'
+                                      }`}
+                                    />
+                                  )}
+                                  <span className="truncate">
+                                    {lastMsg
+                                      ? lastMsg.body || (lastMsg.attachments?.length ? '📷 Photo' : '...')
+                                      : 'Start a conversation'}
+                                  </span>
+                                </>
                               )}
-                              <span className="truncate">
-                                {lastMsg
-                                  ? lastMsg.body || (lastMsg.attachments?.length ? '📷 Photo' : '...')
-                                  : 'Start a conversation'}
-                              </span>
                             </p>
 
                             {/* WhatsApp Unread Badge: 1, 2, 3... - Disappears on click */}
@@ -2972,8 +3235,17 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                     {selectedContact?.name || 'Select a Contact to Chat'}
                   </h3>
 
-                  {/* Role Specific Subtitle Differentiation */}
-                  {selectedContact && (
+                  {/* Typing Indicator or Role Subtitle */}
+                  {selectedConversationId && typingMap[selectedConversationId]?.isTyping ? (
+                    <div className="text-xs text-[#008069] font-medium flex items-center gap-1.5 animate-pulse">
+                      <span>typing</span>
+                      <span className="inline-flex gap-0.5">
+                        <span className="w-1 h-1 bg-[#008069] rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                        <span className="w-1 h-1 bg-[#008069] rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                        <span className="w-1 h-1 bg-[#008069] rounded-full animate-bounce"></span>
+                      </span>
+                    </div>
+                  ) : selectedContact ? (
                     <div className="text-[11px] text-[#667781] font-medium flex flex-wrap items-center gap-1.5 truncate">
                       {/* PARENT VIEWING TEACHER: MENTION SECTION, CLASS & SUBJECTS */}
                       {resolvedRole === 'Parent' && selectedContact.childMappings && selectedContact.childMappings.length > 0 ? (
@@ -3015,7 +3287,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         </>
                       )}
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
 
@@ -3101,7 +3373,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                 </div>
               ) : (
                 chatMessages.map((msg, idx) => {
-                  const isMe = msg.isMe;
+                  const isMe = user ? Number(msg.senderId) === Number(user.id) : Boolean(msg.isMe);
                   const prevMsg = chatMessages[idx - 1];
                   const currDateLabel = formatChatDate(msg.createdAt);
                   const prevDateLabel = prevMsg ? formatChatDate(prevMsg.createdAt) : '';
@@ -3238,6 +3510,16 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   );
                 })
               )}
+              {/* WhatsApp Floating Typing Bubble */}
+              {selectedConversationId && typingMap[selectedConversationId]?.isTyping && (
+                <div className="flex justify-start my-1 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                  <div className="bg-white rounded-2xl rounded-tl-none px-4 py-2.5 shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                    <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                    <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce"></span>
+                  </div>
+                </div>
+              )}
               <div ref={chatBottomRef} />
             </div>
 
@@ -3339,7 +3621,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                     type="text"
                     placeholder={`Type a message…`}
                     value={chatMessage}
-                    onChange={(e) => setChatMessage(e.target.value)}
+                    onChange={handleChatInputChange}
                     onPaste={(e) => {
                       const items = e.clipboardData?.items;
                       if (items) {

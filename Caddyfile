@@ -5,7 +5,7 @@
         root * /srv/static
         file_server
     }
-    @api path /api/* /admin/* /healthz
+    @api path /api/* /admin/* /healthz /ws/*
     reverse_proxy @api api:8000 {
         header_up X-Forwarded-Proto https
     }

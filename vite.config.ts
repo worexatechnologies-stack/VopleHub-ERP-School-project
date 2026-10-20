@@ -20,6 +20,11 @@ export default defineConfig(() => {
           target: process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
           changeOrigin: true,
         },
+        '/ws': {
+          target: process.env.VITE_WS_PROXY_TARGET || process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
+          ws: true,
+          changeOrigin: true,
+        },
       },
     },
   };

@@ -8,10 +8,13 @@ Protocol events:
 - message.deleted: Soft-deleted message notification.
 - conversation.read: Participant read receipt update.
 - unread_count.updated: Total unread counter change.
+- typing.updated: Typing indicator status for a conversation.
+- user.presence: Online / last seen status update.
 """
 import logging
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from channels.db import database_sync_to_async
+from django.core.cache import cache
 from django.utils import timezone
 from apps.accounts.models import User
 from .models import Conversation, ConversationParticipant, DirectMessage
@@ -46,6 +49,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self.channel_layer.group_add(group_name, self.channel_name)
             self.joined_conversations.add(group_name)
 
+        # Multi-tab connection tracking & online presence
+        is_first_conn = self._increment_user_conns() == 1
+        if is_first_conn:
+            await self.update_user_online_status(is_online=True)
+            await self.broadcast_presence(is_online=True)
+
         # Announce ready
         await self.send_json({
             'type': 'connection.ready',
@@ -57,6 +66,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def disconnect(self, close_code):
+        if self.user and self.user.is_authenticated:
+            is_last_conn = self._decrement_user_conns() <= 0
+            if is_last_conn:
+                await self.update_user_online_status(is_online=False)
+                await self.broadcast_presence(is_online=False)
+
         if self.user_group:
             await self.channel_layer.group_discard(self.user_group, self.channel_name)
 
@@ -68,6 +83,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         action = content.get('action') or content.get('type')
 
         if action == 'ping':
+            await self.touch_user_last_seen()
             await self.send_json({'type': 'pong', 'timestamp': timezone.now().isoformat()})
             return
 
@@ -90,6 +106,34 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({'type': 'conversation.subscribed', 'conversationId': cid})
             return
 
+        if action in ['typing', 'typing.start', 'typing.stop']:
+            cid = content.get('conversationId') or content.get('conversation_id')
+            if not cid:
+                return
+
+            is_allowed = await self.check_conversation_access(cid)
+            if not is_allowed:
+                return
+
+            is_typing = action != 'typing.stop' and bool(content.get('isTyping', True))
+            group_name = f"conversation_{cid}"
+            await self.channel_layer.group_send(
+                group_name,
+                {
+                    'type': 'chat_event',
+                    'event': {
+                        'type': 'typing.updated',
+                        'data': {
+                            'conversationId': cid,
+                            'userId': self.user.id,
+                            'userName': self.user.get_full_name() or self.user.username,
+                            'isTyping': is_typing,
+                        },
+                    },
+                },
+            )
+            return
+
         if action in ['mark_read', 'read']:
             cid = content.get('conversationId') or content.get('conversation_id')
             if cid:
@@ -97,6 +141,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 if is_allowed:
                     await self.mark_conversation_read_db(cid)
                     group_name = f"conversation_{cid}"
+                    now_str = timezone.now().isoformat()
+
+                    # 1. Notify conversation participants that messages are read
                     await self.channel_layer.group_send(
                         group_name,
                         {
@@ -106,7 +153,24 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                                 'data': {
                                     'conversationId': cid,
                                     'userId': self.user.id,
-                                    'readAt': timezone.now().isoformat(),
+                                    'readAt': now_str,
+                                },
+                            },
+                        },
+                    )
+
+                    # 2. Notify authenticated user's tabs of new unread counts
+                    total_unread, conv_unread = await self.get_user_unread_counts(cid)
+                    await self.channel_layer.group_send(
+                        self.user_group,
+                        {
+                            'type': 'chat_event',
+                            'event': {
+                                'type': 'unread_count.updated',
+                                'data': {
+                                    'totalUnread': total_unread,
+                                    'conversationId': cid,
+                                    'conversationUnread': conv_unread,
                                 },
                             },
                         },
@@ -115,6 +179,89 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
     async def chat_event(self, event):
         """Handler for events broadcasted through channel layer."""
         await self.send_json(event.get('event', {}))
+
+    def _get_conn_key(self) -> str:
+        return f"ws_user_conns_{self.user.id}"
+
+    def _increment_user_conns(self) -> int:
+        key = self._get_conn_key()
+        try:
+            val = cache.incr(key)
+        except (ValueError, Exception):
+            cache.set(key, 1, timeout=86400)
+            val = 1
+        return val
+
+    def _decrement_user_conns(self) -> int:
+        key = self._get_conn_key()
+        try:
+            val = cache.decr(key)
+        except (ValueError, Exception):
+            val = 0
+        if val <= 0:
+            cache.delete(key)
+            val = 0
+        return val
+
+    async def broadcast_presence(self, is_online: bool):
+        """Notify all active conversations of user online / offline transition."""
+        if not self.joined_conversations:
+            conv_ids = await self.get_user_conversation_ids()
+            groups = [f"conversation_{cid}" for cid in conv_ids]
+        else:
+            groups = list(self.joined_conversations)
+
+        now_str = timezone.now().isoformat()
+        for group in groups:
+            await self.channel_layer.group_send(
+                group,
+                {
+                    'type': 'chat_event',
+                    'event': {
+                        'type': 'user.presence',
+                        'data': {
+                            'userId': self.user.id,
+                            'isOnline': is_online,
+                            'lastSeenAt': now_str,
+                        },
+                    },
+                },
+            )
+
+    @database_sync_to_async
+    def update_user_online_status(self, is_online: bool):
+        if not self.user or not self.user.is_authenticated:
+            return
+        now = timezone.now()
+        User.objects.filter(id=self.user.id).update(
+            is_online=is_online,
+            last_seen_at=now,
+        )
+
+    @database_sync_to_async
+    def touch_user_last_seen(self):
+        if not self.user or not self.user.is_authenticated:
+            return
+        User.objects.filter(id=self.user.id).update(last_seen_at=timezone.now())
+
+    @database_sync_to_async
+    def get_user_unread_counts(self, conversation_id: int | None = None) -> tuple[int, int]:
+        if not self.user or not self.user.is_authenticated:
+            return 0, 0
+        total = DirectMessage.objects.filter(
+            recipient_id=self.user.id,
+            read_at__isnull=True,
+            is_deleted=False,
+        ).count()
+        conv_unread = 0
+        if conversation_id:
+            conv_unread = DirectMessage.objects.filter(
+                conversation_id=conversation_id,
+                recipient_id=self.user.id,
+                read_at__isnull=True,
+                is_deleted=False,
+            ).count()
+        return total, conv_unread
 
     @database_sync_to_async
     def get_user_conversation_ids(self) -> list[int]:

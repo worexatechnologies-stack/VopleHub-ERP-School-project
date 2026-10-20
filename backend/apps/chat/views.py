@@ -743,6 +743,26 @@ class ConversationMessagesView(APIView):
                 channel_name=f"user_{recipient.id}",
                 payload=msg_payload,
             )
+            # Dispatch unread_count.updated for recipient personal channel
+            recipient_unread = DirectMessage.objects.filter(
+                recipient=recipient,
+                read_at__isnull=True,
+                is_deleted=False,
+            ).count()
+            record_outbox_event(
+                event_type='unread_count.updated',
+                channel_name=f"user_{recipient.id}",
+                payload={
+                    'totalUnread': recipient_unread,
+                    'conversationId': conv.id,
+                    'conversationUnread': DirectMessage.objects.filter(
+                        conversation=conv,
+                        recipient=recipient,
+                        read_at__isnull=True,
+                        is_deleted=False,
+                    ).count(),
+                },
+            )
 
         # Enqueue Push Notification (best effort outside transaction)
         try:
@@ -868,6 +888,21 @@ class ConversationReadView(APIView):
                 event_type='conversation.read',
                 channel_name=f"conversation_{conv.id}",
                 payload=event_payload,
+            )
+            # Dispatch unread_count.updated for authenticated user personal channel
+            user_unread = DirectMessage.objects.filter(
+                recipient=request.user,
+                read_at__isnull=True,
+                is_deleted=False,
+            ).count()
+            record_outbox_event(
+                event_type='unread_count.updated',
+                channel_name=f"user_{request.user.id}",
+                payload={
+                    'totalUnread': user_unread,
+                    'conversationId': conv.id,
+                    'conversationUnread': 0,
+                },
             )
 
         return Response({'success': True, 'markedRead': updated})
