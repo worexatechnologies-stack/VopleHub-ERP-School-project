@@ -1178,14 +1178,28 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
 
   // Prefer backend-scoped contacts when available, fallback to locally derived contactsList
   const effectiveContacts: ChatContact[] = useMemo(() => {
-    if (backendContacts.length > 0) {
-      return backendContacts;
-    }
-    return contactsList;
-  }, [backendContacts, contactsList]);
+    const list = backendContacts.length > 0 ? backendContacts : contactsList;
+    return list.filter((contact) => {
+      const contactUid = contact.userId != null ? Number(contact.userId) : Number(contact.id);
+      if (user?.id && contactUid && contactUid === Number(user.id)) return false;
+      return true;
+    });
+  }, [backendContacts, contactsList, user?.id]);
 
   // Handle Contact Selection
   const handleSelectContact = async (contact: ChatContact, highlightText?: string) => {
+    const currentUserId = user?.id ? Number(user.id) : null;
+    const contactUid = contact.userId != null ? Number(contact.userId) : Number(contact.id);
+    if (currentUserId && contactUid && contactUid === currentUserId) {
+      emitNotification({
+        title: 'Own Account',
+        message: 'You cannot open a private chat with your own account. Please choose another member.',
+        tone: 'warning',
+        source: 'communication',
+      });
+      return;
+    }
+
     setSelectedContact(contact);
     setChatLoading(true);
     setChatMessages([]);
@@ -1224,8 +1238,14 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         .unwrap();
       setChatMessages(msgs as any);
       void loadConversations();
-    } catch {
-      emitNotification({ title: 'Chat Error', message: 'Could not open private chat channel.', tone: 'danger', source: 'communication' });
+    } catch (err: any) {
+      const detail =
+        err?.data?.detail ||
+        err?.data?.message ||
+        err?.error ||
+        err?.message ||
+        'Could not open private chat channel.';
+      emitNotification({ title: 'Chat Error', message: detail, tone: 'danger', source: 'communication' });
     } finally {
       setChatLoading(false);
     }

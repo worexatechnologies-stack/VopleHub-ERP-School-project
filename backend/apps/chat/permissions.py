@@ -66,11 +66,12 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
         return False, 'Authentication required.', None
 
     if user.id == target_user.id:
-        return False, 'Cannot start a conversation with yourself.', None
+        return False, 'You cannot start a chat conversation with your own account.', None
 
     # Tenant check
-    if user.school_id != target_user.school_id:
-        return False, 'Cross-school messaging is prohibited.', None
+    if user.role != User.Role.SUPER_ADMIN and target_user.role != User.Role.SUPER_ADMIN:
+        if user.school_id != target_user.school_id:
+            return False, 'Cross-school messaging is prohibited.', None
 
     # Peer-to-peer student-student messaging is restricted for school safety
     if user.role == User.Role.STUDENT and target_user.role == User.Role.STUDENT:
@@ -84,7 +85,8 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
             parent_profile = getattr(target_user, 'parent_profile', None)
             matched_student = None
             if parent_profile:
-                linked_students = list(parent_profile.students.filter(school_id=user.school_id, status='Active'))
+                target_school_id = user.school_id or target_user.school_id
+                linked_students = list(parent_profile.students.filter(school_id=target_school_id, status='Active'))
                 if student and student in linked_students:
                     matched_student = student
                 elif linked_students:
@@ -148,7 +150,8 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
             parent_profile = getattr(user, 'parent_profile', None)
             matched_student = None
             if parent_profile:
-                linked_students = list(parent_profile.students.filter(school_id=user.school_id, status='Active'))
+                target_school_id = user.school_id or target_user.school_id
+                linked_students = list(parent_profile.students.filter(school_id=target_school_id, status='Active'))
                 if student and student in linked_students:
                     matched_student = student
                 elif linked_students:

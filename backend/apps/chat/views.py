@@ -91,17 +91,18 @@ class ChatContactsListView(APIView):
         # 1. ADMIN
         if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             contacts = []
-            admin_user = User.objects.filter(school=school, role=User.Role.SCHOOL_ADMIN, is_active=True).first() or user
-            contacts.append({
-                'id': 'admin-office',
-                'userId': admin_user.id,
-                'name': 'School Admin / Office Desk',
-                'role': 'School Admin',
-                'email': admin_user.email,
-                'phone': '',
-                'isOnline': True,
-                'isOfficeDesk': True,
-            })
+            other_admin = User.objects.filter(school=school, role=User.Role.SCHOOL_ADMIN, is_active=True).exclude(pk=user.id).first()
+            if other_admin:
+                contacts.append({
+                    'id': f'admin-{other_admin.id}',
+                    'userId': other_admin.id,
+                    'name': other_admin.get_full_name() or other_admin.username or 'Administrative Office',
+                    'role': 'School Admin',
+                    'email': other_admin.email,
+                    'phone': '',
+                    'isOnline': other_admin.is_online_computed,
+                    'isOfficeDesk': True,
+                })
 
             teachers_qs = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
                 'sections__class_room', 'subject_records', 'teaching_assignments__section__class_room', 'teaching_assignments__subject'
@@ -161,11 +162,12 @@ class ChatContactsListView(APIView):
                     'teachingAssignments': assignments_data,
                 })
 
-            # When Admin searches, also include matching parents so admin can chat with parents with no issue
+            # Include active parents for the Admin (both in search and initial contacts)
+            parents_qs = ParentProfile.objects.filter(
+                user__school=school, user__is_active=True
+            ).exclude(user=user)
             if search_q:
-                parents_qs = ParentProfile.objects.filter(
-                    user__school=school, user__is_active=True
-                ).filter(
+                parents_qs = parents_qs.filter(
                     Q(user__first_name__icontains=search_q) |
                     Q(user__last_name__icontains=search_q) |
                     Q(user__email__icontains=search_q) |
@@ -173,36 +175,39 @@ class ChatContactsListView(APIView):
                     Q(students__name__icontains=search_q) |
                     Q(students__admission_no__icontains=search_q)
                 ).distinct().select_related('user').prefetch_related('students')[:25]
+            else:
+                parents_qs = parents_qs.distinct().select_related('user').prefetch_related('students')[:25]
 
-                for pp in parents_qs:
-                    p_user = pp.user
-                    if not p_user:
-                        continue
-                    st_list = [
-                        {
-                            'id': s.id,
-                            'name': s.name,
-                            'className': s.class_name,
-                            'section': s.section,
-                            'rollNo': s.roll_no,
-                            'admissionNo': s.admission_no,
-                        }
-                        for s in pp.students.filter(school=school, status='Active')
-                    ]
-                    summaries = [f"{s['name']} ({s['className']} - Sec {s['section']})" for s in st_list]
-                    contacts.append({
-                        'id': f'parent-{p_user.id}',
-                        'userId': p_user.id,
-                        'name': p_user.get_full_name() or p_user.username,
-                        'role': 'Parent',
-                        'email': p_user.email,
-                        'phone': pp.phone or '',
-                        'isOnline': p_user.is_online_computed,
-                        'students': st_list,
-                        'studentSummary': f"Parent of {', '.join(summaries)}" if summaries else 'Parent',
-                        'studentNames': [s['name'] for s in st_list],
-                    })
+            for pp in parents_qs:
+                p_user = pp.user
+                if not p_user or p_user.id == user.id:
+                    continue
+                st_list = [
+                    {
+                        'id': s.id,
+                        'name': s.name,
+                        'className': s.class_name,
+                        'section': s.section,
+                        'rollNo': s.roll_no,
+                        'admissionNo': s.admission_no,
+                    }
+                    for s in pp.students.filter(school=school, status='Active')
+                ]
+                summaries = [f"{s['name']} ({s['className']} - Sec {s['section']})" for s in st_list]
+                contacts.append({
+                    'id': f'parent-{p_user.id}',
+                    'userId': p_user.id,
+                    'name': p_user.get_full_name() or p_user.username,
+                    'role': 'Parent',
+                    'email': p_user.email,
+                    'phone': pp.phone or '',
+                    'isOnline': p_user.is_online_computed,
+                    'students': st_list,
+                    'studentSummary': f"Parent of {', '.join(summaries)}" if summaries else 'Parent',
+                    'studentNames': [s['name'] for s in st_list],
+                })
 
+            contacts = [c for c in contacts if c.get('userId') != user.id]
             return Response(contacts)
 
         # 2. TEACHER
@@ -561,16 +566,25 @@ class StartConversationView(APIView):
         elif student_id:
             student_obj = Student.objects.filter(pk=student_id, school=request.user.school).first()
 
+        user_school = request.user.school
         if str(target_user_id).lower() in ['admin-office', 'admin']:
-            target_user = User.objects.filter(school=request.user.school, role=User.Role.SCHOOL_ADMIN, is_active=True).first()
+            target_user = User.objects.filter(school=user_school, role=User.Role.SCHOOL_ADMIN, is_active=True).exclude(pk=request.user.id).first()
+            if not target_user and request.user.role != User.Role.SCHOOL_ADMIN:
+                target_user = User.objects.filter(school=user_school, role=User.Role.SCHOOL_ADMIN, is_active=True).first()
         elif target_user_id:
             try:
-                target_user = User.objects.filter(pk=int(target_user_id), school=request.user.school).first()
+                target_user_qs = User.objects.filter(pk=int(target_user_id))
+                if user_school:
+                    target_user_qs = target_user_qs.filter(school=user_school)
+                target_user = target_user_qs.first()
             except (ValueError, TypeError):
                 target_user = None
         elif teacher_id:
             try:
-                teacher = Teacher.objects.filter(pk=int(teacher_id), school=request.user.school).select_related('user').first()
+                t_qs = Teacher.objects.filter(pk=int(teacher_id))
+                if user_school:
+                    t_qs = t_qs.filter(school=user_school)
+                teacher = t_qs.select_related('user').first()
                 if teacher:
                     target_user = teacher.user
             except (ValueError, TypeError):
@@ -583,14 +597,18 @@ class StartConversationView(APIView):
         if not target_user:
             return Response({'detail': 'Target user not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        if target_user.id == request.user.id:
+            return Response({'detail': 'You cannot start a chat conversation with your own account.'}, status=status.HTTP_400_BAD_REQUEST)
+
         # Validate permission boundary
         allowed, error_msg, matched_student = can_initiate_conversation(request.user, target_user, student_obj)
         if not allowed:
             return Response({'detail': error_msg}, status=status.HTTP_403_FORBIDDEN)
 
         conv_student = matched_student or student_obj
+        conv_school = user_school or getattr(target_user, 'school', None)
         conv, created = Conversation.get_or_create_between(
-            request.user.school, request.user, target_user, student=conv_student
+            conv_school, request.user, target_user, student=conv_student
         )
 
         conv = Conversation.objects.filter(id=conv.id).select_related(
