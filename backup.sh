@@ -28,7 +28,7 @@ target_dump="$backup_dir/volpehub-$stamp.dump"
 echo "[VolpeHub Backup] Backing up database '$POSTGRES_DB' to '$target_dump'..."
 
 docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
-  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc > "$target_dump"
+  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc < /dev/null > "$target_dump"
 
 # Verification: verify file exists and is not empty
 if [ ! -s "$target_dump" ]; then

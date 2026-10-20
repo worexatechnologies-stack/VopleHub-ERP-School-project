@@ -216,7 +216,7 @@ jobs:
             # 5. Execute pre-deployment database backup if database container is running
             if docker compose -f docker-compose.prod.yml -p volpehub ps --services --filter "status=running" | grep -q "db"; then
               echo "Creating pre-deployment database backup..."
-              ./backup.sh
+              ./backup.sh < /dev/null
             fi
 
             # 6. Apply database migrations safely before traffic switch
