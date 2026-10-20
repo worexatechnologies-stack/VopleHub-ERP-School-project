@@ -405,15 +405,8 @@ export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: 
   const changeRole = (role: PortalRole) => {
     setActiveRole(role);
     setErrorMessage('');
-    if (role === 'Super Admin') {
-      const superEmail = import.meta.env.VITE_SUPER_ADMIN_EMAIL || 'info.vikasworexatechnologies@gmail.com';
-      const superPass = import.meta.env.VITE_SUPER_ADMIN_PASSWORD || 'Worexa@9494';
-      setEmail(superEmail);
-      setPassword(superPass);
-    } else if (email === (import.meta.env.VITE_SUPER_ADMIN_EMAIL || 'info.vikasworexatechnologies@gmail.com')) {
-      setEmail('');
-      setPassword('');
-    }
+    setEmail('');
+    setPassword('');
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
