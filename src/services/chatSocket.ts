@@ -151,11 +151,16 @@ class ChatSocketClient {
     this.setStatus('connecting');
 
     const customWsUrl = import.meta.env.VITE_WS_URL as string | undefined;
+    const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || '';
     let wsUrl: string;
 
     if (customWsUrl) {
       const sep = customWsUrl.includes('?') ? '&' : '?';
       wsUrl = `${customWsUrl}${sep}token=${encodeURIComponent(token)}`;
+    } else if (apiBaseUrl.startsWith('http')) {
+      const urlObj = new URL(apiBaseUrl);
+      const wsProtocol = urlObj.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${wsProtocol}//${urlObj.host}/ws/chat/?token=${encodeURIComponent(token)}`;
     } else {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // In local dev without reverse proxy, port 3000/5173 points to backend 8000
