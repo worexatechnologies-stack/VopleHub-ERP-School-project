@@ -107,15 +107,28 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
 
         if action in ['typing', 'typing.start', 'typing.stop']:
-            cid = content.get('conversationId') or content.get('conversation_id')
-            if not cid:
+            raw_cid = content.get('conversationId') or content.get('conversation_id')
+            if not raw_cid:
                 return
+
+            try:
+                cid = int(raw_cid)
+            except (ValueError, TypeError):
+                cid = raw_cid
 
             is_allowed = await self.check_conversation_access(cid)
             if not is_allowed:
                 return
 
             is_typing = action != 'typing.stop' and bool(content.get('isTyping', True))
+            typing_data = {
+                'conversationId': cid,
+                'userId': self.user.id,
+                'userName': self.user.get_full_name() or self.user.username,
+                'isTyping': is_typing,
+            }
+
+            # 1. Broadcast to conversation room participants
             group_name = f"conversation_{cid}"
             await self.channel_layer.group_send(
                 group_name,
@@ -123,15 +136,24 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                     'type': 'chat_event',
                     'event': {
                         'type': 'typing.updated',
-                        'data': {
-                            'conversationId': cid,
-                            'userId': self.user.id,
-                            'userName': self.user.get_full_name() or self.user.username,
-                            'isTyping': is_typing,
-                        },
+                        'data': typing_data,
                     },
                 },
             )
+
+            # 2. Also broadcast directly to recipient's personal user group
+            other_user_id = await self.get_conversation_other_user_id(cid)
+            if other_user_id:
+                await self.channel_layer.group_send(
+                    f"user_{other_user_id}",
+                    {
+                        'type': 'chat_event',
+                        'event': {
+                            'type': 'typing.updated',
+                            'data': typing_data,
+                        },
+                    },
+                )
             return
 
         if action in ['mark_read', 'read']:
@@ -275,6 +297,16 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 school=self.user.school,
             ).values_list('id', flat=True)
         )
+
+    @database_sync_to_async
+    def get_conversation_other_user_id(self, conversation_id: int) -> int | None:
+        if not self.user or not self.user.is_authenticated:
+            return None
+        from .models import Conversation
+        conv = Conversation.objects.filter(id=conversation_id, school=self.user.school).first()
+        if not conv:
+            return None
+        return conv.participant2_id if conv.participant1_id == self.user.id else conv.participant1_id
 
     @database_sync_to_async
     def check_conversation_access(self, conversation_id: int) -> bool:

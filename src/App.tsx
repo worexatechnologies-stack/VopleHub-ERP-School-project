@@ -48,6 +48,7 @@ import FeesModule from './components/FeesModule';
 import FamilyFees from './components/FamilyFees';
 import ExamModule from './components/ExamModule';
 import CommunicationModule from './components/CommunicationModule';
+import { chatSocket } from './services/chatSocket';
 import LibraryModule from './components/LibraryModule';
 import TransportModule from './components/TransportModule';
 import StaffFeeModule from './components/StaffFeeModule';
@@ -1211,7 +1212,61 @@ function AuthenticatedApp() {
     }
   };
 
-  const menuItems = getMenuItems();
+  const [chatUnreadPeopleCount, setChatUnreadPeopleCount] = useState<number>(0);
+
+  useEffect(() => {
+    if (!user) return;
+    let alive = true;
+
+    const fetchUnread = async () => {
+      try {
+        const token = localStorage.getItem('token') || sessionStorage.getItem('token');
+        if (!token) return;
+        const res = await fetch('/api/v1/chat/conversations/', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) return;
+        const convs = await res.json();
+        if (alive && Array.isArray(convs)) {
+          const unreadPeople = convs.filter(
+            (c: any) => ((c.unreadCount || c.unread_count || 0) > 0)
+          ).length;
+          setChatUnreadPeopleCount(unreadPeople);
+        }
+      } catch {}
+    };
+
+    fetchUnread();
+
+    const unsubMsg = chatSocket.on('message.created', () => fetchUnread());
+    const unsubRead = chatSocket.on('conversation.read', () => fetchUnread());
+    const unsubUnread = chatSocket.on('unread_count.updated', () => fetchUnread());
+
+    return () => {
+      alive = false;
+      unsubMsg();
+      unsubRead();
+      unsubUnread();
+    };
+  }, [user]);
+
+  // When user opens communication tab, clear unread count
+  useEffect(() => {
+    if (activeTab === 'communication') {
+      setChatUnreadPeopleCount(0);
+    }
+  }, [activeTab]);
+
+  const menuItems = useMemo(() => {
+    const raw = getMenuItems();
+    const badgeVal = chatUnreadPeopleCount > 10 ? '10+' : chatUnreadPeopleCount > 0 ? chatUnreadPeopleCount : undefined;
+    return raw.map(item => {
+      if (item.id === 'communication') {
+        return { ...item, badge: badgeVal };
+      }
+      return item;
+    });
+  }, [user?.role, chatUnreadPeopleCount]);
   const allowedTabIds = menuItems.map(item => item.id);
   const canAccessActiveTab = !user || allowedTabIds.includes(activeTab);
   const getFirstAllowedTab = (candidates: string[]) => {

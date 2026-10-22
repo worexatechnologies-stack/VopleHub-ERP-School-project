@@ -159,6 +159,7 @@ class DirectMessageSerializer(serializers.ModelSerializer):
     isMe = serializers.SerializerMethodField()
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
     readAt = serializers.DateTimeField(source='read_at', read_only=True)
+    isRead = serializers.SerializerMethodField()
     messageType = serializers.CharField(source='message_type', read_only=True)
     clientKey = serializers.CharField(source='client_idempotency_key', read_only=True)
     replyToId = serializers.IntegerField(source='reply_to_id', read_only=True)
@@ -186,6 +187,7 @@ class DirectMessageSerializer(serializers.ModelSerializer):
             'attachments',
             'createdAt',
             'readAt',
+            'isRead',
         ]
 
     def to_representation(self, instance):
@@ -209,6 +211,9 @@ class DirectMessageSerializer(serializers.ModelSerializer):
         if not request or not request.user:
             return False
         return obj.sender_id == request.user.id
+
+    def get_isRead(self, obj) -> bool:
+        return obj.read_at is not None
 
 
 class ConversationSerializer(serializers.ModelSerializer):

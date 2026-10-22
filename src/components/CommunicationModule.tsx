@@ -548,7 +548,7 @@ function ChatImagePreview({
             <span>{timeStr}</span>
             {isMe && (
               readAt ? (
-                <CheckCheck className="w-3.5 h-3.5 text-[#53bdeb]" />
+                <CheckCheck className="w-3.5 h-3.5 text-[#EF4444]" />
               ) : (
                 <CheckCheck className="w-3.5 h-3.5 text-white/80" />
               )
@@ -743,23 +743,32 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   const stopTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleChatInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setChatMessage(e.target.value);
+    const val = e.target.value;
+    setChatMessage(val);
     if (!selectedConversationId) return;
 
+    const isTyping = val.trim().length > 0;
     const now = Date.now();
-    if (now - lastTypingSentRef.current > 2000) {
-      chatSocket.sendTyping(selectedConversationId, true);
-      lastTypingSentRef.current = now;
-    }
-
-    if (stopTypingTimeoutRef.current) {
-      clearTimeout(stopTypingTimeoutRef.current);
-    }
-    stopTypingTimeoutRef.current = setTimeout(() => {
-      if (selectedConversationId) {
-        chatSocket.sendTyping(selectedConversationId, false);
+    if (isTyping) {
+      if (now - lastTypingSentRef.current > 1500) {
+        chatSocket.sendTyping(selectedConversationId, true);
+        lastTypingSentRef.current = now;
       }
-    }, 2500);
+
+      if (stopTypingTimeoutRef.current) {
+        clearTimeout(stopTypingTimeoutRef.current);
+      }
+      stopTypingTimeoutRef.current = setTimeout(() => {
+        if (selectedConversationId) {
+          chatSocket.sendTyping(selectedConversationId, false);
+        }
+      }, 2500);
+    } else {
+      if (stopTypingTimeoutRef.current) {
+        clearTimeout(stopTypingTimeoutRef.current);
+      }
+      chatSocket.sendTyping(selectedConversationId, false);
+    }
   };
 
   // Load Conversations list (force fresh network fetch)
@@ -884,19 +893,22 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     const unsubTyping = chatSocket.on('typing.updated', (data: { conversationId: number; userId: number; userName?: string; isTyping: boolean }) => {
       if (user && Number(data.userId) === Number(user.id)) return;
 
+      const convId = Number(data.conversationId);
+      if (!convId) return;
+
       setTypingMap((prev) => ({
         ...prev,
-        [data.conversationId]: { isTyping: data.isTyping, userName: data.userName },
+        [convId]: { isTyping: data.isTyping, userName: data.userName },
       }));
 
-      if (typingTimeoutRefs.current[data.conversationId]) {
-        clearTimeout(typingTimeoutRefs.current[data.conversationId]);
+      if (typingTimeoutRefs.current[convId]) {
+        clearTimeout(typingTimeoutRefs.current[convId]);
       }
       if (data.isTyping) {
-        typingTimeoutRefs.current[data.conversationId] = setTimeout(() => {
+        typingTimeoutRefs.current[convId] = setTimeout(() => {
           setTypingMap((prev) => ({
             ...prev,
-            [data.conversationId]: { isTyping: false },
+            [convId]: { isTyping: false },
           }));
         }, 4000);
       }
@@ -3105,7 +3117,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                                   {(user && lastMsg ? Number(lastMsg.senderId) === Number(user.id) : Boolean(lastMsg?.isMe)) && (
                                     <CheckCheck
                                       className={`w-3.5 h-3.5 inline shrink-0 ${
-                                        lastMsg?.readAt ? 'text-sky-500' : 'text-slate-400'
+                                        lastMsg?.readAt ? 'text-[#EF4444]' : 'text-slate-400'
                                       }`}
                                     />
                                   )}
@@ -3289,7 +3301,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   </h3>
 
                   {/* Typing Indicator or Role Subtitle */}
-                  {selectedConversationId && typingMap[selectedConversationId]?.isTyping ? (
+                  {(selectedConversationId && typingMap[Number(selectedConversationId)]?.isTyping) ||
+                   (selectedContact && Object.entries(typingMap).some(([cId, t]) => t.isTyping && conversations.find(c => Number(c.id) === Number(cId))?.otherParticipant?.id === selectedContact.userId)) ? (
                     <div className="text-xs text-[#008069] font-medium flex items-center gap-1.5 animate-pulse">
                       <span>typing</span>
                       <span className="inline-flex gap-0.5">
@@ -3556,7 +3569,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                               <span>{timeStr}</span>
                               {isMe && (
                                 msg.readAt ? (
-                                  <span title="Read"><CheckCheck className="w-3.5 h-3.5 text-[#53bdeb]" /></span>
+                                  <span title="Read"><CheckCheck className="w-3.5 h-3.5 text-[#EF4444]" /></span>
                                 ) : (
                                   <span title="Delivered"><CheckCheck className="w-3.5 h-3.5 text-[#8696a0]" /></span>
                                 )
@@ -3570,7 +3583,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                 })
               )}
               {/* WhatsApp Floating Typing Bubble */}
-              {selectedConversationId && typingMap[selectedConversationId]?.isTyping && (
+              {((selectedConversationId && typingMap[Number(selectedConversationId)]?.isTyping) ||
+                (selectedContact && Object.entries(typingMap).some(([cId, t]) => t.isTyping && conversations.find(c => Number(c.id) === Number(cId))?.otherParticipant?.id === selectedContact.userId))) && (
                 <div className="flex justify-start my-1 animate-in fade-in slide-in-from-bottom-2 duration-200">
                   <div className="bg-white rounded-2xl rounded-tl-none px-4 py-2.5 shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] flex items-center gap-1.5">
                     <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce [animation-delay:-0.3s]"></span>

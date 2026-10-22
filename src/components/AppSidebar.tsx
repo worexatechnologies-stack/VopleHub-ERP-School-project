@@ -189,7 +189,7 @@ export default function AppSidebar({
                   }`}
                 >
                   <IconComponent className="w-4 h-4" />
-                  {!isSidebarOpen && item.badge !== undefined && Number(item.badge) > 0 && (
+                  {!isSidebarOpen && item.badge !== undefined && (typeof item.badge === 'string' ? item.badge.length > 0 : Number(item.badge) > 0) && (
                     <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] px-1 items-center justify-center rounded-full bg-rose-500 text-[9px] font-black text-white shadow-xs">
                       {item.badge}
                     </span>
@@ -212,7 +212,7 @@ export default function AppSidebar({
                 {/* Active Right Indicator / Hover Chevron (when expanded) */}
                 {isSidebarOpen && (
                   <div className="relative z-10 ml-auto shrink-0 flex items-center gap-1.5">
-                    {item.badge !== undefined && Number(item.badge) > 0 && (
+                    {item.badge !== undefined && (typeof item.badge === 'string' ? item.badge.length > 0 : Number(item.badge) > 0) && (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-xs animate-pulse">
                         {item.badge}
                       </span>
@@ -229,7 +229,7 @@ export default function AppSidebar({
                 {!isSidebarOpen && (
                   <div className="absolute left-[calc(100%+12px)] top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg bg-slate-900/95 backdrop-blur-md border border-slate-700/80 text-white text-xs font-semibold shadow-2xl opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-150 z-50 whitespace-nowrap flex items-center gap-2">
                     <span>{item.label}</span>
-                    {item.badge !== undefined && Number(item.badge) > 0 && (
+                    {item.badge !== undefined && (typeof item.badge === 'string' ? item.badge.length > 0 : Number(item.badge) > 0) && (
                       <span className="px-1.5 py-0.2 rounded-full text-[10px] font-black bg-rose-500 text-white">
                         {item.badge}
                       </span>
