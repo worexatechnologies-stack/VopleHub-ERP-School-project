@@ -101,6 +101,7 @@ class ChatContactsListView(APIView):
                     'email': other_admin.email,
                     'phone': '',
                     'isOnline': other_admin.is_online_computed,
+                    'lastSeenAt': other_admin.last_seen_at.isoformat() if other_admin.last_seen_at else None,
                     'isOfficeDesk': True,
                 })
 
@@ -157,6 +158,7 @@ class ChatContactsListView(APIView):
                     'email': t.user.email,
                     'phone': t.phone or '',
                     'isOnline': t.user.is_online_computed,
+                    'lastSeenAt': t.user.last_seen_at.isoformat() if t.user.last_seen_at else None,
                     'assignedSections': assigned_sections,
                     'subjects': subjects,
                     'teachingAssignments': assignments_data,
@@ -202,6 +204,7 @@ class ChatContactsListView(APIView):
                     'email': p_user.email,
                     'phone': pp.phone or '',
                     'isOnline': p_user.is_online_computed,
+                    'lastSeenAt': p_user.last_seen_at.isoformat() if p_user.last_seen_at else None,
                     'students': st_list,
                     'studentSummary': f"Parent of {', '.join(summaries)}" if summaries else 'Parent',
                     'studentNames': [s['name'] for s in st_list],
@@ -227,6 +230,7 @@ class ChatContactsListView(APIView):
                     'email': admin_user.email,
                     'phone': '',
                     'isOnline': admin_user.is_online_computed,
+                    'lastSeenAt': admin_user.last_seen_at.isoformat() if admin_user.last_seen_at else None,
                     'isOfficeDesk': True,
                 })
 
@@ -262,6 +266,7 @@ class ChatContactsListView(APIView):
                             'email': p_user.email,
                             'phone': pp.phone or student.parent_phone or '',
                             'isOnline': p_user.is_online_computed,
+                    'lastSeenAt': p_user.last_seen_at.isoformat() if p_user.last_seen_at else None,
                             'students': [],
                             'assignedSections': [],
                         }
@@ -306,6 +311,7 @@ class ChatContactsListView(APIView):
                     'email': admin_user.email,
                     'phone': '',
                     'isOnline': admin_user.is_online_computed,
+                    'lastSeenAt': admin_user.last_seen_at.isoformat() if admin_user.last_seen_at else None,
                     'isOfficeDesk': True,
                 })
 
@@ -368,6 +374,7 @@ class ChatContactsListView(APIView):
                         'email': t.user.email,
                         'phone': t.phone or '',
                         'isOnline': t.user.is_online_computed,
+                    'lastSeenAt': t.user.last_seen_at.isoformat() if t.user.last_seen_at else None,
                         'assignedSections': assigned_sections,
                         'subjects': teacher_subjects,
                         'childMappings': child_mappings,
@@ -388,6 +395,7 @@ class ChatContactsListView(APIView):
                     'email': admin_user.email,
                     'phone': '',
                     'isOnline': admin_user.is_online_computed,
+                    'lastSeenAt': admin_user.last_seen_at.isoformat() if admin_user.last_seen_at else None,
                     'isOfficeDesk': True,
                 })
 
@@ -422,6 +430,7 @@ class ChatContactsListView(APIView):
                         'email': t.user.email,
                         'phone': t.phone or '',
                         'isOnline': t.user.is_online_computed,
+                    'lastSeenAt': t.user.last_seen_at.isoformat() if t.user.last_seen_at else None,
                         'assignedSections': assigned_sections,
                         'subjects': teacher_subjects,
                     })

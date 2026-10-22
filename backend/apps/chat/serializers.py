@@ -32,6 +32,7 @@ class UserParticipantSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='get_full_name', read_only=True)
     role = serializers.CharField(source='frontend_role', read_only=True)
     isOnline = serializers.BooleanField(source='is_online_computed', read_only=True)
+    lastSeenAt = serializers.DateTimeField(source='last_seen_at', read_only=True)
     assignedSections = serializers.SerializerMethodField()
     subjects = serializers.SerializerMethodField()
     childMappings = serializers.SerializerMethodField()
@@ -41,7 +42,7 @@ class UserParticipantSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'name', 'role', 'email', 'isOnline',
+            'id', 'name', 'role', 'email', 'isOnline', 'lastSeenAt',
             'assignedSections', 'subjects', 'childMappings', 'students', 'studentSummary'
         ]
 

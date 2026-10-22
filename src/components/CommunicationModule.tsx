@@ -77,6 +77,7 @@ interface ApiParticipant {
   role: string;
   email: string;
   isOnline: boolean;
+  lastSeenAt?: string | null;
   assignedSections?: string[];
   subjects?: string[];
   childMappings?: TeacherChildInfo[];
@@ -151,6 +152,7 @@ interface ChatContact {
   email?: string;
   phone?: string;
   isOnline?: boolean;
+  lastSeenAt?: string | null;
   isOfficeDesk?: boolean;
   assignedSections?: string[];
   subjects?: string[];
@@ -159,6 +161,32 @@ interface ChatContact {
   students?: ChatStudentInfo[];
   studentSummary?: string;
   studentNames?: string[];
+}
+
+function formatPresenceStatus(isOnline: boolean, lastSeenAt?: string | null, isTyping?: boolean): string {
+  if (isTyping) return 'typing...';
+  if (isOnline) return 'online';
+  if (!lastSeenAt) return 'offline';
+  try {
+    const d = new Date(lastSeenAt);
+    if (isNaN(d.getTime())) return 'offline';
+    const now = new Date();
+    const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+    const isToday = d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday = d.getDate() === yesterday.getDate() && d.getMonth() === yesterday.getMonth() && d.getFullYear() === yesterday.getFullYear();
+    if (isToday) return 'last seen today at ' + timeStr;
+    if (isYesterday) return 'last seen yesterday at ' + timeStr;
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = months[d.getMonth()];
+    if (d.getFullYear() === now.getFullYear()) {
+      return 'last seen ' + d.getDate() + ' ' + month + ' at ' + timeStr;
+    }
+    return 'last seen ' + d.getDate() + ' ' + month + ' ' + d.getFullYear() + ' at ' + timeStr;
+  } catch {
+    return 'offline';
+  }
 }
 
 // 3-second rapid live sync loop for real-time conversation feel
@@ -883,6 +911,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
               otherParticipant: {
                 ...c.otherParticipant,
                 isOnline: data.isOnline,
+                lastSeenAt: data.lastSeenAt || c.otherParticipant.lastSeenAt,
               },
             };
           }
@@ -891,7 +920,11 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       );
       setSelectedContact((prev) => {
         if (prev && (prev.userId === data.userId || Number(prev.id) === Number(data.userId))) {
-          return { ...prev, isOnline: data.isOnline };
+          return {
+            ...prev,
+            isOnline: data.isOnline,
+            lastSeenAt: data.lastSeenAt || prev.lastSeenAt,
+          };
         }
         return prev;
       });
@@ -3266,7 +3299,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                       </span>
                     </div>
                   ) : selectedContact ? (
-                    <div className="text-[11px] text-[#667781] font-medium flex flex-wrap items-center gap-1.5 truncate">
+                    <div className="flex items-center gap-2 truncate">
+                      <span className={selectedContact.isOnline ? "text-[#008069] font-medium" : "text-[#667781]"}>
+                        {formatPresenceStatus(Boolean(selectedContact.isOnline), selectedContact.lastSeenAt)}
+                      </span>
+                      <span className="text-slate-300">·</span>
+                      <div className="text-[11px] text-[#667781] font-medium flex flex-wrap items-center gap-1.5 truncate">
                       {/* PARENT VIEWING TEACHER: MENTION SECTION, CLASS & SUBJECTS */}
                       {resolvedRole === 'Parent' && selectedContact.childMappings && selectedContact.childMappings.length > 0 ? (
                         selectedContact.childMappings.map((cm, idx) => (
@@ -3306,6 +3344,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                           )}
                         </>
                       )}
+                      </div>
                     </div>
                   ) : null}
                 </div>
