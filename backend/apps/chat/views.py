@@ -993,16 +993,24 @@ class AttachmentDownloadView(APIView):
             token_str = request.query_params.get('token')
             if token_str:
                 try:
+                    token_str = token_str.replace('Bearer ', '').strip()
                     from rest_framework_simplejwt.tokens import AccessToken
                     access_token = AccessToken(token_str)
-                    user_id = access_token.get('user_id')
+                    user_id = access_token.get('user_id') or access_token.get('id') or access_token.get('sub')
                     user = User.objects.filter(pk=user_id).first()
                 except Exception:
                     return Response({'detail': 'Invalid or expired token.'}, status=status.HTTP_401_UNAUTHORIZED)
             if not user or not user.is_authenticated:
                 return Response({'detail': 'Authentication credentials were not provided.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        attachment = MessageAttachment.objects.filter(pk=str(attachment_id).strip()).select_related('message__conversation').first()
+        import uuid
+        att_id_str = str(attachment_id).strip()
+        try:
+            att_uuid = uuid.UUID(att_id_str)
+        except Exception:
+            return Response({'detail': 'Attachment not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        attachment = MessageAttachment.objects.filter(pk=att_uuid).select_related('message__conversation').first()
         if not attachment:
             return Response({'detail': 'Attachment not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1014,16 +1022,41 @@ class AttachmentDownloadView(APIView):
         ):
             return Response({'detail': 'Access to this attachment is denied.'}, status=status.HTTP_403_FORBIDDEN)
 
-        if not attachment.file_data:
+        raw_bytes = None
+        if attachment.file_data:
+            data = attachment.file_data
+            if isinstance(data, memoryview):
+                raw_bytes = data.tobytes()
+            elif isinstance(data, (bytes, bytearray)):
+                raw_bytes = bytes(data)
+            elif isinstance(data, str):
+                import base64
+                try:
+                    raw_bytes = base64.b64decode(data)
+                except Exception:
+                    raw_bytes = data.encode('utf-8')
+            else:
+                raw_bytes = bytes(data)
+
+        if not raw_bytes and attachment.file_key:
+            from django.core.files.storage import default_storage
+            try:
+                if default_storage.exists(attachment.file_key):
+                    with default_storage.open(attachment.file_key, 'rb') as f:
+                        raw_bytes = f.read()
+            except Exception:
+                pass
+
+        if not raw_bytes:
             return Response({'detail': 'File data not available.'}, status=status.HTTP_404_NOT_FOUND)
 
         from django.http import HttpResponse
-        response = HttpResponse(bytes(attachment.file_data), content_type=attachment.content_type)
+        response = HttpResponse(raw_bytes, content_type=attachment.content_type or 'application/octet-stream')
         response['Content-Disposition'] = f'inline; filename="{attachment.original_name}"'
-        response['Content-Length'] = attachment.file_size
+        response['Content-Length'] = len(raw_bytes)
         response['Access-Control-Allow-Origin'] = '*'
         response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response['Access-Control-Allow-Headers'] = '*'
         return response
 
 

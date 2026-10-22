@@ -3510,11 +3510,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                               {msg.attachments.map((att) => {
                                 const isImg = isImageAttachment(att);
 
+                                const attUrl = att.downloadUrl || ("/api/v1/attachments/" + att.id + "/download/");
                                 if (isImg) {
                                   return (
                                     <ChatImagePreview
                                       key={att.id}
-                                      url={att.downloadUrl}
+                                      url={attUrl}
                                       originalName={att.originalName}
                                       fileSize={att.fileSize}
                                       timeStr={timeStr}
@@ -3528,7 +3529,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                                 return (
                                   <div
                                     key={att.id}
-                                    onClick={() => void downloadSecureAttachment(att.downloadUrl, att.originalName)}
+                                    onClick={() => void downloadSecureAttachment(attUrl, att.originalName)}
                                     className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer select-none ${
                                       isMe
                                         ? 'bg-[#c5f8be] hover:bg-[#bbf3b3] text-[#111b21]'
