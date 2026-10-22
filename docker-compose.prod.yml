@@ -86,6 +86,7 @@ services:
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
       - static_data:/app/staticfiles
+      - ./secrets:/app/secrets:ro
     depends_on:
       db:
         condition: service_healthy
@@ -147,6 +148,8 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       CELERY_WORKER: "1"
     command: celery -A config worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-4}
+    volumes:
+      - ./secrets:/app/secrets:ro
     depends_on:
       db:
         condition: service_healthy

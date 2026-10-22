@@ -62,6 +62,7 @@ class NotificationSerializer(serializers.ModelSerializer):
 class DeviceTokenRegistrationSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=4096, trim_whitespace=True)
     deviceName = serializers.CharField(max_length=160, required=False, allow_blank=True)
+    platform = serializers.ChoiceField(choices=['web', 'android', 'ios'], required=False)
 
     def validate_token(self, value):
         # FCM tokens are opaque and may contain punctuation. Reject only

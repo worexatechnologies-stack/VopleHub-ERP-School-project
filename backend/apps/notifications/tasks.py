@@ -36,8 +36,18 @@ def queue_fcm_notification(user_ids, *, title, body, category='General', data=No
 
 
 def enqueue_fcm_notification(user_ids, *, title, body, category='General', data=None) -> None:
-    """Best-effort broker enqueue that never makes an API write fail."""
+    """Best-effort broker enqueue that falls back to synchronous delivery if Celery is unavailable."""
     try:
         queue_fcm_notification.delay(user_ids, title=title, body=body, category=category, data=data or {})
     except Exception as exc:
-        logger.warning('Could not enqueue FCM delivery task: %s', exc)
+        logger.info('Celery broker unavailable (%s); dispatching FCM notification synchronously.', exc)
+        try:
+            FCMNotificationService().send_to_user_ids(
+                user_ids,
+                title=title,
+                body=body,
+                category=category,
+                data=data or {},
+            )
+        except Exception as sync_err:
+            logger.warning('Synchronous FCM delivery failed: %s', sync_err)

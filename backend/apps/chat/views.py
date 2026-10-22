@@ -793,26 +793,35 @@ class ConversationMessagesView(APIView):
 
         # Enqueue Push Notification (best effort outside transaction)
         try:
+            from apps.chat.models import ConversationParticipant
             from apps.notifications.services import create_notification
-            sender_name = request.user.get_full_name() or request.user.email
-            notif_preview = body[:140] if body else ('Sent an image' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else 'Sent an attachment')
-            create_notification(
-                school=request.user.school,
-                recipient=recipient,
-                title=f"New Message from {sender_name}",
-                body=notif_preview,
-                category='Message',
-                channel='chat',
-                sender=request.user,
-                related={
-                    'conversationId': conv.id,
-                    'messageId': dm.id,
-                    'studentId': conv.student_id,
-                    'studentName': conv.student.name if conv.student else '',
-                    'senderId': request.user.id,
-                    'senderName': sender_name,
-                },
-            )
+            is_muted = ConversationParticipant.objects.filter(
+                conversation=conv,
+                user=recipient,
+                is_muted=True,
+            ).exists()
+            if not is_muted:
+                sender_name = request.user.get_full_name() or request.user.email
+                notif_preview = body[:140] if body else ('Sent an image' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else 'Sent an attachment')
+                create_notification(
+                    school=request.user.school,
+                    recipient=recipient,
+                    title=f"New Message from {sender_name}",
+                    body=notif_preview,
+                    category='Message',
+                    channel='chat',
+                    sender=request.user,
+                    related={
+                        'type': 'chat_message',
+                        'conversationId': str(conv.id),
+                        'messageId': str(dm.id),
+                        'studentId': str(conv.student_id or ''),
+                        'studentName': conv.student.name if conv.student else '',
+                        'senderId': str(request.user.id),
+                        'senderName': sender_name,
+                        'clickUrl': f'/app?tab=chat&conversationId={conv.id}',
+                    },
+                )
         except Exception:
             pass
 

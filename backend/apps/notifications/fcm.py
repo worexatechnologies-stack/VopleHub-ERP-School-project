@@ -66,13 +66,21 @@ def _firebase_app():
     except ValueError:
         pass
 
-    raw_credentials = settings.FIREBASE_SERVICE_ACCOUNT_JSON.strip()
-    credential_file = settings.FIREBASE_SERVICE_ACCOUNT_FILE.strip()
+    raw_credentials = getattr(settings, 'FIREBASE_SERVICE_ACCOUNT_JSON', '').strip()
+    credential_file = getattr(settings, 'FIREBASE_SERVICE_ACCOUNT_FILE', '').strip()
     try:
         if raw_credentials:
             credential = credentials.Certificate(json.loads(raw_credentials))
         elif credential_file and Path(credential_file).is_file():
             credential = credentials.Certificate(credential_file)
+        elif credential_file and Path(credential_file.replace('/opt/volpehub/secrets', '/app/secrets')).is_file():
+            credential = credentials.Certificate(credential_file.replace('/opt/volpehub/secrets', '/app/secrets'))
+        elif (Path(settings.BASE_DIR) / 'secrets' / 'firebase-service-account.json').is_file():
+            credential = credentials.Certificate(str(Path(settings.BASE_DIR) / 'secrets' / 'firebase-service-account.json'))
+        elif Path('/app/secrets/firebase-service-account.json').is_file():
+            credential = credentials.Certificate('/app/secrets/firebase-service-account.json')
+        elif Path('/opt/volpehub/secrets/firebase-service-account.json').is_file():
+            credential = credentials.Certificate('/opt/volpehub/secrets/firebase-service-account.json')
         else:
             logger.error('FCM is enabled but no valid Firebase service account is configured.')
             return None
@@ -85,12 +93,28 @@ def _firebase_app():
 def _payload_data(data: dict | None) -> dict[str, str]:
     """FCM data values must be strings; limit values to avoid oversized payloads."""
     result: dict[str, str] = {}
-    for key, value in (data or {}).items():
+    data_dict = data or {}
+    for key, value in data_dict.items():
         safe_key = str(key)[:128]
         if not safe_key:
             continue
         encoded = value if isinstance(value, str) else json.dumps(value, separators=(',', ':'), default=str)
         result[safe_key] = encoded[:1024]
+
+    # Ensure click navigation target is always present for web service worker & deep linking
+    if 'clickUrl' not in result:
+        data_type = str(data_dict.get('type', '')).lower()
+        if data_type == 'chat_message' or 'conversationId' in data_dict:
+            conv_id = data_dict.get('conversationId', '')
+            result['clickUrl'] = f'/app?tab=chat&conversationId={conv_id}'
+        elif data_type == 'event' or 'eventId' in data_dict:
+            ev_id = data_dict.get('eventId', '')
+            result['clickUrl'] = f'/app?tab=events&eventId={ev_id}'
+        elif data_type == 'notice' or 'notificationId' in data_dict:
+            result['clickUrl'] = '/app?tab=notifs'
+        else:
+            result['clickUrl'] = '/app'
+
     return result
 
 
@@ -154,13 +178,52 @@ class FCMNotificationService:
 
         result = DeliveryResult(attempted=len(device_list))
         payload = _payload_data(data)
+        if 'title' not in payload:
+            payload['title'] = str(title)[:160]
+        if 'body' not in payload:
+            payload['body'] = str(body)[:1000]
+
         for offset in range(0, len(device_list), FCM_BATCH_SIZE):
             batch = device_list[offset:offset + FCM_BATCH_SIZE]
             message = messaging.MulticastMessage(
                 tokens=[device.token for device in batch],
                 notification=messaging.Notification(title=title[:160], body=body[:4000]),
                 data=payload,
-                webpush=messaging.WebpushConfig(headers={'Urgency': 'high'}),
+                android=messaging.AndroidConfig(
+                    priority='high',
+                    notification=messaging.AndroidNotification(
+                        title=title[:160],
+                        body=body[:4000],
+                        channel_id='volpehub_default_channel',
+                        sound='default',
+                        default_sound=True,
+                        default_vibrate_timings=True,
+                        priority='high',
+                        visibility='public',
+                    ),
+                    data=payload,
+                ),
+                apns=messaging.APNSConfig(
+                    headers={'apns-priority': '10'},
+                    payload=messaging.APNSPayload(
+                        aps=messaging.Aps(
+                            alert=messaging.ApsAlert(title=title[:160], body=body[:4000]),
+                            badge=1,
+                            sound='default',
+                            content_available=True,
+                        ),
+                        custom_data=payload,
+                    ),
+                ),
+                webpush=messaging.WebpushConfig(
+                    headers={'Urgency': 'high'},
+                    notification=messaging.WebpushNotification(
+                        title=title[:160],
+                        body=body[:4000],
+                        icon='/icon-192.png',
+                    ),
+                    data=payload,
+                ),
             )
             try:
                 response = messaging.send_each_for_multicast(message, app=app)

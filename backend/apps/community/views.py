@@ -77,7 +77,7 @@ class SchoolEventViewSet(TenantScopedViewSet):
                 category="Event",
                 channel="events",
                 sender=user,
-                related={'eventId': event.id, 'title': event.title},
+                related={'type': 'event', 'eventId': str(event.id), 'title': event.title},
             )
         except Exception:
             pass
@@ -320,7 +320,7 @@ class CommunityPostViewSet(TenantScopedViewSet):
                 category="Notice",
                 channel="community",
                 sender=user,
-                related={'postId': post.id, 'title': post.title},
+                related={'type': 'notice', 'postId': str(post.id), 'title': post.title},
             )
         except Exception:
             pass

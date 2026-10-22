@@ -81,14 +81,23 @@ class DeviceTokenView(APIView):
         serializer = DeviceTokenRegistrationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token = serializer.validated_data['token']
+        raw_platform = serializer.validated_data.get('platform')
+        if raw_platform in [DeviceToken.Platform.WEB, DeviceToken.Platform.ANDROID, DeviceToken.Platform.IOS]:
+            platform = raw_platform
+        else:
+            ua = request.META.get('HTTP_USER_AGENT', '').lower()
+            if 'android' in ua:
+                platform = DeviceToken.Platform.ANDROID
+            elif 'iphone' in ua or 'ipad' in ua or 'ios' in ua:
+                platform = DeviceToken.Platform.IOS
+            else:
+                platform = DeviceToken.Platform.WEB
+
         device, _ = DeviceToken.objects.update_or_create(
             token=token,
             defaults={
-                # A shared browser token can legitimately move to another
-                # account after logout/login; assigning it here prevents the
-                # former account from receiving future notifications.
                 'user': request.user,
-                'platform': DeviceToken.Platform.WEB,
+                'platform': platform,
                 'device_name': serializer.validated_data.get('deviceName', ''),
                 'user_agent': request.META.get('HTTP_USER_AGENT', '')[:512],
                 'is_active': True,

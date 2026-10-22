@@ -138,11 +138,11 @@ else:
 CELERY_BROKER_URL = env('REDIS_URL', default='redis://redis:6379/0')
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-FIREBASE_ENABLED = env.bool('FIREBASE_ENABLED', default=False)
+FIREBASE_ENABLED = env.bool('FIREBASE_ENABLED', default=True)
 # Supply exactly one service-account source in deployment. These are server-only
 # values; VITE_ Firebase configuration must never be used by Django.
 FIREBASE_SERVICE_ACCOUNT_JSON = env('FIREBASE_SERVICE_ACCOUNT_JSON', default='')
-FIREBASE_SERVICE_ACCOUNT_FILE = env('FIREBASE_SERVICE_ACCOUNT_FILE', default='')
+FIREBASE_SERVICE_ACCOUNT_FILE = env('FIREBASE_SERVICE_ACCOUNT_FILE', default=str(BASE_DIR / 'secrets' / 'firebase-service-account.json'))
 SECURE_SSL_REDIRECT = not DEBUG
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
