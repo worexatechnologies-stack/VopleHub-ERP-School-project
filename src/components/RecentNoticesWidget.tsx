@@ -2,6 +2,7 @@ import React from 'react';
 import { Bell, Clock, ArrowRight, Megaphone, AlertCircle, Calendar } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useGetNotificationsQuery, NotificationRecord } from '../store/api/notificationApi';
+import { useAppSelector } from '../store';
 
 interface RecentNoticesWidgetProps {
   onNavigateToTab?: (tabId: string) => void;
@@ -14,18 +15,36 @@ export default function RecentNoticesWidget({
   title = 'School Notices & Circulars',
   maxItems = 4,
 }: RecentNoticesWidgetProps) {
+  const currentUser = useAppSelector((state) => state.auth.user);
   const { data: rawNotices = [], isLoading } = useGetNotificationsQuery(undefined, {
     pollingInterval: 8000,
   });
 
   const notices = React.useMemo(() => {
     const list = Array.isArray(rawNotices) ? rawNotices : [];
-    return list.slice(0, maxItems);
-  }, [rawNotices, maxItems]);
+    return list
+      .filter((n) => {
+        // Exclude chat direct messages from Notices circular widget
+        if (n.channel === 'chat') return false;
+        // Exclude notices explicitly addressed to someone else
+        if (currentUser?.id && n.recipientId && String(n.recipientId) !== String(currentUser.id)) {
+          return false;
+        }
+        return true;
+      })
+      .slice(0, maxItems);
+  }, [rawNotices, maxItems, currentUser?.id]);
 
   const unreadCount = React.useMemo(() => {
-    return (rawNotices || []).filter((n) => !n.readAt && !n.read_at).length;
-  }, [rawNotices]);
+    const list = Array.isArray(rawNotices) ? rawNotices : [];
+    return list.filter((n) => {
+      if (n.channel === 'chat') return false;
+      if (currentUser?.id && n.recipientId && String(n.recipientId) !== String(currentUser.id)) {
+        return false;
+      }
+      return !n.readAt && !n.read_at;
+    }).length;
+  }, [rawNotices, currentUser?.id]);
 
   const getCategoryColor = (category: string) => {
     const cat = (category || '').toLowerCase();

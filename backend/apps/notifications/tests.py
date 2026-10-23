@@ -260,3 +260,68 @@ class FCMDeviceTokenTests(TestCase):
             result = FCMNotificationService().send_to_user(self.user, title='Test', body='Body')
         self.assertEqual(result.invalid, 1)
         self.assertFalse(DeviceToken.objects.filter(pk=device.pk).exists())
+
+
+class RoleNotificationIsolationTests(TestCase):
+    def setUp(self):
+        self.school = School.objects.create(name='Isolation School', code='iso-school')
+        self.superadmin = User.objects.create_user(
+            username='iso-superadmin', email='iso-sa@test.com', password='StrongPass123!',
+            role=User.Role.SUPER_ADMIN,
+        )
+        self.admin = User.objects.create_user(
+            username='iso-admin', email='iso-admin@test.com', password='StrongPass123!',
+            role=User.Role.SCHOOL_ADMIN, school=self.school,
+        )
+        self.teacher_user = User.objects.create_user(
+            username='iso-teacher', email='iso-teacher@test.com', password='StrongPass123!',
+            role=User.Role.TEACHER, school=self.school,
+        )
+        self.parent_user = User.objects.create_user(
+            username='iso-parent', email='iso-parent@test.com', password='StrongPass123!',
+            role=User.Role.PARENT, school=self.school,
+        )
+        # 1. Notice sent from Teacher to Parent
+        self.teacher_to_parent_notif = Notification.objects.create(
+            school=self.school, sender=self.teacher_user, recipient=self.parent_user,
+            category='General', title='Parent Notice Only', body='Homework due tomorrow',
+            channel='teacher-to-parents',
+        )
+        # 2. Notice sent from Teacher to Admin (Leave request)
+        self.teacher_to_admin_notif = Notification.objects.create(
+            school=self.school, sender=self.teacher_user, recipient=self.admin,
+            category='Leave Request', title='Leave Application', body='Request for 1 day leave',
+            channel='teacher-to-admin',
+        )
+        # 3. Direct chat message between Teacher and Parent
+        self.chat_notif = Notification.objects.create(
+            school=self.school, sender=self.teacher_user, recipient=self.parent_user,
+            category='Message', title='New Message from Teacher', body='Hello Parent',
+            channel='chat',
+        )
+        # 4. Direct chat message between Teacher and Admin
+        self.admin_chat_notif = Notification.objects.create(
+            school=self.school, sender=self.teacher_user, recipient=self.admin,
+            category='Message', title='New Message from Teacher to Admin', body='Hello Admin',
+            channel='chat',
+        )
+        self.client = APIClient()
+
+    def test_super_admin_does_not_receive_school_admin_or_teacher_notices(self):
+        self.client.force_authenticate(self.superadmin)
+        response = self.client.get('/api/v1/notifications/')
+        self.assertEqual(response.status_code, 200)
+        # Super admin has no direct notices, so inbox must be empty, not leaking admin notices
+        self.assertEqual(len(response.data), 0)
+
+    def test_admin_does_not_receive_parent_teacher_notices_or_chats(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.get('/api/v1/notifications/')
+        self.assertEqual(response.status_code, 200)
+        received_ids = [item['id'] for item in response.data]
+        # Admin must receive the leave request and chat sent to Admin
+        self.assertIn(self.teacher_to_admin_notif.id, received_ids)
+        self.assertIn(self.admin_chat_notif.id, received_ids)
+        # Admin must NEVER receive parent-teacher notice or parent-teacher chat
+        self.assertNotIn(self.teacher_to_parent_notif.id, received_ids)
+        self.assertNotIn(self.chat_notif.id, received_ids)

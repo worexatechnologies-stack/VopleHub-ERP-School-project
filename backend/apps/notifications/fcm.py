@@ -162,6 +162,22 @@ class FCMNotificationService:
             topic=topic,
             notification=messaging.Notification(title=title[:160], body=body[:4000]),
             data=_payload_data(data),
+            android=messaging.AndroidConfig(
+                priority='high',
+                notification=messaging.AndroidNotification(
+                    title=title[:160],
+                    body=body[:4000],
+                    channel_id='volpehub_default_channel',
+                    sound='default',
+                    default_sound=True,
+                    default_vibrate_timings=True,
+                    priority='high',
+                    visibility='public',
+                    icon='ic_notification',
+                    color='#2563EB',
+                ),
+                data=_payload_data(data),
+            ),
         ), app=app)
 
     def send_to_device_ids(self, device_ids: Iterable[int], *, title: str, body: str, data: dict | None = None) -> DeliveryResult:
@@ -200,6 +216,8 @@ class FCMNotificationService:
                         default_vibrate_timings=True,
                         priority='high',
                         visibility='public',
+                        icon='ic_notification',
+                        color='#2563EB',
                     ),
                     data=payload,
                 ),

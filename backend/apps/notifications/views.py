@@ -243,21 +243,47 @@ class NotificationListView(APIView):
 
         # Default inbox:
         if request.user.role == User.Role.SUPER_ADMIN:
+            # Super Admin strictly receives notifications directly addressed to them or global system notices
             received_qs = base_qs.filter(
-                Q(recipient=request.user) | Q(recipient__isnull=True)
+                Q(recipient=request.user) |
+                Q(recipient__isnull=True, school__isnull=True, channel='system')
             ).exclude(status='Acknowledged')
-            if not received_qs.exists():
-                received_qs = base_qs.exclude(sender=request.user).exclude(status='Acknowledged')
-        else:
+        elif request.user.role == User.Role.SCHOOL_ADMIN:
+            # School Admin receives direct notices, administrative broadcasts, and staff requests
             received_qs = base_qs.filter(
-                Q(recipient=request.user) | Q(recipient__isnull=True)
+                Q(recipient=request.user) |
+                Q(channel='teacher-to-admin', school_id=request.user.school_id)
+            ).exclude(
+                channel__in=['teacher-to-parents', 'teacher-to-students', 'school-to-parents', 'school-to-teachers']
             ).exclude(status='Acknowledged')
-
-        if request.user.role == User.Role.PARENT:
-            cutoff = timezone.now() - timedelta(days=7)
+            # For chat messages, ensure recipient is strictly this admin
             received_qs = received_qs.filter(
+                ~Q(channel='chat') | Q(recipient=request.user)
+            )
+        elif request.user.role == User.Role.TEACHER:
+            # Teachers receive direct notices to them and school-to-teachers announcements
+            received_qs = base_qs.filter(
+                Q(recipient=request.user) |
+                Q(channel='school-to-teachers', school_id=request.user.school_id)
+            ).exclude(
+                channel__in=['teacher-to-parents', 'teacher-to-students', 'school-to-parents', 'teacher-to-admin']
+            ).exclude(status='Acknowledged')
+            received_qs = received_qs.filter(
+                ~Q(channel='chat') | Q(recipient=request.user)
+            )
+        elif request.user.role == User.Role.PARENT:
+            cutoff = timezone.now() - timedelta(days=7)
+            received_qs = base_qs.filter(
+                Q(recipient=request.user) |
+                Q(channel__in=['teacher-to-parents', 'school-to-parents'], school_id=request.user.school_id)
+            ).exclude(
+                channel__in=['school-to-teachers', 'teacher-to-admin', 'teacher-to-students']
+            ).exclude(status='Acknowledged').filter(
                 Q(sender__school_id=request.user.school_id) | Q(sender__isnull=True),
                 created_at__gte=cutoff,
+            )
+            received_qs = received_qs.filter(
+                ~Q(channel='chat') | Q(recipient=request.user)
             )
             profile = getattr(request.user, 'parent_profile', None)
             ward_ids = {int(sid) for sid in profile.students.values_list('id', flat=True)} if profile else set()
@@ -277,6 +303,18 @@ class NotificationListView(APIView):
                             continue
                 filtered_items.append(item)
             return Response(NotificationSerializer(filtered_items[:50], many=True).data)
+        elif request.user.role == User.Role.STUDENT:
+            received_qs = base_qs.filter(
+                Q(recipient=request.user) |
+                Q(channel__in=['teacher-to-students', 'school-to-students'], school_id=request.user.school_id)
+            ).exclude(
+                channel__in=['school-to-teachers', 'teacher-to-admin', 'teacher-to-parents', 'school-to-parents']
+            ).exclude(status='Acknowledged')
+            received_qs = received_qs.filter(
+                ~Q(channel='chat') | Q(recipient=request.user)
+            )
+        else:
+            received_qs = base_qs.filter(recipient=request.user).exclude(status='Acknowledged')
 
         recent_received = list(received_qs.order_by('-created_at')[:50])
         return Response(NotificationSerializer(recent_received, many=True).data)

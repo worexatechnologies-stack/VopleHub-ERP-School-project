@@ -1775,13 +1775,18 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   };
 
   const filteredNotifications = notifications.filter((n) => {
+    // Exclude 1-on-1 chat direct messages from notices circular view
+    if (n.channel === 'chat') return false;
+    // Strict recipient isolation: if an item is explicitly targeted to another user, never show it
+    if (user?.id && n.recipientId && String(n.recipientId) !== String(user.id)) return false;
+
     if (requestFilter === 'requests') return isLeaveRequest(n);
     if (requestFilter === 'urgent') return n.category?.toLowerCase().includes('urgent');
     if (requestFilter === 'general') return !isLeaveRequest(n) && !n.category?.toLowerCase().includes('urgent');
     return true;
   });
 
-  const unreadCount = notifications.filter((n) => !n.readAt).length;
+  const unreadCount = filteredNotifications.filter((n) => !n.readAt).length;
   const pendingRequestsCount = notifications.filter((n) => isLeaveRequest(n) && (n.requestStatus || n.status || 'Pending') === 'Pending').length;
   const totalChatUnreadCount = useMemo(() => {
     return conversations.reduce((acc, c) => acc + (c.unreadCount || 0), 0);

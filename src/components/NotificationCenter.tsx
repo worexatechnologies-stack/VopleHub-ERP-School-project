@@ -21,6 +21,9 @@ import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
 
 const STORAGE_KEY = 'erp_live_notifications';
 
+const getStorageKey = (userId?: number | string | null) =>
+  userId ? `erp_live_notifications_${userId}` : STORAGE_KEY;
+
 interface NotificationCenterProps {
   logs?: string[];
   isGlass?: boolean;
@@ -44,9 +47,10 @@ function isUserFacingItem(item: AppNotification): boolean {
   return true;
 }
 
-function loadNotifications(): AppNotification[] {
+function loadNotifications(userId?: number | string | null): AppNotification[] {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const key = getStorageKey(userId);
+    const saved = localStorage.getItem(key);
     const parsed = saved ? JSON.parse(saved) : [];
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(isUserFacingItem);
@@ -56,9 +60,20 @@ function loadNotifications(): AppNotification[] {
 }
 
 export default function NotificationCenter({ logs = [], isGlass = false, is3D = false, onNavigateToTab }: NotificationCenterProps) {
-  const [notifications, setNotifications] = useState<AppNotification[]>(loadNotifications);
-  const [isOpen, setIsOpen] = useState(false);
   const currentUser = useAppSelector((state) => state.auth.user);
+  const [notifications, setNotifications] = useState<AppNotification[]>(() => loadNotifications(currentUser?.id));
+  const [isOpen, setIsOpen] = useState(false);
+
+  // Reload scoped notifications and reset tracking whenever the logged-in user changes
+  useEffect(() => {
+    knownServerIds.current.clear();
+    isInitialSync.current = true;
+    if (currentUser?.id) {
+      setNotifications(loadNotifications(currentUser.id));
+    } else {
+      setNotifications([]);
+    }
+  }, [currentUser?.id]);
   const [toast, setToast] = useState<AppNotification | null>(null);
   const [soundEnabled, setSoundEnabledState] = useState(isNotificationSoundEnabled);
   const [soundVolume, setSoundVolumeState] = useState(getNotificationSoundVolume);
@@ -89,12 +104,18 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
         return;
       }
 
-      // 2. If the user is currently actively viewing this conversation, do not show duplicate intrusive toast
+      // 2. Strict recipient boundary: if message is explicitly addressed to someone else, do NOT alert!
+      const targetRecipientId = newMsg.recipientId ?? newMsg.recipient_id;
+      if (targetRecipientId && String(targetRecipientId) !== String(currentUser.id)) {
+        return;
+      }
+
+      // 3. If the user is currently actively viewing this conversation, do not show duplicate intrusive toast
       if (chatSocket.activeConversationId && chatSocket.activeConversationId === newMsg.conversationId) {
         return;
       }
 
-      // 3. To whom the message is sent: Show immediate notification toast with sound!
+      // 4. To whom the message is sent: Show immediate notification toast with sound!
       emitNotification({
         title: `New Message from ${newMsg.senderName || 'Parent / Teacher'}`,
         message: newMsg.body || 'Sent an attachment',
@@ -129,10 +150,15 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
     serverNotifications.forEach((n) => knownServerIds.current.add(n.id));
     isInitialSync.current = false;
 
-    // Convert server notices to app notification models (filtering out outgoing items)
+    // Convert server notices to app notification models (filtering out outgoing items and mismatched recipients)
     const serverItems: AppNotification[] = serverNotifications
       .filter((n) => {
+        // Discard outgoing notices sent by myself to others
         if (currentUser?.id && n.senderId && String(n.senderId) === String(currentUser.id) && n.recipientId && String(n.recipientId) !== String(currentUser.id)) {
+          return false;
+        }
+        // Strict recipient check: if recipient is specified and not me, reject
+        if (currentUser?.id && n.recipientId && String(n.recipientId) !== String(currentUser.id)) {
           return false;
         }
         return true;
@@ -212,8 +238,11 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
   const unreadCount = useMemo(() => notifications.filter((item) => !item.read).length, [notifications]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(notifications.filter(isUserFacingItem).slice(0, 60)));
-  }, [notifications]);
+    if (currentUser?.id) {
+      const key = getStorageKey(currentUser.id);
+      localStorage.setItem(key, JSON.stringify(notifications.filter(isUserFacingItem).slice(0, 60)));
+    }
+  }, [notifications, currentUser?.id]);
 
   // Listen to in-app & server notification events
   useEffect(() => {
