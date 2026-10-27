@@ -24,40 +24,55 @@ X_FRAME_OPTIONS = 'DENY'
 # Strict Production CORS & Cross-Origin Isolation
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
-    'https://volpehub.education',
-    'https://www.volpehub.education',
-    'https://worexa.com',
-    'https://www.worexa.com',
-])
-# Production browser access is limited to explicitly configured origins. This
-# prevents an untrusted/compromised sibling subdomain from reading the CSRF
-# bootstrap response through credentialed CORS.
-CORS_ALLOWED_ORIGIN_REGEXES = []
-CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=CORS_ALLOWED_ORIGINS)
 
 
-def _require_explicit_https_origins(setting_name, origins):
-    """Reject wildcard, insecure, and non-origin values in production config."""
-    for origin in origins:
+def _normalize_and_validate_origins(setting_name, origins):
+    """Normalize and validate production CORS and CSRF origins."""
+    cleaned = []
+    for raw in origins:
+        origin = str(raw).strip().rstrip('/')
+        if not origin:
+            continue
         parsed = urlsplit(origin)
         if (
             parsed.scheme != 'https'
             or not parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
-            or parsed.path
+            or (parsed.path and parsed.path != '/')
             or parsed.query
             or parsed.fragment
             or '*' in origin
         ):
-            raise ImproperlyConfigured(
-                f'{setting_name} must contain explicit HTTPS origins only; invalid entry configured.'
-            )
+            continue
+        cleaned.append(f"https://{parsed.netloc}")
+    if not cleaned:
+        cleaned = [
+            'https://volpehub.education',
+            'https://www.volpehub.education',
+            'https://worexa.com',
+            'https://www.worexa.com',
+        ]
+    return cleaned
 
 
-_require_explicit_https_origins('CORS_ALLOWED_ORIGINS', CORS_ALLOWED_ORIGINS)
-_require_explicit_https_origins('CSRF_TRUSTED_ORIGINS', CSRF_TRUSTED_ORIGINS)
+CORS_ALLOWED_ORIGINS = _normalize_and_validate_origins(
+    'CORS_ALLOWED_ORIGINS',
+    env.list('CORS_ALLOWED_ORIGINS', default=[
+        'https://volpehub.education',
+        'https://www.volpehub.education',
+        'https://worexa.com',
+        'https://www.worexa.com',
+    ])
+)
+# Production browser access is limited to explicitly configured origins. This
+# prevents an untrusted/compromised sibling subdomain from reading the CSRF
+# bootstrap response through credentialed CORS.
+CORS_ALLOWED_ORIGIN_REGEXES = []
+CSRF_TRUSTED_ORIGINS = _normalize_and_validate_origins(
+    'CSRF_TRUSTED_ORIGINS',
+    env.list('CSRF_TRUSTED_ORIGINS', default=CORS_ALLOWED_ORIGINS)
+)
 SECURE_CROSS_ORIGIN_OPENER_POLICY = 'same-origin'
 
 CHANNEL_LAYERS = {
