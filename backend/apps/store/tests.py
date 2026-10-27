@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 from io import BytesIO
+from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -100,7 +101,8 @@ class StoreTests(TestCase):
         self.assertEqual(second.status_code, 400)
         self.assertEqual(StoreOrder.objects.count(), 1)
 
-    def test_signed_webhook_completes_order_after_browser_callback_is_lost(self):
+    @patch('apps.store.views._create_gateway_order', return_value={'id': 'order_dummy_webhook_1', 'amount': 5000, 'currency': 'INR', 'key_id': 'rzp_test_school', 'demo_mode': False})
+    def test_signed_webhook_completes_order_after_browser_callback_is_lost(self, mock_gateway_order):
         self.client.force_authenticate(self.admin)
         StorePaymentSettings.objects.create(
             school=self.school,
