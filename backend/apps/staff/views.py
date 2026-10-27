@@ -17,6 +17,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema
 from apps.accounts.models import User
 from apps.common.tenancy import TenantScopedViewSet
 from apps.common.fast_cache import fast_cache_response, bump_cache_version
+from apps.common.import_queue import CanManageSchoolImports, import_status_key, queue_import_batch
 
 from .models import Teacher, TeacherDocument, TeacherTeachingAssignment, StaffSalaryPayment
 from .serializers import (
@@ -45,6 +46,16 @@ class TeacherPermission(permissions.BasePermission):
             User.Role.PARENT,
             User.Role.STUDENT,
         ]
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if str(obj.school_id or '') != str(user.school_id or ''):
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return user.role == User.Role.SCHOOL_ADMIN
 
 class TeacherViewSet(TenantScopedViewSet):
     permission_classes = [TeacherPermission]
@@ -144,7 +155,7 @@ class TeacherViewSet(TenantScopedViewSet):
         if 'photo' in request.FILES:
             data['photo'] = request.FILES['photo']
 
-        for list_field in ['subjectIds', 'assignedSections', 'assignedSectionIds', 'teachingAssignments']:
+        for list_field in ['subjectIds', 'assignedSections', 'assignedSectionIds', 'teachingAssignments', 'managedClassIds', 'managedSectionIds']:
             if list_field not in data:
                 continue
             value = data.get(list_field)
@@ -179,6 +190,9 @@ class TeacherViewSet(TenantScopedViewSet):
             school=school, data=serializer.validated_data, created_by=request.user,
         )
         bump_cache_version('teachers', school.id)
+        bump_cache_version('classes', school.id)
+        bump_cache_version('sections', school.id)
+        bump_cache_version('academic_structure', school.id)
         teacher_serializer = TeacherSerializer(teacher, context={'request': request})
         result = teacher_serializer.data
         result['loginCredentials'] = credentials
@@ -249,6 +263,26 @@ class TeacherViewSet(TenantScopedViewSet):
                                 defaults={'created_by': self.request.user},
                             )
 
+        # Sync Class Teacher assignments
+        if 'managedClassIds' in normalized_data or 'managedSectionIds' in normalized_data:
+            from apps.academics.models import Class, Section
+            managed_class_ids = set(normalized_data.get('managedClassIds') or [])
+            managed_section_ids = set(normalized_data.get('managedSectionIds') or [])
+
+            # Clear classes previously assigned to this teacher that are no longer selected
+            Class.objects.filter(school=teacher.school, class_teacher=teacher).exclude(id__in=managed_class_ids).update(class_teacher=None)
+            if managed_class_ids:
+                Class.objects.filter(school=teacher.school, id__in=managed_class_ids).update(class_teacher=teacher)
+
+            # Clear sections previously assigned to this teacher that are no longer selected
+            Section.objects.filter(school=teacher.school, class_teacher=teacher).exclude(id__in=managed_section_ids).update(class_teacher=None)
+            if managed_section_ids:
+                Section.objects.filter(school=teacher.school, id__in=managed_section_ids).update(class_teacher=teacher)
+
+            bump_cache_version('classes', teacher.school_id)
+            bump_cache_version('sections', teacher.school_id)
+            bump_cache_version('academic_structure', teacher.school_id)
+
     def destroy(self, request, *args, **kwargs):
         """Delete the teacher profile and its login as one atomic operation."""
         teacher = self.get_object()
@@ -314,6 +348,34 @@ class TeacherViewSet(TenantScopedViewSet):
 
     @action(
         detail=False,
+        methods=['get'],
+        url_path='bulk-import/status',
+        permission_classes=[CanManageSchoolImports],
+    )
+    def bulk_import_status(self, request):
+        import re
+        from django.core.cache import cache
+
+        job_id = str(request.query_params.get('jobId') or '').strip()
+        try:
+            batch_number = int(request.query_params.get('batchNumber') or 0)
+        except (TypeError, ValueError):
+            batch_number = 0
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job_id) or not 1 <= batch_number <= 10000:
+            return Response({'detail': 'Valid jobId and batchNumber are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        key = import_status_key(
+            entity='teachers', school_id=request.user.school_id, user_id=request.user.pk,
+            job_id=job_id, batch_number=batch_number,
+        )
+        queued = cache.get(key)
+        if queued is None:
+            return Response({'detail': 'Import batch not found or its status has expired.'}, status=status.HTTP_404_NOT_FOUND)
+        response = Response({'jobId': job_id, 'batchNumber': batch_number, **queued}, status=status.HTTP_200_OK)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+    @action(
+        detail=False,
         methods=['post'],
         url_path='bulk-import',
         parser_classes=[MultiPartParser, FormParser, JSONParser],
@@ -339,6 +401,7 @@ class TeacherViewSet(TenantScopedViewSet):
             normalize_phone_number,
             parse_spreadsheet_bytes,
         )
+        from apps.common.validators import validate_spreadsheet_upload
         from apps.sis.services import generate_temporary_password
         from django.contrib.auth.hashers import MD5PasswordHasher
         from django.core.cache import cache
@@ -367,6 +430,10 @@ class TeacherViewSet(TenantScopedViewSet):
                 'detail': 'A school tenant is required to import teachers.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        queued_response = queue_import_batch(request, entity='teachers', user=user, school=school)
+        if queued_response is not None:
+            return queued_response
+
         job_id = str(request.data.get('jobId') or request.data.get('job_id') or '').strip()
         try:
             batch_number = int(request.data.get('batchNumber') or request.data.get('batch_number') or 1)
@@ -378,7 +445,7 @@ class TeacherViewSet(TenantScopedViewSet):
             total_batches = 1
 
         # Check idempotency cache
-        cache_key = f"bulk_import_teacher:{school.id}:{job_id}:{batch_number}" if job_id else None
+        cache_key = f"bulk_import_teacher:{school.id}:{user.id}:{job_id}:{batch_number}" if job_id else None
         if cache_key:
             cached_result = cache.get(cache_key)
             if cached_result:
@@ -389,6 +456,7 @@ class TeacherViewSet(TenantScopedViewSet):
 
         if uploaded_file:
             try:
+                validate_spreadsheet_upload(uploaded_file)
                 file_bytes = uploaded_file.read()
                 grid_rows = parse_spreadsheet_bytes(file_bytes, uploaded_file.name)
                 if not grid_rows:
@@ -430,7 +498,7 @@ class TeacherViewSet(TenantScopedViewSet):
                     'jobId': job_id,
                     'batchNumber': batch_number,
                     'errorCategory': 'FILE_PARSE_ERROR',
-                    'detail': f'Failed to process spreadsheet file: {str(exc)}',
+                    'detail': 'Could not process the spreadsheet. Check its format and try again.',
                 }, status=status.HTTP_400_BAD_REQUEST)
         else:
             payload = request.data
@@ -699,7 +767,7 @@ class TeacherViewSet(TenantScopedViewSet):
                     'batchNumber': batch_number,
                     'totalBatches': total_batches,
                     'errorCategory': 'INTERNAL_SERVER_ERROR',
-                    'detail': f"Failed to execute bulk import on server: {str(exc)}",
+                    'detail': 'Teacher import failed because of an unexpected server error. Please try again or contact support.',
                     'attemptedRows': len(chunk_teachers),
                     'createdCount': 0,
                     'skippedCount': len(chunk_teachers),
@@ -740,7 +808,7 @@ class TeacherViewSet(TenantScopedViewSet):
 
         # Cache response for idempotency
         if cache_key:
-            cache.set(cache_key, response_data, timeout=86400)
+            cache.set(cache_key, response_data, timeout=3600)
         if total_created:
             bump_cache_version('teachers', school.id)
 
@@ -987,6 +1055,14 @@ class StaffSalaryPaymentPermission(permissions.BasePermission):
         if request.method not in permissions.SAFE_METHODS:
             return request.user.role == User.Role.SCHOOL_ADMIN
         return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return str(obj.school_id or '') == str(user.school_id or '')
+        if user.role == User.Role.TEACHER:
+            return obj.teacher.user_id == user.id and request.method in permissions.SAFE_METHODS
+        return False
 
 
 class StaffSalaryPaymentViewSet(TenantScopedViewSet):

@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.db.models.functions import Upper
 
 class User(AbstractUser):
     class Role(models.TextChoices):
@@ -35,6 +36,10 @@ class User(AbstractUser):
         indexes = [
             models.Index(fields=['school', 'role'], name='accounts_user_sch_role_idx'),
             models.Index(fields=['school', 'is_active'], name='accounts_user_sch_act_idx'),
+            # Login uses iexact on both identifiers; matching expression indexes
+            # avoid a full users-table scan as the student population grows.
+            models.Index(Upper('email'), name='accounts_user_email_upper_idx'),
+            models.Index(Upper('username'), name='accounts_user_uname_upper_idx'),
         ]
 
 
@@ -65,11 +70,9 @@ class RefreshTokenRecord(models.Model):
 
     Security model
     --------------
-    * We NEVER store the raw refresh token (JWT string) in the database.
-    * We store a bcrypt hash of the token so a database leak does not leak
-      usable refresh tokens.
-    * A user can have multiple active refresh-token records (one per device),
-      which is why we key on a unique random ``jti`` when issuing tokens.
+    * We NEVER store the raw opaque refresh token in the database.
+    * We store its SHA-256 digest. Refresh tokens have 384 bits of randomness.
+    * A user can have multiple active refresh-token records (one per device).
     """
 
     class Meta:
@@ -79,9 +82,7 @@ class RefreshTokenRecord(models.Model):
         ]
         ordering = ['-created_at']
 
-    # The unique identifier stamped into the JWT ``jti`` claim. We look up
-    # the record by jti, then compare bcrypt hashes, so we never need to
-    # search by raw token contents.
+    # Random session identifier, independent of the opaque refresh token.
     jti = models.UUIDField(unique=True)
 
     user = models.ForeignKey(
@@ -90,8 +91,8 @@ class RefreshTokenRecord(models.Model):
         related_name='refresh_token_records',
     )
 
-    # bcrypt hash of the refresh token value. The raw JWT is never persisted.
-    token_hash = models.CharField(max_length=128)
+    # SHA-256 hex digest of the opaque refresh token; raw value is never persisted.
+    token_hash = models.CharField(max_length=128, db_index=True)
 
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -105,19 +106,21 @@ class RefreshTokenRecord(models.Model):
     def is_active(self) -> bool:
         return self.revoked_at is None
 
+    def matches_hash(self, raw_token: str) -> bool:
+        """Return True when the supplied opaque token matches the stored digest."""
+        try:
+            import hashlib
+            import hmac
+            expected_digest = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+            return hmac.compare_digest(self.token_hash, expected_digest)
+        except Exception:
+            return False
+
     def verify_token(self, raw_token: str) -> bool:
-        """Return True when the supplied raw JWT matches the stored hash."""
+        """Return True when the token is active and matches the stored hash."""
         if not self.is_active:
             return False
-        try:
-            import bcrypt
-            import hashlib
-            token_bytes = hashlib.sha256(raw_token.encode('utf-8')).hexdigest().encode('utf-8')
-            return bcrypt.checkpw(
-                token_bytes, self.token_hash.encode('utf-8')
-            )
-        except ValueError:
-            return False
+        return self.matches_hash(raw_token)
 
     def revoke(self) -> None:
         """Revoke this device session (logout / reuse detection)."""

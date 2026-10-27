@@ -39,6 +39,9 @@ fi
 
 echo "[VolpeHub Backup] Backup successful: $(du -h "$target_dump" | cut -f1)"
 
-# Retention pruning (default: 14 days)
-find "$backup_dir" -type f -name 'volpehub-*.dump' -mtime +"${BACKUP_RETENTION_DAYS:-14}" -delete
-find "$backup_dir" -type f -name 'postgres-*.dump' -mtime +"${BACKUP_RETENTION_DAYS:-14}" -delete
+# Retention: 48 hours (2 days) — delete old backups AFTER new one is confirmed good
+find "$backup_dir" -type f -name 'volpehub-*.dump' -mtime +2 -delete
+find "$backup_dir" -type f -name 'postgres-*.dump' -mtime +2 -delete
+
+echo "[VolpeHub Backup] Current backups in '$backup_dir':"
+ls -lh "$backup_dir"/*.dump 2>/dev/null || echo "  (none)"

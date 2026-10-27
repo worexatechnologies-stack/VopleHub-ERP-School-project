@@ -17,7 +17,7 @@ import {
 } from '../store/api/notificationApi';
 import { useAppSelector } from '../store';
 import { chatSocket } from '../services/chatSocket';
-import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
+import { getStoredAuthenticatedUser } from '../utils/auth';
 
 const STORAGE_KEY = 'erp_live_notifications';
 
@@ -81,10 +81,11 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
   const toastTimer = useRef<number | null>(null);
 
   // Poll server notifications for authenticated user to detect real-time incoming notices
-  const hasAuthToken = Boolean(typeof window !== 'undefined' && localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY));
+  const isAuthenticated = useAppSelector((state) => state.auth.isAuthenticated);
+  const hasValidSession = Boolean(isAuthenticated || currentUser || getStoredAuthenticatedUser());
   const { data: serverNotifications = [] } = useGetNotificationsQuery(undefined, {
     pollingInterval: 6000,
-    skip: !hasAuthToken,
+    skip: !hasValidSession,
   });
 
   const [markServerNotificationRead] = useMarkNotificationReadMutation();
@@ -95,7 +96,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
 
   // Real-time WebSocket listener for immediate instant chat message delivery
   useEffect(() => {
-    if (!hasAuthToken || !currentUser?.id) return;
+    if (!hasValidSession || !currentUser?.id) return;
     chatSocket.connect();
 
     const unsubChat = chatSocket.on('message.created', (newMsg: any) => {
@@ -130,7 +131,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
     return () => {
       unsubChat();
     };
-  }, [hasAuthToken, currentUser?.id]);
+  }, [hasValidSession, currentUser?.id]);
 
   // Detect and announce newly arrived backend notices in real-time, and merge with display state
   useEffect(() => {
@@ -440,7 +441,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
                 <p className="text-sm font-extrabold text-white">Live notifications</p>
                 <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/20 px-2 py-0.5 text-[10px] font-bold text-indigo-300">
                   <span className={`h-1.5 w-1.5 rounded-full ${soundEnabled ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'}`} />
-                  {soundEnabled ? 'Sound ON' : 'Muted'}
+                  {soundEnabled ? 'All sounds ON' : 'All sounds muted'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400">Activity inbox & real-time chime alerts</p>
@@ -465,10 +466,11 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
                     ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
                     : 'bg-rose-500/20 text-rose-300 hover:bg-rose-500/30'
                 }`}
-                title={soundEnabled ? 'Mute notification sounds' : 'Enable notification sounds'}
+                title={soundEnabled ? 'Mute all notification sounds across the app' : 'Turn all notification sounds on across the app'}
+                aria-label={soundEnabled ? 'Mute all notification sounds' : 'Turn all notification sounds on'}
               >
                 {soundEnabled ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
-                {soundEnabled ? 'Sound Active' : 'Sound Muted'}
+                {soundEnabled ? 'Mute All Sounds' : 'Turn Sound On'}
               </button>
             </div>
 

@@ -1,5 +1,6 @@
 import {
   ArrowUpRight,
+  CalendarDays,
   CreditCard,
   GraduationCap,
   UserCheck,
@@ -36,7 +37,7 @@ import { createPortal } from 'react-dom';
 import type { Student, UserRole } from '../types';
 import RoleDashboard from './RoleDashboard';
 import { useGetTeachersQuery, useGetTeacherStatsQuery, useVerifyTeacherDocumentMutation } from '../store/api/teacherApi';
-import { useGetClassesQuery, useGetSectionsQuery } from '../store/api/academicApi';
+import { useGetClassesQuery, useGetSectionsQuery, useGetAcademicYearsQuery } from '../store/api/academicApi';
 import { useGetSchoolRevenueQuery } from '../store/api/financeApi';
 import { useGetStudentStatsQuery, useVerifyStudentDocumentMutation } from '../store/api/studentApi';
 import { useGetSchoolDocumentsQueueQuery, type SchoolDocumentItem } from '../store/api/schoolApi';
@@ -81,16 +82,26 @@ export default function Dashboard({
     return () => window.clearInterval(timer);
   }, []);
 
-  const { data: teachersData = [] } = useGetTeachersQuery();
-  const { data: teacherStats } = useGetTeacherStatsQuery();
-  const { data: classesData = [] } = useGetClassesQuery();
-  const { data: sectionsData = [] } = useGetSectionsQuery();
+  const isSchoolAdmin = role === 'School Admin' || role === 'Super Admin';
+
+  const { data: teachersData = [] } = useGetTeachersQuery(undefined, { skip: !isSchoolAdmin });
+  const { data: teacherStats } = useGetTeacherStatsQuery(undefined, { skip: !isSchoolAdmin });
+  const { data: classesData = [] } = useGetClassesQuery(undefined, { skip: !isSchoolAdmin });
+  const { data: sectionsData = [] } = useGetSectionsQuery(undefined, { skip: !isSchoolAdmin });
+  const { data: academicYears = [] } = useGetAcademicYearsQuery(undefined, { skip: !isSchoolAdmin });
+  const activeYear = useMemo(() => academicYears.find((y) => y.is_active) || academicYears[0], [academicYears]);
   const { data: revenueData, isFetching: isRevenueFetching } = useGetSchoolRevenueQuery(
     currentAcademicYear ? { academicYear: currentAcademicYear } : undefined,
-    { refetchOnFocus: true, refetchOnReconnect: true, refetchOnMountOrArgChange: true }
+    {
+      skip: !isSchoolAdmin,
+      refetchOnFocus: true,
+      refetchOnReconnect: true,
+      refetchOnMountOrArgChange: true,
+    }
   );
   const { data: studentStats } = useGetStudentStatsQuery(
-    currentAcademicYear ? { academic_year: currentAcademicYear } : undefined
+    currentAcademicYear ? { academic_year: currentAcademicYear } : undefined,
+    { skip: !isSchoolAdmin }
   );
 
   // ── Document Queue & Verification State ──
@@ -98,7 +109,7 @@ export default function Dashboard({
     data: docQueueData,
     isFetching: isFetchingDocs,
     refetch: refetchDocQueue,
-  } = useGetSchoolDocumentsQueueQuery();
+  } = useGetSchoolDocumentsQueueQuery(undefined, { skip: !isSchoolAdmin });
 
   const [verifyStudentDocMutation] = useVerifyStudentDocumentMutation();
   const [verifyTeacherDocMutation] = useVerifyTeacherDocumentMutation();
@@ -320,8 +331,10 @@ export default function Dashboard({
     return `${Math.round(activeStudentsCount / activeTeachersCount)}:1`;
   }, [activeStudentsCount, activeTeachersCount]);
 
+  const workspaceName = schoolName.trim() || (role === 'Super Admin' ? 'Volpehub Education' : 'Your School');
+  const isPlatformAdmin = role === 'Super Admin';
   const adminName        = userName.trim() || 'Admin';
-  const displayAdminName = adminName.toLocaleLowerCase() === schoolName.trim().toLocaleLowerCase() ? 'School Admin' : adminName;
+  const displayAdminName = adminName.toLocaleLowerCase() === workspaceName.toLocaleLowerCase() ? 'School Admin' : adminName;
 
   const metrics = [
     { label: 'Active Students',   value: activeStudentsCount.toLocaleString('en-IN'),                                          note: `${authoritativeStudentCount.toLocaleString('en-IN')} total on record (${promotedStudentsCount.toLocaleString('en-IN')} promot...`, icon: Users,        tab: 'student'        },
@@ -357,18 +370,42 @@ export default function Dashboard({
 
         {/* ── Left Content ── */}
         <div className="relative z-10 px-7 py-6">
-          {/* School tag */}
-          <div className="flex items-center gap-2.5 mb-1.5">
-            <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-xs">
-              <School className="w-4.5 h-4.5 w-[18px] h-[18px]" />
+          {/* Tenant identity & active academic year */}
+          <div className="flex flex-wrap items-center gap-3 mb-2">
+            <div className="flex items-center gap-2.5 min-w-0 rounded-xl border border-indigo-100 bg-indigo-50/80 px-2.5 py-1.5">
+              <div className="w-9 h-9 rounded-lg bg-white border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-xs shrink-0">
+                <School className="w-[18px] h-[18px]" />
+              </div>
+              <div className="min-w-0">
+                <span className="block text-[9px] font-black text-indigo-500 uppercase tracking-[0.16em]">
+                  {isPlatformAdmin ? 'Platform workspace' : 'School workspace'}
+                </span>
+                <span className="block max-w-[min(48vw,28rem)] truncate text-sm font-black text-slate-800" title={workspaceName}>
+                  {workspaceName}
+                </span>
+              </div>
             </div>
-            <span className="text-[11px] font-extrabold text-slate-500 uppercase tracking-widest">{schoolName}</span>
+            <button
+              type="button"
+              onClick={() => onNavigateToTab('academic-setup')}
+              className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 hover:bg-indigo-100/80 border border-indigo-200/90 px-3 py-1 text-[11px] font-bold text-indigo-700 transition cursor-pointer"
+              title="Click to view or add academic years"
+            >
+              <CalendarDays className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Academic Year: {activeYear?.name || 'Set Active Year'}</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            </button>
           </div>
 
           {/* Welcome heading */}
           <h1 className="text-[28px] sm:text-[34px] font-black text-slate-900 tracking-tight leading-tight mb-0">
             Welcome back, {displayAdminName}
           </h1>
+          <p className="mt-1 text-xs sm:text-sm font-medium text-slate-500">
+            {isPlatformAdmin
+              ? 'Review platform-wide school operations and administration.'
+              : `Your administration workspace for ${workspaceName}.`}
+          </p>
 
           {/* Quick Actions */}
           <div className="mt-4 pt-3.5 border-t border-slate-100 flex flex-wrap items-center gap-2">
@@ -379,11 +416,12 @@ export default function Dashboard({
               <Plus className="w-3.5 h-3.5" /> Enroll Student
             </button>
             {([
-              { label: 'Collect Fee',     icon: CreditCard,    tab: 'fees'           },
-              { label: 'Take Attendance', icon: CheckSquare,   tab: 'attendance'     },
-              { label: 'Staff Directory', icon: UserCheck,     tab: 'teachers'       },
-              { label: 'Academic Setup',  icon: GraduationCap, tab: 'academic-setup' },
-              { label: 'Class Homework',  icon: BookOpen,      tab: 'homework'       },
+              { label: 'Academic Setup',    icon: GraduationCap, tab: 'academic-setup' },
+              { label: 'Add Academic Year', icon: CalendarDays,  tab: 'academic-setup' },
+              { label: 'Collect Fee',       icon: CreditCard,    tab: 'fees'           },
+              { label: 'Take Attendance',   icon: CheckSquare,   tab: 'attendance'     },
+              { label: 'Staff Directory',   icon: UserCheck,     tab: 'teachers'       },
+              { label: 'Class Homework',    icon: BookOpen,      tab: 'homework'       },
             ] as const).map(({ label, icon: Icon, tab }) => (
               <button key={tab} type="button" onClick={() => onNavigateToTab(tab)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 hover:border-indigo-300 text-slate-600 hover:text-indigo-700 text-[11px] font-semibold px-3.5 py-[7px] shadow-xs transition-all duration-150">

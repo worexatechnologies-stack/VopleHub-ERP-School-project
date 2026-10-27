@@ -53,6 +53,11 @@ class ExamSchedule(models.Model):
         blank=True,
         help_text="Custom per-section extension configurations"
     )
+    subject_extensions = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Custom per-subject marks entry deadlines set by administrators"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -111,6 +116,18 @@ class ExamSchedule(models.Model):
         import datetime
         from django.utils import timezone
 
+        if subject_name and isinstance(self.subject_extensions, dict):
+            for subject_key, subject_data in self.subject_extensions.items():
+                if str(subject_key).strip().lower() == str(subject_name).strip().lower():
+                    if isinstance(subject_data, dict) and subject_data.get('extended') and subject_data.get('deadline'):
+                        try:
+                            d = datetime.datetime.fromisoformat(str(subject_data['deadline']).replace('Z', '+00:00'))
+                            if timezone.is_naive(d):
+                                d = timezone.make_aware(d, timezone.get_current_timezone())
+                            return d
+                        except (TypeError, ValueError):
+                            pass
+
         if section_name and isinstance(self.section_extensions, dict):
             for sec_key, sec_data in self.section_extensions.items():
                 if str(sec_key).strip().lower() == str(section_name).strip().lower():
@@ -161,12 +178,20 @@ class ExamSchedule(models.Model):
                         sec_ext = sec_data
                         break
 
+        subject_ext = None
+        if subject_name and isinstance(self.subject_extensions, dict):
+            for subject_key, subject_data in self.subject_extensions.items():
+                if str(subject_key).strip().lower() == str(subject_name).strip().lower():
+                    if isinstance(subject_data, dict) and subject_data.get('extended') and subject_data.get('deadline'):
+                        subject_ext = subject_data
+                        break
+
         if is_admin:
             return {
                 'is_open': True,
                 'is_completed': is_completed,
                 'is_expired': False,
-                'is_extended': bool(sec_ext or (self.marks_entry_extended and self.marks_entry_deadline)),
+                'is_extended': bool(sec_ext or subject_ext or (self.marks_entry_extended and self.marks_entry_deadline)),
                 'deadline': deadline,
                 'reason': 'Full access granted for Administrator',
                 'days_remaining': round((deadline - now).total_seconds() / 86400.0, 1) if deadline else None,
@@ -190,6 +215,22 @@ class ExamSchedule(models.Model):
                     'section_extended': True,
                     'section_name': section_name,
                 }
+
+        if subject_ext and deadline:
+            subject_reason = subject_ext.get('reason', '')
+            if now <= deadline:
+                remaining_secs = (deadline - now).total_seconds()
+                return {
+                    'is_open': True,
+                    'is_completed': True,
+                    'is_expired': False,
+                    'is_extended': True,
+                    'deadline': deadline,
+                    'reason': f"Extended for {subject_name} until {deadline.strftime('%b %d, %Y %I:%M %p')}" + (f" ({subject_reason})" if subject_reason else ""),
+                    'days_remaining': round(remaining_secs / 86400.0, 1),
+                    'section_extended': False,
+                    'section_name': section_name,
+                }
             else:
                 return {
                     'is_open': False,
@@ -197,13 +238,13 @@ class ExamSchedule(models.Model):
                     'is_expired': True,
                     'is_extended': True,
                     'deadline': deadline,
-                    'reason': f"Marks entry window for Section {section_name} closed on {deadline.strftime('%b %d, %Y %I:%M %p')}. Contact an administrator for extension.",
+                    'reason': f"Marks entry window for {subject_name} closed on {deadline.strftime('%b %d, %Y %I:%M %p')}. Contact an administrator for extension.",
                     'days_remaining': 0,
-                    'section_extended': True,
+                    'section_extended': False,
                     'section_name': section_name,
                 }
 
-        is_extended = bool(self.marks_entry_extended and self.marks_entry_deadline)
+        is_extended = bool(subject_ext or (self.marks_entry_extended and self.marks_entry_deadline))
 
         # If admin specifically extended the schedule-level deadline and current time is within it
         if is_extended and deadline and now <= deadline:

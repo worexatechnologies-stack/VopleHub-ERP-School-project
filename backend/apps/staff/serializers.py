@@ -134,6 +134,9 @@ class TeacherSerializer(serializers.ModelSerializer):
     documents = TeacherDocumentSerializer(many=True, read_only=True)
     photoUrl = serializers.SerializerMethodField()
     teachingAssignments = serializers.SerializerMethodField()
+    managedClasses = serializers.SerializerMethodField()
+    managedClassIds = serializers.SerializerMethodField()
+    managedSectionIds = serializers.SerializerMethodField()
     # Browser-side compression produces WebP.  Use FileField here so DRF does
     # not reject that valid format before our byte-signature and Pillow checks
     # below run; validate_student_photo remains the security boundary.
@@ -142,7 +145,7 @@ class TeacherSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Teacher
-        fields = ['id', 'userId', 'name', 'email', 'isOnline', 'phone', 'salary', 'subjects', 'subjectIds', 'assignedSections', 'assignedSectionIds', 'teachingAssignments', 'qualification', 'joiningDate', 'documents', 'status', 'photoUrl', 'photo']
+        fields = ['id', 'userId', 'name', 'email', 'isOnline', 'phone', 'salary', 'subjects', 'subjectIds', 'assignedSections', 'assignedSectionIds', 'teachingAssignments', 'managedClasses', 'managedClassIds', 'managedSectionIds', 'qualification', 'joiningDate', 'documents', 'status', 'photoUrl', 'photo']
 
     def get_name(self, obj) -> str:
         if not obj.user:
@@ -194,6 +197,19 @@ class TeacherSerializer(serializers.ModelSerializer):
             }
             for assignment in obj.teaching_assignments.all()
         ]
+
+    def get_managedClasses(self, obj) -> list[dict]:
+        classes = [{'id': c.id, 'name': c.name, 'code': c.code} for c in obj.managed_classes.all()]
+        for sec in obj.managed_sections.select_related('class_room').all():
+            if not any(c['id'] == sec.class_room_id for c in classes):
+                classes.append({'id': sec.class_room_id, 'name': f"{sec.class_room.name} ({sec.name})", 'code': sec.class_room.code})
+        return classes
+
+    def get_managedClassIds(self, obj) -> list[int]:
+        return list(obj.managed_classes.values_list('id', flat=True))
+
+    def get_managedSectionIds(self, obj) -> list[int]:
+        return list(obj.managed_sections.values_list('id', flat=True))
 
     def validate_assignedSectionIds(self, values):
         request = self.context.get('request')
@@ -280,6 +296,12 @@ class TeacherCreateSerializer(serializers.Serializer):
         required=True, allow_empty=False,
     )
     teachingAssignments = serializers.JSONField(required=False, write_only=True)
+    managedClassIds = serializers.ListField(
+        child=serializers.IntegerField(), required=False, allow_empty=True, default=list
+    )
+    managedSectionIds = serializers.ListField(
+        child=serializers.IntegerField(), required=False, allow_empty=True, default=list
+    )
     joiningDate = serializers.DateField(source='joining_date', required=False, allow_null=True)
     qualification = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     salary = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)

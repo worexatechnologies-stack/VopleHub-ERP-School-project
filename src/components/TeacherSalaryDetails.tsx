@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -42,7 +43,7 @@ function loadLocalSalaries(): StaffSalaryPayment[] {
 }
 
 export default function TeacherSalaryDetails({ user, schoolName = 'School Management Portal' }: TeacherSalaryDetailsProps) {
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const currentYear = new Date().getFullYear();
   const currentMonthIdx = new Date().getMonth(); // 0-indexed
   const [selectedYear, setSelectedYear] = useState<number>(currentYear);

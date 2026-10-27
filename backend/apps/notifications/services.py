@@ -10,6 +10,29 @@ from .tasks import enqueue_fcm_notification
 logger = logging.getLogger(__name__)
 
 
+
+from django.utils import timezone
+
+def _dispatch_ws_notification(user_id: int, notif):
+    try:
+        from apps.chat.outbox import record_outbox_event
+        payload = {
+            "id": getattr(notif, "id", None),
+            "title": getattr(notif, "title", ""),
+            "body": getattr(notif, "body", ""),
+            "category": getattr(notif, "category", "General"),
+            "channel": getattr(notif, "channel", "system"),
+            "createdAt": timezone.now().isoformat(),
+            "related": getattr(notif, "related_object", {}) or {},
+        }
+        record_outbox_event(
+            event_type="notification.created",
+            channel_name=f"user_{user_id}",
+            payload=payload,
+        )
+    except Exception as exc:
+        logger.warning("Could not record outbox event for notification: %s", exc)
+
 def create_notification(
     school,
     recipient,
@@ -54,6 +77,11 @@ def create_notification(
     except Exception as exc:
         logger.warning('Could not enqueue FCM notification: %s', exc)
 
+    try:
+        _dispatch_ws_notification(recipient.id, notif)
+    except Exception:
+        pass
+
     return notif
 
 
@@ -65,8 +93,10 @@ def create_bulk_notifications(
     category: str = 'General',
     channel: str = 'system',
     sender=None,
+    sender_id=None,
     related: dict = None,
     status: str = 'Pending',
+    broadcast_id=None,
 ):
     """Dispatch bulk database notifications and FCM push notifications efficiently."""
     school_id = getattr(school, 'id', school)
@@ -84,11 +114,25 @@ def create_bulk_notifications(
         return 0
 
     related_data = related or {}
-    broadcast_id = uuid.uuid4()
+    broadcast_id = broadcast_id or uuid.uuid4()
+    if not isinstance(broadcast_id, uuid.UUID):
+        broadcast_id = uuid.UUID(str(broadcast_id))
+    existing_ids = set(
+        Notification.objects.filter(
+            broadcast_id=broadcast_id,
+            recipient_id__in=recipient_map.keys(),
+        ).values_list('recipient_id', flat=True)
+    )
+    recipient_map = {
+        uid: user for uid, user in recipient_map.items() if uid not in existing_ids
+    }
+    if not recipient_map:
+        return 0
     rows = [
         Notification(
             school_id=school_id,
             sender=sender,
+            sender_id=sender_id if sender is None else None,
             recipient_id=uid,
             channel=channel,
             category=category,
@@ -114,6 +158,12 @@ def create_bulk_notifications(
         ))
     except Exception as exc:
         logger.warning('Could not enqueue bulk FCM notifications: %s', exc)
+
+    try:
+        for row in rows:
+            _dispatch_ws_notification(row.recipient_id, row)
+    except Exception:
+        pass
 
     return len(rows)
 

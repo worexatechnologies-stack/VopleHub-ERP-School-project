@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -71,6 +72,9 @@ interface TeacherRecord {
   assignedSections: string[];
   assignedSectionIds: number[];
   teachingAssignments: TeachingAssignment[];
+  managedClasses?: Array<{ id: number; name: string; code?: string }>;
+  managedClassIds?: number[];
+  managedSectionIds?: number[];
   joiningDate: string;
   qualification: string;
   documents: TeacherDocument[];
@@ -161,6 +165,9 @@ function loadTeachers(): TeacherRecord[] {
         sectionId: Number(assignment.sectionId),
         subjectId: Number(assignment.subjectId),
       })) : [],
+      managedClasses: Array.isArray(teacher.managedClasses) ? teacher.managedClasses : [],
+      managedClassIds: Array.isArray(teacher.managedClassIds) ? teacher.managedClassIds.map(Number) : [],
+      managedSectionIds: Array.isArray(teacher.managedSectionIds) ? teacher.managedSectionIds.map(Number) : [],
       joiningDate: teacher.joiningDate || new Date().toISOString().slice(0, 10),
       qualification: teacher.qualification || '',
       salary: teacher.salary != null ? teacher.salary : '',
@@ -187,7 +194,7 @@ export default function TeacherDirectory() {
   // Never flash a previous tenant's cached directory while the authenticated
   // school-scoped API is loading.
   const [teachers, setTeachers] = useState<TeacherRecord[]>(() => (
-    localStorage.getItem('school_erp_api_token') ? [] : loadTeachers()
+    getStoredAuthenticatedUser() ? [] : loadTeachers()
   ));
   const [loginUsers, setLoginUsers] = useState<any[]>(loadLoginUsers);
   const [search, setSearch] = useState('');
@@ -207,6 +214,8 @@ export default function TeacherDirectory() {
     subjectIds: [] as number[],
     assignedSectionIds: [] as number[],
     teachingAssignments: [] as TeachingAssignment[],
+    managedClassIds: [] as number[],
+    managedSectionIds: [] as number[],
     joiningDate: new Date().toISOString().slice(0, 10),
     qualification: '',
     status: 'Active' as 'Active' | 'Inactive',
@@ -240,7 +249,7 @@ export default function TeacherDirectory() {
   const [academicSubjects, setAcademicSubjects] = useState<AcademicSubject[]>([]);
   const [academicStructureError, setAcademicStructureError] = useState('');
   const [teacherListError, setTeacherListError] = useState('');
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const classOptions = academicClasses;
   const sectionOptions = academicSections;
   const sectionLabel = (section: AcademicSection) => {
@@ -314,6 +323,9 @@ export default function TeacherDirectory() {
         sectionId: Number(assignment.sectionId),
         subjectId: Number(assignment.subjectId),
       })),
+      managedClasses: teacher.managedClasses || [],
+      managedClassIds: Array.isArray(teacher.managedClassIds) ? teacher.managedClassIds.map(Number) : [],
+      managedSectionIds: Array.isArray(teacher.managedSectionIds) ? teacher.managedSectionIds.map(Number) : [],
       joiningDate: teacher.joiningDate,
       qualification: teacher.qualification,
       salary: teacher.salary != null ? teacher.salary : '',
@@ -416,6 +428,8 @@ export default function TeacherDirectory() {
       subjectIds: [],
       assignedSectionIds: [],
       teachingAssignments: [],
+      managedClassIds: [],
+      managedSectionIds: [],
       joiningDate: new Date().toISOString().slice(0, 10),
       qualification: '',
       status: 'Active',
@@ -473,6 +487,8 @@ export default function TeacherDirectory() {
           body.append('subjectIds', JSON.stringify(form.subjectIds));
           body.append('assignedSectionIds', JSON.stringify(form.assignedSectionIds));
           body.append('teachingAssignments', JSON.stringify(teachingAssignments));
+          body.append('managedClassIds', JSON.stringify(form.managedClassIds));
+          body.append('managedSectionIds', JSON.stringify(form.managedSectionIds));
           body.append('joiningDate', form.joiningDate);
           body.append('qualification', form.qualification);
           body.append('status', form.status);
@@ -488,6 +504,9 @@ export default function TeacherDirectory() {
             assignedSections: Array.isArray(saved.assignedSections) ? saved.assignedSections : assignedSections,
             subjectIds: Array.isArray(saved.subjectIds) ? saved.subjectIds.map(Number) : form.subjectIds,
             subjects: Array.isArray(saved.subjects) ? saved.subjects : subjects,
+            managedClasses: saved.managedClasses || current?.managedClasses || [],
+            managedClassIds: Array.isArray(saved.managedClassIds) ? saved.managedClassIds.map(Number) : form.managedClassIds,
+            managedSectionIds: Array.isArray(saved.managedSectionIds) ? saved.managedSectionIds.map(Number) : form.managedSectionIds,
             teachingAssignments: Array.isArray(saved.teachingAssignments) ? saved.teachingAssignments.map((assignment) => ({
               ...assignment,
               sectionId: Number(assignment.sectionId),
@@ -516,6 +535,16 @@ export default function TeacherDirectory() {
         ...teacherProfileForm,
         subjects,
         assignedSections,
+        managedClassIds: form.managedClassIds,
+        managedSectionIds: form.managedSectionIds,
+        managedClasses: [
+          ...form.managedClassIds.map((cId) => ({ id: cId, name: classOptions.find((c) => c.id === cId)?.name || `Class ${cId}` })),
+          ...form.managedSectionIds.map((sId) => {
+            const sec = sectionOptions.find((s) => s.id === sId);
+            const cls = classOptions.find((c) => c.id === sec?.classId);
+            return { id: sId, name: `${cls?.name || 'Class'} (${sec?.name || sId})`, code: `SEC-${sId}` };
+          }),
+        ],
         photoUrl: photoPreview || teacher.photoUrl,
         photoFile: photoFile || undefined,
       } : teacher);
@@ -574,6 +603,8 @@ export default function TeacherDirectory() {
         body.append('subjectIds', JSON.stringify(form.subjectIds));
         body.append('assignedSectionIds', JSON.stringify(form.assignedSectionIds));
         body.append('teachingAssignments', JSON.stringify(teachingAssignments));
+        body.append('managedClassIds', JSON.stringify(form.managedClassIds));
+        body.append('managedSectionIds', JSON.stringify(form.managedSectionIds));
         body.append('joiningDate', form.joiningDate);
         if (form.qualification) body.append('qualification', form.qualification);
         body.append('status', form.status);
@@ -590,6 +621,16 @@ export default function TeacherDirectory() {
           assignedSectionIds: Array.isArray(created.assignedSectionIds) ? created.assignedSectionIds.map(Number) : form.assignedSectionIds,
           subjects: Array.isArray(created.subjects) ? created.subjects : subjects,
           assignedSections: Array.isArray(created.assignedSections) ? created.assignedSections : assignedSections,
+          managedClasses: created.managedClasses || [
+            ...form.managedClassIds.map((cId) => ({ id: cId, name: classOptions.find((c) => c.id === cId)?.name || `Class ${cId}` })),
+            ...form.managedSectionIds.map((sId) => {
+              const sec = sectionOptions.find((s) => s.id === sId);
+              const cls = classOptions.find((c) => c.id === sec?.classId);
+              return { id: sId, name: `${cls?.name || 'Class'} (${sec?.name || sId})`, code: `SEC-${sId}` };
+            }),
+          ],
+          managedClassIds: Array.isArray(created.managedClassIds) ? created.managedClassIds.map(Number) : form.managedClassIds,
+          managedSectionIds: Array.isArray(created.managedSectionIds) ? created.managedSectionIds.map(Number) : form.managedSectionIds,
           documents: Array.isArray(created.documents) ? created.documents.map((doc) => ({
             id: doc.id,
             name: doc.name,
@@ -630,6 +671,16 @@ export default function TeacherDirectory() {
       assignedSections,
       assignedSectionIds: form.assignedSectionIds,
       teachingAssignments,
+      managedClassIds: form.managedClassIds,
+      managedSectionIds: form.managedSectionIds,
+      managedClasses: [
+        ...form.managedClassIds.map((cId) => ({ id: cId, name: classOptions.find((c) => c.id === cId)?.name || `Class ${cId}` })),
+        ...form.managedSectionIds.map((sId) => {
+          const sec = sectionOptions.find((s) => s.id === sId);
+          const cls = classOptions.find((c) => c.id === sec?.classId);
+          return { id: sId, name: `${cls?.name || 'Class'} (${sec?.name || sId})`, code: `SEC-${sId}` };
+        }),
+      ],
       username,
       photoUrl: photoPreview || undefined,
       photoFile: photoFile || undefined,
@@ -973,6 +1024,13 @@ export default function TeacherDirectory() {
               .map((subjectId) => ({ sectionId, subjectId }));
           })
         : [];
+    const initialManagedClassIds = Array.isArray(teacher.managedClassIds) && teacher.managedClassIds.length > 0
+      ? teacher.managedClassIds
+      : (teacher.managedClasses || []).filter((c) => !c.code?.startsWith('SEC-')).map((c) => c.id);
+    const initialManagedSectionIds = Array.isArray(teacher.managedSectionIds)
+      ? teacher.managedSectionIds
+      : [];
+
     setEditingId(teacher.id);
     setIsAdding(true);
     setForm({
@@ -984,6 +1042,8 @@ export default function TeacherDirectory() {
       subjectIds: Array.from(new Set(teachingAssignments.map((assignment) => assignment.subjectId))),
       assignedSectionIds: Array.from(new Set(teachingAssignments.map((assignment) => assignment.sectionId))),
       teachingAssignments,
+      managedClassIds: initialManagedClassIds,
+      managedSectionIds: initialManagedSectionIds,
       joiningDate: teacher.joiningDate,
       qualification: teacher.qualification,
       status: teacher.status,
@@ -1280,6 +1340,167 @@ export default function TeacherDirectory() {
                 </div>
               )}
             </div>
+
+            {/* ASSIGN AS CLASS TEACHER (OPTIONAL) */}
+            <div className="md:col-span-3 rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/60 via-white to-purple-50/40 p-4 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-xs">
+                      <Award className="h-3.5 w-3.5" />
+                    </span>
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                      Assign as Class Teacher (Optional)
+                    </label>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Designate this teacher as the Class Teacher for a class or specific section(s). Class Teachers can monitor all homework across all subjects.
+                  </p>
+                </div>
+                {(form.managedClassIds.length > 0 || form.managedSectionIds.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => setForm((curr) => ({ ...curr, managedClassIds: [], managedSectionIds: [] }))}
+                    className="self-start text-[11px] font-bold text-rose-600 hover:text-rose-700 hover:underline cursor-pointer"
+                  >
+                    Clear Class Teacher
+                  </button>
+                )}
+              </div>
+
+              {classOptions.length === 0 ? (
+                <p className="mt-3 text-xs text-slate-400">No classes found in Academic Setup.</p>
+              ) : (
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {classOptions.map((classroom) => {
+                    const classSections = sectionOptions.filter((section) => section.classId === classroom.id);
+                    const isClassSelected = form.managedClassIds.includes(classroom.id);
+                    const hasSectionSelected = classSections.some((s) => form.managedSectionIds.includes(s.id));
+                    const isHighlighted = isClassSelected || hasSectionSelected;
+
+                    return (
+                      <div
+                        key={`managed-cls-${classroom.id}`}
+                        className={`rounded-xl border p-3 transition-all ${
+                          isHighlighted
+                            ? 'border-indigo-400 bg-indigo-50/40 shadow-xs ring-1 ring-indigo-300'
+                            : 'border-slate-200 bg-white hover:border-slate-300'
+                        }`}
+                      >
+                        <label className="flex items-center justify-between gap-2 cursor-pointer">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={isClassSelected}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setForm((curr) => {
+                                  const nextClassIds = checked
+                                    ? Array.from(new Set([...curr.managedClassIds, classroom.id]))
+                                    : curr.managedClassIds.filter((id) => id !== classroom.id);
+                                  return { ...curr, managedClassIds: nextClassIds };
+                                });
+                              }}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <span className="text-xs font-extrabold text-slate-800">
+                              {classroom.name}
+                            </span>
+                          </div>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isClassSelected ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                            {isClassSelected ? 'Class Teacher' : 'All sections'}
+                          </span>
+                        </label>
+
+                        {classSections.length > 0 && (
+                          <div className="mt-2.5 pt-2 border-t border-slate-100">
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                              Or specific section(s):
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {classSections.map((section) => {
+                                const isSecSelected = form.managedSectionIds.includes(section.id);
+                                return (
+                                  <button
+                                    key={`managed-sec-${section.id}`}
+                                    type="button"
+                                    onClick={() => {
+                                      setForm((curr) => {
+                                        const exists = curr.managedSectionIds.includes(section.id);
+                                        return {
+                                          ...curr,
+                                          managedSectionIds: exists
+                                            ? curr.managedSectionIds.filter((id) => id !== section.id)
+                                            : [...curr.managedSectionIds, section.id],
+                                        };
+                                      });
+                                    }}
+                                    className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-bold transition-all cursor-pointer ${
+                                      isSecSelected
+                                        ? 'bg-purple-600 text-white shadow-xs'
+                                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                    }`}
+                                  >
+                                    <span>Sec {section.name}</span>
+                                    {isSecSelected && <Check className="h-3 w-3" />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(form.managedClassIds.length > 0 || form.managedSectionIds.length > 0) && (
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-white border border-indigo-200 p-2.5 text-xs">
+                  <span className="font-extrabold text-indigo-900 flex items-center gap-1.5">
+                    <Award className="h-3.5 w-3.5 text-indigo-600" />
+                    Designated Class Teacher for:
+                  </span>
+                  {form.managedClassIds.map((classId) => {
+                    const cls = classOptions.find((c) => c.id === classId);
+                    return (
+                      <span
+                        key={`badge-cls-${classId}`}
+                        className="inline-flex items-center gap-1 rounded-lg bg-indigo-50 px-2.5 py-1 text-[11px] font-bold text-indigo-700 border border-indigo-200"
+                      >
+                        {cls?.name || `Class ${classId}`} (Entire Class)
+                        <button
+                          type="button"
+                          onClick={() => setForm((curr) => ({ ...curr, managedClassIds: curr.managedClassIds.filter((id) => id !== classId) }))}
+                          className="ml-1 text-indigo-400 hover:text-indigo-700 cursor-pointer font-bold"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                  {form.managedSectionIds.map((secId) => {
+                    const sec = sectionOptions.find((s) => s.id === secId);
+                    const cls = classOptions.find((c) => c.id === sec?.classId);
+                    return (
+                      <span
+                        key={`badge-sec-${secId}`}
+                        className="inline-flex items-center gap-1 rounded-lg bg-purple-50 px-2.5 py-1 text-[11px] font-bold text-purple-700 border border-purple-200"
+                      >
+                        {cls?.name || 'Class'} - Sec {sec?.name || secId}
+                        <button
+                          type="button"
+                          onClick={() => setForm((curr) => ({ ...curr, managedSectionIds: curr.managedSectionIds.filter((id) => id !== secId) }))}
+                          className="ml-1 text-purple-400 hover:text-purple-700 cursor-pointer font-bold"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
             <input required type="date" value={form.joiningDate} onChange={(e) => setForm({ ...form, joiningDate: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
             <input value={form.qualification} onChange={(e) => setForm({ ...form, qualification: e.target.value })} placeholder="Qualification" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
             <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as 'Active' | 'Inactive' })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm">
@@ -1334,14 +1555,58 @@ export default function TeacherDirectory() {
                         </div>
                       )}
                       <div>
-                        <p className="font-extrabold text-slate-900">{teacher.name}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-extrabold text-slate-900">{teacher.name}</p>
+                          {teacher.managedClasses && teacher.managedClasses.length > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-extrabold text-purple-800 border border-purple-200 shadow-2xs">
+                              <Award className="h-3 w-3 text-purple-600" />
+                              Class Teacher
+                            </span>
+                          )}
+                        </div>
+                        {teacher.managedClasses && teacher.managedClasses.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {teacher.managedClasses.map((mc) => (
+                              <span
+                                key={`badge-${teacher.id}-${mc.id || mc.name}`}
+                                className="inline-flex items-center gap-1 rounded bg-purple-50 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700 border border-purple-200/80"
+                              >
+                                {mc.name}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                         <p className="mt-1 flex items-center gap-1 text-xs text-slate-500"><Mail className="h-3 w-3" /> {teacher.email}</p>
                         <p className="mt-1 flex items-center gap-1 text-xs text-slate-500"><Phone className="h-3 w-3" /> {teacher.phone}</p>
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-xs text-slate-600">{(teacher.subjects || []).join(', ') || '-'}</td>
-                  <td className="px-4 py-3 text-xs text-slate-600">{(teacher.assignedSections || []).join(', ') || '-'}</td>
+                  <td className="px-4 py-3 text-xs">
+                    <div className="flex flex-wrap gap-1 max-w-[180px]">
+                      {(teacher.subjects && teacher.subjects.length > 0) ? (
+                        teacher.subjects.map((s) => (
+                          <span key={s} className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                            {s}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-slate-400">-</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-xs">
+                    <div className="flex flex-wrap gap-1 max-w-[200px]">
+                      {(teacher.assignedSections && teacher.assignedSections.length > 0) ? (
+                        teacher.assignedSections.map((sec) => (
+                          <span key={sec} className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-700 border border-indigo-100">
+                            {sec}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-slate-400">-</span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-4 py-3">
                     {(() => {
                       return (
@@ -1391,35 +1656,37 @@ export default function TeacherDirectory() {
                       {teacher.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-right">
-                    {(() => {
-                      const hasPending = teacher.documents.some((d) => d.status === 'Pending' || d.status === 'Uploaded');
-                      const allVerified = teacher.documents.length > 0 && teacher.documents.every((d) => d.status === 'Verified');
-                      return (
-                        <button
-                          onClick={() => setDocumentsTeacherId(teacher.id)}
-                          className={`relative mr-2 rounded-lg border p-2 transition-all ${
-                            hasPending
-                              ? 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'
-                              : allVerified
-                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                              : 'border-indigo-200 text-indigo-600 hover:bg-indigo-50'
-                          }`}
-                          title={`Documents (${teacher.documents.length})${hasPending ? ' • Pending Verification' : allVerified ? ' • All Verified' : ''}`}
-                        >
-                          <FileText className="h-4 w-4" />
-                          {hasPending && (
-                            <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })()}
-                    <button onClick={() => startEdit(teacher)} className="mr-2 rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50" title="Edit teacher details"><Edit className="h-4 w-4" /></button>
-                    <button onClick={() => toggleStatus(teacher)} className="mr-2 rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50" title="Toggle status"><UserRoundCheck className="h-4 w-4" /></button>
-                    <button onClick={() => deleteTeacher(teacher)} className="rounded-lg border border-red-200 p-2 text-red-600 hover:bg-red-50" title="Delete teacher"><Trash2 className="h-4 w-4" /></button>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <div className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap">
+                      {(() => {
+                        const hasPending = teacher.documents.some((d) => d.status === 'Pending' || d.status === 'Uploaded');
+                        const allVerified = teacher.documents.length > 0 && teacher.documents.every((d) => d.status === 'Verified');
+                        return (
+                          <button
+                            onClick={() => setDocumentsTeacherId(teacher.id)}
+                            className={`relative rounded-lg border p-2 transition-all cursor-pointer ${
+                              hasPending
+                                ? 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                                : allVerified
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : 'border-indigo-200 text-indigo-600 hover:bg-indigo-50'
+                            }`}
+                            title={`Documents (${teacher.documents.length})${hasPending ? ' • Pending Verification' : allVerified ? ' • All Verified' : ''}`}
+                          >
+                            <FileText className="h-4 w-4" />
+                            {hasPending && (
+                              <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })()}
+                      <button onClick={() => startEdit(teacher)} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50 cursor-pointer" title="Edit teacher details"><Edit className="h-4 w-4" /></button>
+                      <button onClick={() => toggleStatus(teacher)} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50 cursor-pointer" title="Toggle status"><UserRoundCheck className="h-4 w-4" /></button>
+                      <button onClick={() => deleteTeacher(teacher)} className="rounded-lg border border-red-200 p-2 text-red-600 hover:bg-red-50 cursor-pointer" title="Delete teacher"><Trash2 className="h-4 w-4" /></button>
+                    </div>
                   </td>
                 </tr>
               ))}

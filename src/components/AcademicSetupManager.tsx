@@ -10,6 +10,7 @@ import {
   GraduationCap,
   Layers3,
   Loader2,
+  UserCheck,
   Plus,
   RefreshCw,
   Save,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react';
 import { getErrorData, getErrorMessage, getErrorStatus } from '../utils/apiError';
 import { emitNotification } from '../services/notificationBus';
+import { useGetTeachersQuery } from '../store/api/teacherApi';
 import {
   useGetAcademicYearsQuery,
   useCreateAcademicYearMutation,
@@ -89,6 +91,7 @@ interface ClassForm {
   code: string;
   sortOrder: number;
   subjectIds: number[];
+  classTeacherId: number | null;
 }
 
 interface SectionForm {
@@ -136,6 +139,7 @@ const emptyClassForm = (): ClassForm => ({
   code: '',
   sortOrder: 0,
   subjectIds: [],
+  classTeacherId: null,
 });
 
 const emptySectionForm = (): SectionForm => ({
@@ -244,6 +248,7 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
   const { data: classRows = [], isLoading: classesLoading, refetch: refetchClasses } = useGetClassesQuery();
   const { data: sectionRows = [], isLoading: sectionsLoading, refetch: refetchSections } = useGetSectionsQuery();
   const { data: subjectRows = [], isLoading: subjectsLoading, refetch: refetchSubjects } = useGetSubjectsQuery();
+  const { data: teacherRows = [] } = useGetTeachersQuery();
 
   const [createYear] = useCreateAcademicYearMutation();
   const [updateYear] = useUpdateAcademicYearMutation();
@@ -272,6 +277,7 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
   const [subjectName, setSubjectName] = useState('');
 
   const [editingYearId, setEditingYearId] = useState<number | null>(null);
+  const [isAddingYear, setIsAddingYear] = useState(false);
   const [editingClassId, setEditingClassId] = useState<number | null>(null);
   const [editingSectionId, setEditingSectionId] = useState<number | null>(null);
   const [editingSubjectId, setEditingSubjectId] = useState<number | null>(null);
@@ -366,7 +372,23 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
 
   const cancelYearEdit = () => {
     setEditingYearId(null);
+    setIsAddingYear(false);
     setYearForm(emptyYearForm());
+  };
+
+  const setAsActiveYear = async (year: AcademicYearRecord) => {
+    if (year.is_active) return;
+    await mutate(
+      `year-activate-${year.id}`,
+      `"${year.name}" is now set as the active academic year.`,
+      () => updateYear({
+        id: year.id,
+        name: year.name,
+        startsOn: year.startsOn,
+        endsOn: year.endsOn,
+        is_active: true,
+      }).unwrap(),
+    );
   };
 
   const cancelClassEdit = () => {
@@ -396,13 +418,6 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
 
   const saveYear = async (event: FormEvent) => {
     event.preventDefault();
-    if (editingYearId === null && academicYears.length >= 1) {
-      setError({
-        title: 'Batch limit reached',
-        message: 'Only one batch is permitted per school. Please edit the existing batch as the year changes.',
-      });
-      return;
-    }
     if (yearForm.endsOn <= yearForm.startsOn) {
       setError({ title: 'Check the academic-year dates', message: 'The end date must be after the start date.' });
       return;
@@ -413,7 +428,7 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
       `Academic year ${editing ? 'updated' : 'created'} in the database.`,
       () => editing
         ? updateYear({ id: editingYearId!, name: yearForm.name.trim(), startsOn: yearForm.startsOn, endsOn: yearForm.endsOn, is_active: yearForm.isActive }).unwrap()
-        : createYear({ name: yearForm.name.trim(), startsOn: yearForm.startsOn, endsOn: yearForm.endsOn, is_active: yearForm.isActive }).unwrap(),
+        : createYear({ name: yearForm.name.trim(), startsOn: yearForm.startsOn, endsOn: yearForm.endsOn, is_active: yearForm.isActive || academicYears.length === 0 }).unwrap(),
     );
     if (saved) cancelYearEdit();
   };
@@ -427,8 +442,8 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
       `Class ${editing ? 'updated' : 'created'} in the database.`,
       async () => {
         savedClass = editing
-          ? await updateClass({ id: editingClassId!, name: classForm.name.trim(), code: classForm.code.trim(), sortOrder: classForm.sortOrder, subjectIds: classForm.subjectIds }).unwrap()
-          : await createClass({ name: classForm.name.trim(), code: classForm.code.trim(), sortOrder: classForm.sortOrder, subjectIds: classForm.subjectIds }).unwrap();
+          ? await updateClass({ id: editingClassId!, name: classForm.name.trim(), code: classForm.code.trim(), sortOrder: classForm.sortOrder, subjectIds: classForm.subjectIds, classTeacherId: classForm.classTeacherId }).unwrap()
+          : await createClass({ name: classForm.name.trim(), code: classForm.code.trim(), sortOrder: classForm.sortOrder, subjectIds: classForm.subjectIds, classTeacherId: classForm.classTeacherId }).unwrap();
       },
     );
     if (saved) {
@@ -671,17 +686,32 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
       <div className="space-y-6">
         {/* Step 1: Academic Year & Batch */}
         <article id="academic-years" className="scroll-mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-100 bg-slate-50/70 p-4">
-            <h3 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
-              <StepBadge number={1} />
-              <CalendarDays className="h-4 w-4 text-indigo-600" />
-              Academic Year & Batch
-            </h3>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Configure the active school term and batch dates shown across academic selectors, student history, and reports.
-            </p>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/70 p-4">
+            <div>
+              <h3 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                <StepBadge number={1} />
+                <CalendarDays className="h-4 w-4 text-indigo-600" />
+                Academic Year & Batch
+              </h3>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Configure the active school term and batch dates shown across academic selectors, student history, and reports.
+              </p>
+            </div>
+            {!isAddingYear && editingYearId === null && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAddingYear(true);
+                  setEditingYearId(null);
+                  setYearForm(emptyYearForm());
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs cursor-pointer transition-all"
+              >
+                <Plus className="h-3.5 w-3.5" /> Add Academic Year
+              </button>
+            )}
           </div>
-          {(academicYears.length === 0 || editingYearId !== null) ? (
+          {(academicYears.length === 0 || editingYearId !== null || isAddingYear) ? (
             <form onSubmit={saveYear} className="grid gap-3 border-b border-slate-100 p-4 sm:grid-cols-3">
               <label className={`${labelClass} sm:col-span-3`}>
                 Academic year / Batch name
@@ -728,6 +758,7 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
               <FormActions
                 entityLabel="academic year"
                 editing={editingYearId !== null}
+                showCancel={academicYears.length > 0 && (isAddingYear || editingYearId !== null)}
                 busy={busyAction === 'year-save'}
                 onCancel={cancelYearEdit}
               />
@@ -754,16 +785,30 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
                     <span className="font-semibold text-slate-600">Term Duration:</span> {year.startsOn} to {year.endsOn}
                   </p>
                 </div>
-                <RowActions
-                  label={year.name}
-                  disabled={Boolean(busyAction)}
-                  deleting={busyAction === `year-delete-${year.id}`}
-                  onEdit={() => {
-                    setEditingYearId(year.id);
-                    setYearForm({ name: year.name, startsOn: year.startsOn, endsOn: year.endsOn, isActive: year.is_active });
-                  }}
-                  onDelete={() => void remove('year', year.id, `academic year ${year.name}`, `/academic-years/${year.id}/`)}
-                />
+                <div className="flex items-center gap-2">
+                  {!year.is_active && (
+                    <button
+                      type="button"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => void setAsActiveYear(year)}
+                      className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-bold text-indigo-700 hover:bg-indigo-100 transition cursor-pointer"
+                      title="Set as active academic year for the school"
+                    >
+                      <CheckCircle2 className="h-3 w-3" /> Make Active
+                    </button>
+                  )}
+                  <RowActions
+                    label={year.name}
+                    disabled={Boolean(busyAction)}
+                    deleting={busyAction === `year-delete-${year.id}`}
+                    onEdit={() => {
+                      setIsAddingYear(false);
+                      setEditingYearId(year.id);
+                      setYearForm({ name: year.name, startsOn: year.startsOn, endsOn: year.endsOn, isActive: year.is_active });
+                    }}
+                    onDelete={() => void remove('year', year.id, `academic year ${year.name}`, `/academic-years/${year.id}/`)}
+                  />
+                </div>
               </div>
             )) : <EmptyRow text="No academic years have been created." />}
           </div>
@@ -920,6 +965,27 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
                 </p>
               )}
             </fieldset>
+            <div className="md:col-span-2">
+              <label className={labelClass}>Class Teacher</label>
+              <select
+                value={classForm.classTeacherId ?? ''}
+                onChange={(event) => setClassForm((current) => ({
+                  ...current,
+                  classTeacherId: event.target.value ? Number(event.target.value) : null,
+                }))}
+                className={inputClass}
+              >
+                <option value="">-- No Class Teacher Assigned --</option>
+                {teacherRows.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name} ({t.email})
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[11px] text-slate-500">
+                The designated class teacher has complete visibility across all subjects' homework and student submissions for this class.
+              </p>
+            </div>
             <FormActions
               entityLabel="class"
               editing={editingClassId !== null}
@@ -946,7 +1012,7 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
                       deleting={busyAction === `class-delete-${classroom.id}`}
                       onEdit={() => {
                         setEditingClassId(classroom.id);
-                        setClassForm({ name: classroom.name, code: classroom.code, sortOrder: classroom.sortOrder, subjectIds: assignedSubjectIds });
+                        setClassForm({ name: classroom.name, code: classroom.code, sortOrder: classroom.sortOrder, subjectIds: assignedSubjectIds, classTeacherId: classroom.classTeacherId ?? null });
                       }}
                       onDelete={() => void remove('class', classroom.id, `class ${classroom.name}`, `/classes/${classroom.id}/`)}
                     />
@@ -984,6 +1050,45 @@ export default function AcademicSetupManager({ onChanged, onOpenTeachers, classN
                     )) : (
                       <span className="text-xs italic text-slate-400">No subjects assigned</span>
                     )}
+                  </div>
+                  <div className="mt-3.5 rounded-lg border border-slate-200/90 bg-slate-50/70 p-2.5">
+                    <div className="flex items-center justify-between gap-1.5 mb-1.5">
+                      <span className="flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
+                        <UserCheck className="h-3.5 w-3.5 text-indigo-600" /> Class Teacher
+                      </span>
+                      {classroom.classTeacherName ? (
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-800">
+                          Assigned
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-bold text-amber-800">
+                          Not Assigned
+                        </span>
+                      )}
+                    </div>
+                    <select
+                      value={classroom.classTeacherId ?? ''}
+                      disabled={Boolean(busyAction)}
+                      onChange={async (e) => {
+                        const newTeacherId = e.target.value ? Number(e.target.value) : null;
+                        const tName = teacherRows.find((t) => t.id === newTeacherId)?.name || 'None';
+                        await mutate(
+                          `class-teacher-${classroom.id}`,
+                          newTeacherId
+                            ? `Assigned ${tName} as Class Teacher for ${classroom.name}.`
+                            : `Removed Class Teacher assignment for ${classroom.name}.`,
+                          () => updateClass({ id: classroom.id, classTeacherId: newTeacherId }).unwrap(),
+                        );
+                      }}
+                      className="w-full text-xs font-semibold rounded-md border border-slate-300 bg-white py-1 px-2 text-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-hidden disabled:opacity-50"
+                    >
+                      <option value="">-- No Class Teacher Assigned --</option>
+                      {teacherRows.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} ({t.email})
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               );
@@ -1113,10 +1218,10 @@ function StepBadge({ number }: { number: number }) {
   return <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-[11px] font-black text-white">{number}</span>;
 }
 
-function FormActions({ entityLabel, editing, busy, disabled = false, onCancel }: { entityLabel: string; editing: boolean; busy: boolean; disabled?: boolean; onCancel: () => void }) {
+function FormActions({ entityLabel, editing, showCancel = editing, busy, disabled = false, onCancel }: { entityLabel: string; editing: boolean; showCancel?: boolean; busy: boolean; disabled?: boolean; onCancel: () => void }) {
   return (
     <div className="mt-1 flex items-center justify-end gap-2 sm:col-span-2 md:col-span-2">
-      {editing && (
+      {showCancel && (
         <button type="button" onClick={onCancel} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
           <X className="h-3.5 w-3.5" /> Cancel
         </button>

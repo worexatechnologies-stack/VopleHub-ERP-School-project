@@ -1,8 +1,8 @@
 import uuid
-import mimetypes
 from django.db import transaction
 from django.db.models import Q, Prefetch, Max
 from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
@@ -11,6 +11,13 @@ from rest_framework import serializers
 from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema, inline_serializer
 
 from apps.accounts.models import ParentProfile, User
+from apps.common.storage import sanitize_filename
+from apps.common.validators import (
+    MAX_CHAT_ATTACHMENT_COUNT,
+    MAX_CHAT_MESSAGE_UPLOAD_BYTES,
+    detected_content_type,
+    validate_chat_attachment,
+)
 from apps.staff.models import Teacher
 from apps.sis.models import Student
 from .models import (
@@ -162,52 +169,6 @@ class ChatContactsListView(APIView):
                     'assignedSections': assigned_sections,
                     'subjects': subjects,
                     'teachingAssignments': assignments_data,
-                })
-
-            # Include active parents for the Admin (both in search and initial contacts)
-            parents_qs = ParentProfile.objects.filter(
-                user__school=school, user__is_active=True
-            ).exclude(user=user)
-            if search_q:
-                parents_qs = parents_qs.filter(
-                    Q(user__first_name__icontains=search_q) |
-                    Q(user__last_name__icontains=search_q) |
-                    Q(user__email__icontains=search_q) |
-                    Q(phone__icontains=search_q) |
-                    Q(students__name__icontains=search_q) |
-                    Q(students__admission_no__icontains=search_q)
-                ).distinct().select_related('user').prefetch_related('students')[:25]
-            else:
-                parents_qs = parents_qs.distinct().select_related('user').prefetch_related('students')[:25]
-
-            for pp in parents_qs:
-                p_user = pp.user
-                if not p_user or p_user.id == user.id:
-                    continue
-                st_list = [
-                    {
-                        'id': s.id,
-                        'name': s.name,
-                        'className': s.class_name,
-                        'section': s.section,
-                        'rollNo': s.roll_no,
-                        'admissionNo': s.admission_no,
-                    }
-                    for s in pp.students.filter(school=school, status='Active')
-                ]
-                summaries = [f"{s['name']} ({s['className']} - Sec {s['section']})" for s in st_list]
-                contacts.append({
-                    'id': f'parent-{p_user.id}',
-                    'userId': p_user.id,
-                    'name': p_user.get_full_name() or p_user.username,
-                    'role': 'Parent',
-                    'email': p_user.email,
-                    'phone': pp.phone or '',
-                    'isOnline': p_user.is_online_computed,
-                    'lastSeenAt': p_user.last_seen_at.isoformat() if p_user.last_seen_at else None,
-                    'students': st_list,
-                    'studentSummary': f"Parent of {', '.join(summaries)}" if summaries else 'Parent',
-                    'studentNames': [s['name'] for s in st_list],
                 })
 
             contacts = [c for c in contacts if c.get('userId') != user.id]
@@ -713,7 +674,24 @@ class ConversationMessagesView(APIView):
             if existing:
                 return Response(DirectMessageSerializer(existing, context={'request': request}).data, status=status.HTTP_200_OK)
 
-        if not body and not request.FILES:
+        uploaded_files = []
+        if 'files' in request.FILES:
+            uploaded_files.extend(request.FILES.getlist('files'))
+        else:
+            for key in request.FILES:
+                uploaded_files.extend(request.FILES.getlist(key))
+
+        if len(uploaded_files) > MAX_CHAT_ATTACHMENT_COUNT:
+            return Response({'detail': f'You can attach up to {MAX_CHAT_ATTACHMENT_COUNT} files per message.'}, status=status.HTTP_400_BAD_REQUEST)
+        if sum(upload.size for upload in uploaded_files) > MAX_CHAT_MESSAGE_UPLOAD_BYTES:
+            return Response({'detail': 'Attachments exceed the 25 MB total limit.'}, status=status.HTTP_400_BAD_REQUEST)
+        for upload in uploaded_files:
+            try:
+                validate_chat_attachment(upload)
+            except DjangoValidationError as exc:
+                return Response({'detail': exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not body and not uploaded_files:
             return Response({'detail': 'Message content or attachment is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         recipient = conv.get_other_participant(request.user)
@@ -730,19 +708,12 @@ class ConversationMessagesView(APIView):
             )
 
             # Handle file attachments if present (avoid duplicates)
-            uploaded_files = []
-            if 'files' in request.FILES:
-                uploaded_files.extend(request.FILES.getlist('files'))
-            else:
-                for key in request.FILES:
-                    uploaded_files.extend(request.FILES.getlist(key))
-
             for file_obj in uploaded_files:
-                content_type = file_obj.content_type or mimetypes.guess_type(file_obj.name)[0] or 'application/octet-stream'
+                content_type = detected_content_type(file_obj)
                 file_bytes = file_obj.read()
                 MessageAttachment.objects.create(
                     message=dm,
-                    original_name=file_obj.name,
+                    original_name=sanitize_filename(file_obj.name)[:255],
                     content_type=content_type,
                     file_size=len(file_bytes),
                     file_data=file_bytes,
@@ -974,35 +945,13 @@ class UnreadCountView(APIView):
 
 class AttachmentDownloadView(APIView):
     """Protected attachment download: verifies user is an authorized conversation participant."""
-    permission_classes = [permissions.AllowAny]
-
-    def options(self, request, *args, **kwargs):
-        from django.http import HttpResponse
-        response = HttpResponse()
-        response['Access-Control-Allow-Origin'] = '*'
-        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
-        return response
+    permission_classes = [permissions.IsAuthenticated]
 
     @extend_schema(
         responses={200: OpenApiResponse(description='Raw binary file stream')},
     )
     def get(self, request, attachment_id):
         user = request.user
-        if not user or not user.is_authenticated:
-            token_str = request.query_params.get('token')
-            if token_str:
-                try:
-                    token_str = token_str.replace('Bearer ', '').strip()
-                    from rest_framework_simplejwt.tokens import AccessToken
-                    access_token = AccessToken(token_str)
-                    user_id = access_token.get('user_id') or access_token.get('id') or access_token.get('sub')
-                    user = User.objects.filter(pk=user_id).first()
-                except Exception:
-                    return Response({'detail': 'Invalid or expired token.'}, status=status.HTTP_401_UNAUTHORIZED)
-            if not user or not user.is_authenticated:
-                return Response({'detail': 'Authentication credentials were not provided.'}, status=status.HTTP_401_UNAUTHORIZED)
-
         import uuid
         att_id_str = str(attachment_id).strip()
         try:
@@ -1014,12 +963,10 @@ class AttachmentDownloadView(APIView):
         if not attachment:
             return Response({'detail': 'Attachment not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if (
-            not is_user_in_conversation(user, attachment.message.conversation)
-            and attachment.message.sender_id != user.id
-            and attachment.message.recipient_id != user.id
-            and user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
-        ):
+        conv = attachment.message.conversation
+        # Attachments are private to conversation participants. Tenant membership
+        # or a platform-admin role alone does not grant access to private chats.
+        if not is_user_in_conversation(user, conv):
             return Response({'detail': 'Access to this attachment is denied.'}, status=status.HTTP_403_FORBIDDEN)
 
         raw_bytes = None
@@ -1052,8 +999,9 @@ class AttachmentDownloadView(APIView):
 
         from django.http import HttpResponse
         response = HttpResponse(raw_bytes, content_type=attachment.content_type or 'application/octet-stream')
-        response['Content-Disposition'] = f'inline; filename="{attachment.original_name}"'
+        response['Content-Disposition'] = f'attachment; filename="{sanitize_filename(attachment.original_name)}"'
         response['Content-Length'] = len(raw_bytes)
+        response['X-Content-Type-Options'] = 'nosniff'
         response['Access-Control-Allow-Origin'] = '*'
         response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
         response['Access-Control-Allow-Headers'] = '*'

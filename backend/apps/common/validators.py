@@ -2,6 +2,7 @@
 from io import BytesIO
 from pathlib import Path
 import warnings
+import zipfile
 
 from django.core.exceptions import ValidationError
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -18,6 +19,10 @@ MAX_SOURCE_IMAGE_PIXELS = 20_000_000
 MAX_IMAGE_DIMENSION = 1024
 MAX_OPTIMIZED_IMAGE_BYTES = 1_500_000
 WEBP_QUALITY = 86
+MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_CHAT_ATTACHMENT_COUNT = 5
+MAX_CHAT_MESSAGE_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_SPREADSHEET_BYTES = 25 * 1024 * 1024
 
 
 def _detected_type(upload):
@@ -118,3 +123,67 @@ def validate_school_logo(upload):
 
 def validate_student_photo(upload):
     validate_raster_image_upload(upload)
+
+
+def validate_chat_attachment(upload):
+    """Allow only verified raster images and PDFs in direct messages."""
+    validate_upload(
+        upload,
+        allowed_types={'application/pdf', *RASTER_IMAGE_TYPES},
+        max_bytes=MAX_CHAT_ATTACHMENT_BYTES,
+    )
+    if detected_content_type(upload).startswith('image/'):
+        validate_raster_image_upload(upload)
+
+
+def validate_enrollment_photo(upload):
+    validate_upload(upload, allowed_types=RASTER_IMAGE_TYPES, max_bytes=5 * 1024 * 1024)
+    validate_raster_image_upload(upload)
+
+
+def validate_enrollment_document(upload):
+    validate_upload(
+        upload,
+        allowed_types={'application/pdf', 'image/jpeg', 'image/png'},
+        max_bytes=15 * 1024 * 1024,
+    )
+    if detected_content_type(upload).startswith('image/'):
+        validate_raster_image_upload(upload)
+
+
+def validate_spreadsheet_upload(upload):
+    """Validate a CSV or OpenXML spreadsheet before parsing it."""
+    extension = Path(upload.name).suffix.lower()
+    if upload.size > MAX_SPREADSHEET_BYTES:
+        raise ValidationError('Spreadsheet exceeds the 25 MB limit.')
+    if extension == '.csv':
+        upload.seek(0)
+        sample = upload.read(min(upload.size, 8192))
+        upload.seek(0)
+        if b'\x00' in sample:
+            raise ValidationError('CSV files must contain plain text data.')
+        return
+    if extension not in {'.xlsx', '.xlsm', '.xltx'}:
+        raise ValidationError('Upload a CSV or modern Excel (.xlsx) spreadsheet.')
+
+    upload.seek(0)
+    signature = upload.read(4)
+    upload.seek(0)
+    if signature != b'PK\x03\x04':
+        raise ValidationError('The spreadsheet content does not match its file extension.')
+
+    try:
+        with zipfile.ZipFile(upload) as archive:
+            entries = archive.infolist()
+            expanded_size = sum(entry.file_size for entry in entries)
+            names = {entry.filename for entry in entries}
+            if len(entries) > 10_000 or expanded_size > 100 * 1024 * 1024:
+                raise ValidationError('Spreadsheet archive expands beyond safe limits.')
+            if '[Content_Types].xml' not in names or 'xl/workbook.xml' not in names:
+                raise ValidationError('The uploaded Excel file is invalid or incomplete.')
+            if any(name.lower().endswith('vbaproject.bin') for name in names):
+                raise ValidationError('Macro-enabled spreadsheets are not accepted.')
+    except zipfile.BadZipFile as exc:
+        raise ValidationError('The uploaded Excel file is corrupt.') from exc
+    finally:
+        upload.seek(0)

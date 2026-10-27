@@ -44,6 +44,13 @@ class SchoolEvent(models.Model):
         help_text='Deadline date and time after which registrations are closed',
     )
     venue = models.CharField(max_length=200)
+    organizer = models.CharField(max_length=160, blank=True)
+    contact_details = models.CharField(max_length=200, blank=True)
+    meeting_url = models.URLField(max_length=500, blank=True)
+    # Event artwork is kept in the database, matching school logos, so media
+    # files remain tenant-scoped and do not depend on a shared filesystem.
+    image_data = models.BinaryField(blank=True, null=True, editable=False)
+    image_content_type = models.CharField(max_length=32, blank=True, editable=False)
     capacity = models.PositiveIntegerField(default=100)
     ticket_required = models.BooleanField(default=True)
     status = models.CharField(
@@ -84,6 +91,9 @@ class SchoolEvent(models.Model):
 
     @property
     def registered_count(self) -> int:
+        annotated_count = getattr(self, 'active_registration_count', None)
+        if annotated_count is not None:
+            return int(annotated_count)
         return self.registrations.filter(status=EventRegistration.RegistrationStatus.CONFIRMED).count()
 
     @property

@@ -166,6 +166,8 @@ export interface ExamTimetableRecord {
   report_cards_published_at?: string | null;
   marks_entry_days?: number;
   marks_entry_deadline?: string | null;
+  section_extensions?: Record<string, any>;
+  subject_extensions?: Record<string, any>;
   marks_entry_extended?: boolean;
   marks_entry_extension_reason?: string;
   marks_entry_extended_at?: string | null;
@@ -173,7 +175,6 @@ export interface ExamTimetableRecord {
   marks_entry_is_open?: boolean;
   marks_entry_effective_deadline?: string | null;
   exam_completion_date?: string | null;
-  section_extensions?: Record<string, any>;
   is_teacher_assigned?: boolean;
   teacher_assigned_sections?: string[];
   teacher_assigned_subjects?: string[];

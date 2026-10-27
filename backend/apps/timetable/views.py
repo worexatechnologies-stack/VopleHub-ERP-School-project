@@ -56,6 +56,18 @@ class TimetableAccessPermission(permissions.BasePermission):
             return True
         return request.user.role == User.Role.SCHOOL_ADMIN
 
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if user.role == User.Role.SUPER_ADMIN:
+            return True
+        if str(obj.school_id or '') != str(user.school_id or ''):
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return user.role == User.Role.SCHOOL_ADMIN
+
 
 def _student_section_ids(students, school_id):
     """Return canonical sections, safely resolving any remaining legacy rows."""

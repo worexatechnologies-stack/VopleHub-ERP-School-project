@@ -1,26 +1,27 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import type { PayloadAction } from '@reduxjs/toolkit';
 
-import { ACCESS_TOKEN_STORAGE_KEY, AuthUser, getStoredAuthenticatedUser } from '../../utils/auth';
+import {
+  AuthUser,
+  getStoredAuthenticatedUser,
+} from '../../utils/auth';
 import { loginWithApi } from '../../services/api';
 
 interface AuthState {
-  accessToken: string | null;
-  refreshToken: string | null;
   user: AuthUser | null;
   isAuthenticated: boolean;
+  isRestoringSession: boolean;
   status: 'idle' | 'loading' | 'succeeded' | 'failed';
   error: string | null;
 }
 
-const initialToken = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
 const initialUser = typeof window !== 'undefined' ? getStoredAuthenticatedUser() : null;
 
 const initialState: AuthState = {
-  accessToken: initialToken,
-  refreshToken: null,
-  user: initialToken ? initialUser : null,
-  isAuthenticated: Boolean(initialToken && initialUser),
+  user: initialUser,
+  isAuthenticated: Boolean(initialUser),
+  // Starts true on browser boot / reload; resolves once /auth/me/ completes
+  isRestoringSession: true,
   status: 'idle',
   error: null,
 };
@@ -38,27 +39,29 @@ const authSlice = createSlice({
   reducers: {
     setCredentials: (
       state,
-      action: PayloadAction<{ access: string; refresh: string; user: AuthUser }>
+      action: PayloadAction<{ user: AuthUser; sessionId?: string; csrfToken?: string; access?: string; refresh?: string }>
     ) => {
-      state.accessToken = action.payload.access;
-      state.refreshToken = action.payload.refresh;
       state.user = action.payload.user;
       state.isAuthenticated = true;
+      state.isRestoringSession = false;
       state.status = 'succeeded';
       state.error = null;
     },
     setUser: (state, action: PayloadAction<AuthUser>) => {
       state.user = action.payload;
       state.isAuthenticated = true;
+      state.isRestoringSession = false;
     },
-    setAccessToken: (state, action: PayloadAction<string>) => {
-      state.accessToken = action.payload;
+    setAccessToken: (_state, _action: PayloadAction<string>) => {
+      // Deprecated: browser authentication uses Django's HttpOnly session cookie.
+    },
+    finishSessionRestore: (state) => {
+      state.isRestoringSession = false;
     },
     logout: (state) => {
-      state.accessToken = null;
-      state.refreshToken = null;
       state.user = null;
       state.isAuthenticated = false;
+      state.isRestoringSession = false;
       state.status = 'idle';
       state.error = null;
     },
@@ -74,12 +77,9 @@ const authSlice = createSlice({
         state.error = null;
       })
       .addCase(login.fulfilled, (state, action) => {
-        state.accessToken = action.payload.access;
-        // The refresh token is delivered ONLY as an HttpOnly cookie by the
-        // server; we never store it in Redux or localStorage.
-        state.refreshToken = null;
         state.user = action.payload.user;
         state.isAuthenticated = true;
+        state.isRestoringSession = false;
         state.status = 'succeeded';
         state.error = null;
       })
@@ -90,6 +90,13 @@ const authSlice = createSlice({
   },
 });
 
-export const { setCredentials, setUser, setAccessToken, logout, authError } = authSlice.actions;
+export const {
+  setCredentials,
+  setUser,
+  setAccessToken,
+  finishSessionRestore,
+  logout,
+  authError,
+} = authSlice.actions;
 
 export default authSlice.reducer;

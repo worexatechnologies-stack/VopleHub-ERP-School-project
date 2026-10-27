@@ -579,7 +579,7 @@ export default function TimetableEditor({
   return (
     <div className="space-y-6" id="timetable-admin-editor">
       {/* Upper Dashboard Sub-Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-xs print:hidden">
         <div className="flex items-center gap-3">
           <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg border border-indigo-100">
             <Layers className="w-5 h-5" />
@@ -611,7 +611,7 @@ export default function TimetableEditor({
       </div>
 
       {/* Main filter select blocks */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-xs print:hidden">
         <div>
           <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Structure View Mode</label>
           <select
@@ -704,10 +704,35 @@ export default function TimetableEditor({
         ) : null}
       </div>
 
+      {/* Clean Print-Only Schedule Header */}
+      <div className="hidden print:block mb-4 pb-3 border-b-2 border-slate-900">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight">
+              {timingConfig?.schoolName || 'Volpehub Education'}
+            </h1>
+            <p className="text-sm font-bold text-slate-800 mt-1">
+              {viewMode === 'class' ? `Class Timetable: Class ${selectedClass} - Section ${selectedSection}` :
+               viewMode === 'teacher' ? `Teacher Schedule: ${activeTeachers.find(t => String(t.id) === filterTeacherId)?.name || 'Teacher'}` :
+               `Subject Audit: ${filterSubject || 'All Subjects'}`}
+            </p>
+          </div>
+          <div className="text-right">
+            <span className="inline-block px-3 py-1 rounded-md bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest">
+              OFFICIAL TIMETABLE SCHEDULE
+            </span>
+            <div className="text-[10px] font-mono text-slate-600 mt-1 space-y-0.5">
+              <div>Academic Session: {timingConfig?.academicYear || 'Current Year'}</div>
+              <div>Generated: {new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Main body: Grid with Subject tally counter */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 print:block">
         {/* Core grid view */}
-        <div className="lg:col-span-3 space-y-4">
+        <div className="lg:col-span-3 space-y-4 print:w-full print:max-w-none">
           <TimetableGrid
             slots={slots}
             timingConfig={timingConfig}
@@ -723,7 +748,7 @@ export default function TimetableEditor({
         </div>
 
         {/* Sidebar analytics */}
-        <div className="space-y-4">
+        <div className="space-y-4 print:hidden">
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
             <h3 className="text-xs font-bold uppercase tracking-widest text-slate-600 mb-3 flex items-center gap-1.5">
               <BookOpen className="w-4 h-4 text-indigo-500" />
@@ -780,6 +805,16 @@ export default function TimetableEditor({
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Print-Only Official Footer */}
+      <div className="hidden print:flex items-center justify-between text-[8pt] text-slate-500 border-t border-slate-300 pt-3 mt-4">
+        <div>
+          <span>Volpehub Education ERP • Confidential School Record</span>
+        </div>
+        <div>
+          <span>Authorized Signatory / Principal: ________________________________</span>
         </div>
       </div>
 

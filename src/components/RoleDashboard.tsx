@@ -35,6 +35,7 @@ import { studentApi } from '../store/api/studentApi';
 import { loadTimetableSlots } from '../services/timetable';
 import type { TimetableSlot } from './timetable/types';
 import { homeworkApi, HomeworkRecord } from '../store/api/homeworkApi';
+import { chatSocket } from '../services/chatSocket';
 
 type PortalRole = 'Teacher' | 'Student' | 'Parent';
 
@@ -210,33 +211,63 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
     return () => { active = false; };
   }, [role]);
 
-  // Fetch homework — backend already role-scopes this endpoint.
+  // Fetch homework — backend already role-scopes this endpoint, auto syncs with WebSocket
   useEffect(() => {
     let active = true;
-    store.dispatch(homeworkApi.endpoints.getHomework.initiate(undefined))
-      .unwrap()
-      .then((rows) => {
-        if (!active) return;
-        const list = Array.isArray(rows) ? rows : (rows as any)?.results || [];
-        setHomeworkRecords(list);
-      })
-      .catch(() => { if (active) setHomeworkRecords([]); });
-    return () => { active = false; };
+    const loadHomework = () => {
+      store.dispatch(homeworkApi.endpoints.getHomework.initiate(undefined, { subscribe: false, forceRefetch: true }))
+        .unwrap()
+        .then((rows) => {
+          if (!active) return;
+          const list = Array.isArray(rows) ? rows : (rows as any)?.results || [];
+          setHomeworkRecords(list);
+        })
+        .catch(() => { if (active) setHomeworkRecords([]); });
+    };
+
+    loadHomework();
+
+    const handleSync = () => {
+      loadHomework();
+    };
+    window.addEventListener('homework:synced', handleSync);
+    const unsub = chatSocket.on('homework.sync', handleSync);
+
+    return () => {
+      active = false;
+      window.removeEventListener('homework:synced', handleSync);
+      unsub();
+    };
   }, [role]);
 
-  // Fetch attendance for parent or student
+  // Fetch attendance for parent or student — auto syncs with WebSocket
   useEffect(() => {
     if (role !== 'Parent' && role !== 'Student') return;
     let active = true;
-    store.dispatch(attendanceApi.endpoints.getAttendance.initiate(undefined))
-      .unwrap()
-      .then((payload) => {
-        if (!active) return;
-        const rows = (payload || []) as any;
-        setAttendanceRecords(rows);
-      })
-      .catch(() => { if (active) setAttendanceRecords([]); });
-    return () => { active = false; };
+    const loadAttendance = () => {
+      store.dispatch(attendanceApi.endpoints.getAttendance.initiate(undefined, { subscribe: false, forceRefetch: true }))
+        .unwrap()
+        .then((payload) => {
+          if (!active) return;
+          const rows = (payload || []) as any;
+          setAttendanceRecords(rows);
+        })
+        .catch(() => { if (active) setAttendanceRecords([]); });
+    };
+
+    loadAttendance();
+
+    const handleAttSync = () => {
+      loadAttendance();
+    };
+    window.addEventListener('attendance:synced', handleAttSync);
+    const unsubAtt = chatSocket.on('attendance.sync', handleAttSync);
+
+    return () => {
+      active = false;
+      window.removeEventListener('attendance:synced', handleAttSync);
+      unsubAtt();
+    };
   }, [role]);
 
   // For student: fetch own student ID from /auth/me/ then results + attendance
@@ -394,30 +425,30 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
       <div className="space-y-6 pb-12 font-sans" id="teacher-dashboard">
         {/* ── 1. Clean Institutional Faculty Header ── */}
         <div className="rounded-3xl border border-slate-200/90 bg-white p-6 sm:p-7 shadow-xs">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-5">
-            <div className="flex items-start gap-4">
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+            <div className="flex items-start gap-4 min-w-0 flex-1">
               <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600 shadow-2xs">
                 <BookOpen className="w-6 h-6" />
               </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80 shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />
                     Faculty Academic Desk
                   </span>
-                  <span className="text-xs text-slate-300">·</span>
-                  <span className="text-xs font-semibold text-slate-500 font-mono">{formattedToday}</span>
+                  <span className="text-xs text-slate-300 hidden sm:inline">·</span>
+                  <span className="text-xs font-semibold text-slate-500 font-mono whitespace-nowrap">{formattedToday}</span>
                 </div>
-                <h1 className="mt-1 text-2xl sm:text-3xl font-black tracking-tight text-slate-900">
+                <h1 className="mt-1.5 text-2xl sm:text-3xl font-black tracking-tight text-slate-900 leading-tight">
                   Welcome back, {firstName}
                 </h1>
-                <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-xl font-medium">
+                <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-2xl font-medium leading-relaxed">
                   Review your daily instructional timetable, record attendance rosters, and evaluate student marks.
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5 shrink-0 self-start md:self-center">
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 pt-1 xl:pt-0">
               <button
                 type="button"
                 onClick={() => onNavigateToTab('attendance')}
@@ -882,30 +913,30 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
       <div className="space-y-6 animate-fade-in pb-12 font-sans" id="student-dashboard">
         {/* ── 1. Clean Institutional Student Hub Header ── */}
         <div className="rounded-3xl border border-slate-200/90 bg-white p-6 sm:p-7 shadow-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5">
-            <div className="flex items-start gap-4">
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+            <div className="flex items-start gap-4 min-w-0 flex-1">
               <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600 shadow-2xs">
                 <GraduationCap className="w-6 h-6" />
               </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80 shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />
                     Student Academic Hub
                   </span>
-                  <span className="text-xs text-slate-300">·</span>
-                  <span className="text-xs font-semibold text-slate-500 font-mono">{formattedToday}</span>
+                  <span className="text-xs text-slate-300 hidden sm:inline">·</span>
+                  <span className="text-xs font-semibold text-slate-500 font-mono whitespace-nowrap">{formattedToday}</span>
                 </div>
-                <h1 className="mt-1 text-2xl sm:text-3xl font-black tracking-tight text-slate-900">
+                <h1 className="mt-1.5 text-2xl sm:text-3xl font-black tracking-tight text-slate-900 leading-tight">
                   Welcome, {firstName}
                 </h1>
-                <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-xl font-medium">
+                <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-2xl font-medium leading-relaxed">
                   Your daily timetable, attendance metrics, and published exam marks are synchronized from the live campus database.
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5 shrink-0 self-start sm:self-center">
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 pt-1 xl:pt-0">
               <button
                 type="button"
                 onClick={() => onNavigateToTab('academic')}
@@ -1316,24 +1347,24 @@ export default function RoleDashboard({ role, userName, onNavigateToTab, isGlass
     <div className="space-y-6 animate-fade-in pb-12" id="parent-dashboard">
       {/* ── Clean Institutional Parent & Family Portal Header ── */}
       <section className="rounded-3xl border border-slate-200/90 bg-white p-6 sm:p-8 shadow-xs space-y-5">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-          <div className="flex items-start gap-4">
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+          <div className="flex items-start gap-4 min-w-0 flex-1">
             <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600 shadow-2xs">
               <Users className="w-6 h-6" />
             </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100 shrink-0">
                   <ShieldCheck className="w-3 h-3 text-indigo-600" />
                   Parent & Family Portal
                 </span>
-                <span className="text-xs text-slate-300">·</span>
-                <span className="text-xs font-semibold text-slate-500">{todayFormatted}</span>
+                <span className="text-xs text-slate-300 hidden sm:inline">·</span>
+                <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">{todayFormatted}</span>
               </div>
-              <h1 className="mt-1 text-2xl sm:text-3xl font-black tracking-tight text-slate-900">
+              <h1 className="mt-1.5 text-2xl sm:text-3xl font-black tracking-tight text-slate-900 leading-tight">
                 {greetingTime}, {firstName}!
               </h1>
-              <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-2xl font-medium">
+              <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-2xl font-medium leading-relaxed">
                 Welcome to your family dashboard. Monitor your children’s daily class attendance, examination marks, and school circulars.
               </p>
             </div>

@@ -1,12 +1,21 @@
 import { baseApi } from './baseApi';
 
+export interface HomeworkAttachment {
+  name: string;
+  url: string;
+  type?: string;
+  size?: number;
+}
+
 export interface HomeworkSubmission {
   student_id: string;
   student_name: string;
   admission_no?: string;
+  submitted_by?: string;
   status: 'Submitted' | 'Graded' | 'Pending';
   submitted_at: string;
   submission_text: string;
+  attachments?: HomeworkAttachment[];
   marks_obtained?: number | null;
   teacher_feedback?: string;
 }
@@ -26,9 +35,11 @@ export interface HomeworkRecord {
   dueDate: string;
   assignedDate?: string;
   maxMarks: number;
+  teacherId?: number | null;
   teacherName?: string;
   attachmentName?: string;
   attachmentUrl?: string;
+  attachments?: HomeworkAttachment[];
   submissions?: HomeworkSubmission[];
   created_at?: string;
   updated_at?: string;
@@ -43,10 +54,13 @@ export interface CreateHomeworkPayload {
   classId?: number;
   sectionId?: number;
   subjectId?: number;
+  teacherId?: number | null;
+  teacherName?: string;
   dueDate: string;
   maxMarks?: number;
   attachmentName?: string;
   attachmentUrl?: string;
+  attachments?: HomeworkAttachment[];
   status?: 'Active' | 'Completed' | 'Archived';
 }
 
@@ -56,6 +70,7 @@ export interface SubmitHomeworkPayload {
   studentName?: string;
   admissionNo?: string;
   submissionText: string;
+  attachments?: HomeworkAttachment[];
 }
 
 export interface GradeSubmissionPayload {
@@ -129,6 +144,7 @@ export const homeworkApi = baseApi.injectEndpoints({
           student_name: body.studentName,
           admission_no: body.admissionNo,
           submission_text: body.submissionText,
+          attachments: body.attachments || [],
         },
       }),
       invalidatesTags: (_res, _err, { homeworkId }) => [{ type: 'Homework', id: homeworkId }],

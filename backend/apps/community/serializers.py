@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.utils import timezone
+from apps.common.validators import optimize_raster_image, validate_raster_image_upload
 from .models import SchoolEvent, EventRegistration, CommunityPost
 from apps.accounts.models import User
 
@@ -53,6 +54,8 @@ class EventRegisterInputSerializer(serializers.Serializer):
 
 
 class SchoolEventSerializer(serializers.ModelSerializer):
+    imageUrl = serializers.SerializerMethodField(read_only=True)
+    imageFile = serializers.FileField(write_only=True, required=False, allow_null=True)
     registered_count = serializers.SerializerMethodField()
     is_deadline_passed = serializers.SerializerMethodField()
     is_registration_open = serializers.SerializerMethodField()
@@ -71,6 +74,11 @@ class SchoolEventSerializer(serializers.ModelSerializer):
             'end_date',
             'registration_deadline',
             'venue',
+            'organizer',
+            'contact_details',
+            'meeting_url',
+            'imageUrl',
+            'imageFile',
             'capacity',
             'ticket_required',
             'status',
@@ -89,6 +97,7 @@ class SchoolEventSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         date = attrs.get('date', getattr(self.instance, 'date', None))
+        end_date = attrs.get('end_date', getattr(self.instance, 'end_date', None))
         registration_deadline = attrs.get(
             'registration_deadline',
             getattr(self.instance, 'registration_deadline', None),
@@ -97,7 +106,45 @@ class SchoolEventSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'registration_deadline': 'Registration deadline cannot be after the event start date.'
             })
+        if date and end_date and end_date < date:
+            raise serializers.ValidationError({
+                'end_date': 'Event end time cannot be before the event start time.'
+            })
         return attrs
+
+    def validate_imageFile(self, value):
+        if value is not None:
+            validate_raster_image_upload(value)
+        return value
+
+    def get_imageUrl(self, obj) -> str | None:
+        has_image = getattr(obj, 'has_event_image', None)
+        if has_image is None:
+            has_image = bool(obj.image_data)
+        return f'/api/v1/events/{obj.pk}/image/' if has_image else None
+
+    @staticmethod
+    def _store_image(instance, image_file):
+        if image_file is None:
+            instance.image_data = None
+            instance.image_content_type = ''
+        else:
+            instance.image_data, instance.image_content_type, _ = optimize_raster_image(image_file)
+        instance.save(update_fields=['image_data', 'image_content_type'])
+
+    def create(self, validated_data):
+        image_file = validated_data.pop('imageFile', serializers.empty)
+        instance = super().create(validated_data)
+        if image_file is not serializers.empty:
+            self._store_image(instance, image_file)
+        return instance
+
+    def update(self, instance, validated_data):
+        image_file = validated_data.pop('imageFile', serializers.empty)
+        instance = super().update(instance, validated_data)
+        if image_file is not serializers.empty:
+            self._store_image(instance, image_file)
+        return instance
 
     def get_registered_count(self, obj) -> int:
         return obj.registered_count

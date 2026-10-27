@@ -19,6 +19,40 @@
   flex: 1 1 100%;
 }
 
+.ls-back-home {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 15px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #475569;
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.07);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.ls-back-home:hover {
+  color: #4338ca;
+  border-color: #c7d2fe;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(79, 70, 229, 0.12);
+  transform: translateY(-1px);
+}
+
+.ls-back-home:focus-visible {
+  outline: 3px solid rgba(99, 102, 241, 0.35);
+  outline-offset: 3px;
+}
+
 /* Ambient Floating Gradient Orbs */
 .ls-ambient-orb {
   position: absolute;
@@ -1494,4 +1528,15 @@
     gap: 6px;
     padding: 9px 11px;
   }
+}
+
+@media (max-width: 900px) {
+  .ls-back-home {
+    top: 12px;
+    right: 12px;
+    min-height: 38px;
+    padding-inline: 12px;
+  }
+
+  .ls-left { padding-top: 64px; }
 }

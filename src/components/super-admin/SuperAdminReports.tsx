@@ -1,28 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { FileText, School, DollarSign, TrendingUp, Users } from 'lucide-react';
-
-interface SchoolRecord {
-  id: string;
-  name: string;
-  code: string;
-  city: string;
-  status: 'Active' | 'Inactive';
-  studentCount: number;
-  revenueLakhs: number;
-}
+import React, { useMemo } from 'react';
+import { School, DollarSign, TrendingUp, Users } from 'lucide-react';
+import { useGetSchoolsQuery, useGetSchoolRecordCountsQuery } from '../../store/api/schoolApi';
 
 export default function SuperAdminReports() {
-  const [schools, setSchools] = useState<SchoolRecord[]>([]);
+  const { data: rawSchools = [] } = useGetSchoolsQuery();
+  const { data: counts } = useGetSchoolRecordCountsQuery(undefined, {
+    pollingInterval: 3000,
+  });
 
-  useEffect(() => {
-    const saved = localStorage.getItem('sa_schools');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setSchools(Array.isArray(parsed) ? parsed.filter((school: SchoolRecord) => !['sch-1', 'sch-2', 'sch-3'].includes(school.id)) : []);
-    } else {
-      setSchools([]);
-    }
-  }, []);
+  const schools = useMemo(() => {
+    return rawSchools.map((s) => {
+      const studentCount = counts?.[String(s.id)]?.students ?? s.studentCount ?? 0;
+      return {
+        id: String(s.id),
+        name: s.schoolName,
+        code: s.code,
+        status: s.is_active ? ('Active' as const) : ('Inactive' as const),
+        studentCount,
+        revenueLakhs: Number((studentCount * 0.15).toFixed(1)),
+      };
+    });
+  }, [rawSchools, counts]);
 
   const totalEnrollment = schools.reduce((sum, s) => sum + s.studentCount, 0);
   const totalRev = schools.reduce((sum, s) => sum + s.revenueLakhs, 0);

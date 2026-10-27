@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck } from 'lucide-react';
-import { ACCESS_TOKEN_STORAGE_KEY, SUPER_ADMIN_NAME, decodeJWT } from '../utils/auth';
+import { getStoredAuthenticatedUser, SUPER_ADMIN_NAME } from '../utils/auth';
 
 // Modular Sub-components
 import SuperAdminDashboard from './super-admin/SuperAdminDashboard';
@@ -17,14 +17,9 @@ export default function SuperAdminModule({ activeTab = 'super-admin-dashboard', 
   const [operatorName, setOperatorName] = useState(SUPER_ADMIN_NAME);
 
   useEffect(() => {
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    if (token) {
-      try {
-        const decoded = decodeJWT(token);
-        if (decoded?.name) setOperatorName(decoded.name);
-      } catch {
-        // ignore
-      }
+    const user = getStoredAuthenticatedUser();
+    if (user?.name) {
+      setOperatorName(user.name);
     }
   }, []);
 

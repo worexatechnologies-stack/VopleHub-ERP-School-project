@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -174,8 +175,8 @@ export default function StudentModule({
   const [newPhotoSummary, setNewPhotoSummary] = useState('');
 
   // Document verification state
-  const reduxToken = useAppSelector((state) => state.auth?.accessToken);
-  const isServerBacked = Boolean(reduxToken || localStorage.getItem('school_erp_api_token'));
+  const isAuthenticated = useAppSelector((state) => state.auth?.isAuthenticated);
+  const isServerBacked = Boolean(isAuthenticated || getStoredAuthenticatedUser());
 
   // Sync year filter when active academic year is resolved
   useEffect(() => {

@@ -29,7 +29,7 @@ import {
   GraduationCap,
   BellRing
 } from 'lucide-react';
-import { ACCESS_TOKEN_STORAGE_KEY, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME, SUPER_ADMIN_PASSWORD, decodeJWT } from '../../utils/auth';
+import { getStoredAuthenticatedUser, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME, SUPER_ADMIN_PASSWORD } from '../../utils/auth';
 
 interface SystemSettingsData {
   schoolName: string;
@@ -47,7 +47,7 @@ interface SystemSettingsData {
   senderID: string;
   paymentGatewayMode: string;
   razorpayKeyId: string;
-  razorpayKeySecret: string;
+  razorpayKeySecret?: string;
   backupSchedule: string;
   backupDestination: string;
   backupRetentionDays: number;
@@ -72,7 +72,6 @@ const DEFAULT_SETTINGS: SystemSettingsData = {
   senderID: 'SANSKR',
   paymentGatewayMode: 'Sandbox',
   razorpayKeyId: 'rzp_test_9281a8F83ha8',
-  razorpayKeySecret: 'sk_test_7f920da83921b712',
   backupSchedule: 'Daily',
   backupDestination: 'GCS Bucket: erp-backups-main',
   backupRetentionDays: 30,
@@ -103,7 +102,7 @@ export default function SuperAdminSystemSettings() {
   const [profileName, setProfileName] = useState(SUPER_ADMIN_NAME);
   const [profilePassword, setProfilePassword] = useState(SUPER_ADMIN_PASSWORD);
   const [showProfilePassword, setShowProfilePassword] = useState(false);
-  const [showRazorpaySecret, setShowRazorpaySecret] = useState(false);
+  // Payment gateway secrets are strictly managed server-side and never persisted in browser storage.
 
   // Dynamic lists
   const [feeCategories, setFeeCategories] = useState<string[]>([]);
@@ -196,14 +195,8 @@ export default function SuperAdminSystemSettings() {
   }, []);
 
   const addAuditLog = (action: string) => {
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    let operatorName = SUPER_ADMIN_NAME;
-    if (token) {
-      try {
-        const decoded = decodeJWT(token);
-        if (decoded?.name) operatorName = decoded.name;
-      } catch (e) {}
-    }
+    const user = getStoredAuthenticatedUser();
+    const operatorName = user?.name || SUPER_ADMIN_NAME;
     const newLog = {
       id: `audit-${Date.now()}`,
       userName: operatorName,
@@ -940,22 +933,15 @@ export default function SuperAdminSystemSettings() {
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-bold text-slate-700">Razorpay Secret Key</label>
-                        <button
-                          type="button"
-                          onClick={() => setShowRazorpaySecret(!showRazorpaySecret)}
-                          className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 cursor-pointer"
-                        >
-                          {showRazorpaySecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                          <span>{showRazorpaySecret ? 'Hide' : 'Reveal'}</span>
-                        </button>
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <ShieldCheck className="w-3 h-3" />
+                          <span>Server-Side Protected</span>
+                        </span>
                       </div>
-                      <input
-                        required
-                        type={showRazorpaySecret ? 'text' : 'password'}
-                        value={sysSettings.razorpayKeySecret}
-                        onChange={(e) => setSysSettings({ ...sysSettings, razorpayKeySecret: e.target.value })}
-                        className="w-full text-xs bg-white border border-slate-200 px-3.5 py-2.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-800 font-mono"
-                      />
+                      <div className="w-full text-xs bg-slate-50 border border-slate-200 px-3.5 py-2.5 rounded-xl text-slate-500 font-mono flex items-center justify-between">
+                        <span className="tracking-widest">••••••••••••••••••••••••</span>
+                        <span className="text-[10px] text-slate-400 font-sans font-medium">Secured in backend environment (RAZORPAY_KEY_SECRET)</span>
+                      </div>
                     </div>
                   </div>
                 </div>

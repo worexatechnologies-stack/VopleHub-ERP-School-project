@@ -16,7 +16,7 @@ fi
 echo "[VolpeHub Deployment] Using environment file: $ENV_FILE"
 
 # 1. Pull or build services
-docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker 2>/dev/null || true
+docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker forwardproxy
 
 # 2. Start database and cache first
 docker compose -f docker-compose.prod.yml -p volpehub up -d db redis
@@ -24,6 +24,9 @@ docker compose -f docker-compose.prod.yml -p volpehub up -d db redis
 # 3. Execute safe migrations
 echo "[VolpeHub Deployment] Running database migrations..."
 docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py migrate --noinput
+
+echo "[VolpeHub Deployment] Collecting static files before starting API replicas..."
+docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py collectstatic --noinput
 
 # 4. Bring up full stack
 echo "[VolpeHub Deployment] Starting all application services..."

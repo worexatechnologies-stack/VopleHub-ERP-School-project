@@ -2,9 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
+  ArrowLeft,
   Bell,
   BookOpen,
   Calendar,
+  Check,
   CheckCircle2,
   CheckCheck,
   ChevronRight,
@@ -37,7 +39,7 @@ import {
 } from 'lucide-react';
 import { chatSocket, type ChatSocketStatus } from '../services/chatSocket';
 import { playNotificationSound } from '../services/notificationSound';
-import { ACCESS_TOKEN_STORAGE_KEY, type AuthUser } from '../utils/auth';
+import { type AuthUser } from '../utils/auth';
 import type { Student } from '../types';
 import { store } from '../store';
 import { chatApi } from '../store/api/chatApi';
@@ -361,13 +363,8 @@ export async function downloadSecureAttachment(url: string, filename: string) {
       return;
     }
     const cleanUrl = normalizeAttachmentUrl(url);
-    const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
-    const fetchUrl = token && !cleanUrl.includes('token=')
-      ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
-      : cleanUrl;
-
-    const res = await fetch(fetchUrl, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    const res = await fetch(cleanUrl, {
+      credentials: 'include',
     });
     if (!res.ok) throw new Error(`Download failed with status ${res.status}`);
     const blob = await res.blob();
@@ -381,10 +378,8 @@ export async function downloadSecureAttachment(url: string, filename: string) {
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   } catch (err) {
     console.error('Error downloading attachment:', err);
-    const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
     const cleanUrl = normalizeAttachmentUrl(url);
-    const fallbackUrl = token ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : cleanUrl;
-    window.open(fallbackUrl, '_blank');
+    window.open(cleanUrl, '_blank');
   }
 }
 
@@ -468,13 +463,8 @@ function ChatImagePreview({
     setIsLoading(true);
     setHasError(false);
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
-      const fetchUrl = token && !cleanUrl.includes('token=')
-        ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
-        : cleanUrl;
-
-      const res = await fetch(fetchUrl, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      const res = await fetch(cleanUrl, {
+        credentials: 'include',
       });
 
       if (!res.ok) {
@@ -487,9 +477,7 @@ function ChatImagePreview({
       setIsLoading(false);
     } catch (err) {
       console.warn('Authenticated image fetch error:', err);
-      const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
-      const fallbackUrl = token ? `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : cleanUrl;
-      setBlobUrl(fallbackUrl);
+      setBlobUrl(cleanUrl);
       setIsLoading(false);
     }
   }, [cleanUrl]);
@@ -548,9 +536,9 @@ function ChatImagePreview({
             <span>{timeStr}</span>
             {isMe && (
               readAt ? (
-                <CheckCheck className="w-3.5 h-3.5 text-[#EF4444]" />
+                <CheckCheck aria-label="Read" className="w-3.5 h-3.5 text-sky-300" />
               ) : (
-                <CheckCheck className="w-3.5 h-3.5 text-white/80" />
+                <Check aria-label="Sent" className="w-3.5 h-3.5 text-white/80" />
               )
             )}
           </div>
@@ -722,11 +710,11 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     senderName?: string;
     highlightMessageText?: string;
   } | null>(null);
+  const initialAutoSelectDone = useRef(false);
 
   const getSecureDownloadUrl = useCallback((url: string) => {
     if (!url) return '';
-    const token = typeof window !== 'undefined' ? localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) : null;
-    return token ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : url;
+    return normalizeAttachmentUrl(url);
   }, []);
 
   const isImageAttachment = (att: { originalName: string; contentType?: string }) => {
@@ -737,21 +725,46 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   };
 
   // ── Real-Time Typing State & Ref Timers ────────────────────────────────────
-  const [typingMap, setTypingMap] = useState<Record<number, { isTyping: boolean; userName?: string }>>({});
-  const typingTimeoutRefs = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  interface ActiveTypingEntry {
+    conversationId?: number;
+    userId: number;
+    userName?: string;
+    isTyping: boolean;
+    text?: string;
+  }
+
+  const [typingMap, setTypingMap] = useState<Record<string, ActiveTypingEntry>>({});
+  const typingTimeoutRefs = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastTypingSentRef = useRef<number>(0);
   const stopTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleChatInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setChatMessage(val);
-    if (!selectedConversationId) return;
+
+    const targetUid = selectedContact
+      ? Number(selectedContact.userId || selectedContact.id)
+      : undefined;
+
+    const resolvedConvId =
+      selectedConversationId ||
+      (targetUid
+        ? conversations.find((c) => Number(c.otherParticipant?.id) === targetUid)?.id
+        : null);
 
     const isTyping = val.trim().length > 0;
     const now = Date.now();
     if (isTyping) {
-      if (now - lastTypingSentRef.current > 1500) {
-        chatSocket.sendTyping(selectedConversationId, true);
+      if (now - lastTypingSentRef.current > 250 || val.trim().length === 1) {
+        if (resolvedConvId) {
+          chatSocket.sendTyping(resolvedConvId, true, '', targetUid);
+        } else if (targetUid) {
+          chatSocket.sendAction('typing', {
+            targetUserId: targetUid,
+            isTyping: true,
+            text: '',
+          });
+        }
         lastTypingSentRef.current = now;
       }
 
@@ -759,16 +772,71 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         clearTimeout(stopTypingTimeoutRef.current);
       }
       stopTypingTimeoutRef.current = setTimeout(() => {
-        if (selectedConversationId) {
-          chatSocket.sendTyping(selectedConversationId, false);
+        if (resolvedConvId) {
+          chatSocket.sendTyping(resolvedConvId, false, '', targetUid);
+        } else if (targetUid) {
+          chatSocket.sendAction('typing', {
+            targetUserId: targetUid,
+            isTyping: false,
+            text: '',
+          });
         }
       }, 2500);
     } else {
       if (stopTypingTimeoutRef.current) {
         clearTimeout(stopTypingTimeoutRef.current);
       }
-      chatSocket.sendTyping(selectedConversationId, false);
+      if (resolvedConvId) {
+        chatSocket.sendTyping(resolvedConvId, false, '', targetUid);
+      } else if (targetUid) {
+        chatSocket.sendAction('typing', {
+          targetUserId: targetUid,
+          isTyping: false,
+          text: '',
+        });
+      }
     }
+  };
+
+  // Helper to resolve currently active typing status (ONLY OPPOSITE PERSON)
+  const getActiveTyping = () => {
+    const currentContactUid = selectedContact
+      ? Number(selectedContact.userId || selectedContact.id)
+      : null;
+
+    // Only show typing if the opposite person (remote party) is typing
+    const remoteTyping =
+      (selectedConversationId &&
+        typingMap[String(selectedConversationId)]?.isTyping &&
+        typingMap[String(selectedConversationId)]) ||
+      (currentContactUid &&
+        typingMap['u_' + currentContactUid]?.isTyping &&
+        typingMap['u_' + currentContactUid]) ||
+      Object.values(typingMap).find(
+        (t) =>
+          t &&
+          t.isTyping &&
+          (!user || Number(t.userId) !== Number(user.id)) &&
+          ((currentContactUid && Number(t.userId) === currentContactUid) ||
+            (selectedConversationId && Number(t.conversationId) === Number(selectedConversationId)))
+      ) ||
+      null;
+
+    // Ensure it is strictly from the opposite person, never the current user
+    if (
+      remoteTyping &&
+      remoteTyping.isTyping &&
+      (!user || Number(remoteTyping.userId) !== Number(user.id))
+    ) {
+      return {
+        isTyping: true,
+        isMe: false,
+        userName: remoteTyping.userName || selectedContact?.name || 'Member',
+        text: remoteTyping.text || '',
+      };
+    }
+
+    return null;
   };
 
   // Load Conversations list (force fresh network fetch)
@@ -866,7 +934,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         setChatMessages((prev) =>
           prev.map((m) => {
             const isMe = user ? Number(m.senderId) === Number(user.id) : Boolean(m.isMe);
-            return isMe ? { ...m, readAt: data.readAt } : m;
+            const wasReadByRecipient = Number(m.recipientId) === Number(data.userId);
+            return isMe && wasReadByRecipient ? { ...m, readAt: data.readAt } : m;
           })
         );
       }
@@ -875,7 +944,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         prev.map((c) => {
           if (c.id === data.conversationId && c.lastMessage) {
             const lastMsgIsMe = user ? Number(c.lastMessage.senderId) === Number(user.id) : Boolean(c.lastMessage.isMe);
-            if (lastMsgIsMe) {
+            const readByOtherParticipant = Number(c.otherParticipant.id) === Number(data.userId);
+            if (lastMsgIsMe && readByOtherParticipant) {
               return {
                 ...c,
                 lastMessage: {
@@ -890,34 +960,63 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       );
     });
 
-    const unsubTyping = chatSocket.on('typing.updated', (data: { conversationId: number; userId: number; userName?: string; isTyping: boolean }) => {
-      if (user && Number(data.userId) === Number(user.id)) return;
+    const unsubTyping = chatSocket.on(
+      'typing.updated',
+      (data: {
+        conversationId?: number;
+        userId: number;
+        userName?: string;
+        isTyping: boolean;
+        text?: string;
+      }) => {
+        const convId = Number(data.conversationId);
+        const uid = Number(data.userId);
+        if (!convId && !uid) return;
 
-      const convId = Number(data.conversationId);
-      if (!convId) return;
+        // Strictly ignore any typing event from the current logged-in user (only opposite person typing is shown)
+        if (user && Number(data.userId) === Number(user.id)) {
+          return;
+        }
 
-      setTypingMap((prev) => ({
-        ...prev,
-        [convId]: { isTyping: data.isTyping, userName: data.userName },
-      }));
+        const entry: ActiveTypingEntry = {
+          conversationId: convId || undefined,
+          userId: uid,
+          userName: data.userName,
+          isTyping: Boolean(data.isTyping),
+          text: data.text || '',
+        };
 
-      if (typingTimeoutRefs.current[convId]) {
-        clearTimeout(typingTimeoutRefs.current[convId]);
+        setTypingMap((prev) => {
+          const next = { ...prev };
+          if (convId) next[String(convId)] = entry;
+          if (uid) next['u_' + uid] = entry;
+          return next;
+        });
+
+        const timerKey = String(convId || ('u_' + uid));
+        if (typingTimeoutRefs.current[timerKey]) {
+          clearTimeout(typingTimeoutRefs.current[timerKey]);
+        }
+        if (data.isTyping) {
+          typingTimeoutRefs.current[timerKey] = setTimeout(() => {
+            setTypingMap((prev) => {
+              const next = { ...prev };
+              if (convId) delete next[String(convId)];
+              if (uid) delete next['u_' + uid];
+              return next;
+            });
+          }, 3500);
+        }
       }
-      if (data.isTyping) {
-        typingTimeoutRefs.current[convId] = setTimeout(() => {
-          setTypingMap((prev) => ({
-            ...prev,
-            [convId]: { isTyping: false },
-          }));
-        }, 4000);
-      }
-    });
+    );
 
-    const unsubPresence = chatSocket.on('user.presence', (data: { userId: number; isOnline: boolean; lastSeenAt?: string }) => {
+    const handlePresenceEvent = (data: { userId: number; isOnline: boolean; lastSeenAt?: string }) => {
+      const uid = Number(data.userId);
+      if (!uid) return;
+
       setConversations((prev) =>
         prev.map((c) => {
-          if (c.otherParticipant && c.otherParticipant.id === data.userId) {
+          if (c.otherParticipant && Number(c.otherParticipant.id) === uid) {
             return {
               ...c,
               otherParticipant: {
@@ -931,7 +1030,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         })
       );
       setSelectedContact((prev) => {
-        if (prev && (prev.userId === data.userId || Number(prev.id) === Number(data.userId))) {
+        if (prev && (Number(prev.userId) === uid || Number(prev.id) === uid)) {
           return {
             ...prev,
             isOnline: data.isOnline,
@@ -940,7 +1039,66 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
         }
         return prev;
       });
+      setBackendContacts((prev) =>
+        prev.map((contact) => {
+          const cUid = contact.userId != null ? Number(contact.userId) : Number(contact.id);
+          if (cUid === uid) {
+            return {
+              ...contact,
+              isOnline: data.isOnline,
+              lastSeenAt: data.lastSeenAt || contact.lastSeenAt,
+            };
+          }
+          return contact;
+        })
+      );
+    };
+
+    const unsubPresence = chatSocket.on('user.presence', handlePresenceEvent);
+
+    const handleOnlineIds = (ids: number[]) => {
+      if (!Array.isArray(ids)) return;
+      const onlineSet = new Set(ids.map(Number));
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.otherParticipant && onlineSet.has(Number(c.otherParticipant.id))) {
+            return {
+              ...c,
+              otherParticipant: { ...c.otherParticipant, isOnline: true },
+            };
+          }
+          return c;
+        })
+      );
+      setSelectedContact((prev) => {
+        if (prev) {
+          const pId = Number(prev.userId || prev.id);
+          if (onlineSet.has(pId)) {
+            return { ...prev, isOnline: true };
+          }
+        }
+        return prev;
+      });
+      setBackendContacts((prev) =>
+        prev.map((contact) => {
+          const cUid = Number(contact.userId != null ? contact.userId : contact.id);
+          if (onlineSet.has(cUid)) {
+            return { ...contact, isOnline: true };
+          }
+          return contact;
+        })
+      );
+    };
+
+    const unsubReady = chatSocket.on('connection.ready', (data: any) => {
+      if (data?.onlineUserIds) handleOnlineIds(data.onlineUserIds);
     });
+
+    const unsubSnapshot = chatSocket.on('presence.snapshot', (data: any) => {
+      if (data?.onlineUserIds) handleOnlineIds(data.onlineUserIds);
+    });
+
+    chatSocket.queryPresence();
 
     const unsubUnread = chatSocket.on('unread_count.updated', (data: { totalUnread: number; conversationId?: number; conversationUnread?: number }) => {
       if (data.conversationId !== undefined) {
@@ -1006,6 +1164,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       unsubRead();
       unsubTyping();
       unsubPresence();
+      unsubReady();
+      unsubSnapshot();
       unsubUnread();
       unsubUpdate();
       unsubDelete();
@@ -1475,9 +1635,29 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       const p = pendingChatRef.current;
       pendingChatRef.current = null;
       void openChatWith(p);
-    } else if (!selectedConversationId && conversations.length > 0 && activeSubTab === 'chats' && !pendingChatRef.current) {
+    } else if (
+      !initialAutoSelectDone.current &&
+      typeof window !== 'undefined' &&
+      window.innerWidth >= 1024 &&
+      !selectedConversationId &&
+      conversations.length > 0 &&
+      activeSubTab === 'chats' &&
+      !pendingChatRef.current
+    ) {
+      initialAutoSelectDone.current = true;
       void handleSelectConversation(conversations[0]);
-    } else if (!selectedContact && !selectedConversationId && effectiveContacts.length > 0 && activeSubTab === 'chats' && !pendingChatRef.current && conversations.length === 0) {
+    } else if (
+      !initialAutoSelectDone.current &&
+      typeof window !== 'undefined' &&
+      window.innerWidth >= 1024 &&
+      !selectedContact &&
+      !selectedConversationId &&
+      effectiveContacts.length > 0 &&
+      activeSubTab === 'chats' &&
+      !pendingChatRef.current &&
+      conversations.length === 0
+    ) {
+      initialAutoSelectDone.current = true;
       void handleSelectContact(effectiveContacts[0]);
     }
   }, [effectiveContacts.length, conversations, activeSubTab, openChatWith, selectedConversationId, selectedContact, handleSelectConversation]);
@@ -2053,818 +2233,15 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   const muted = isGlass ? 'text-slate-400' : 'text-slate-500';
 
   return (
-    <section className="space-y-6">
-      {/* ── Header Banner ── */}
-      <header className={`flex flex-col gap-4 rounded-3xl border p-6 md:flex-row md:items-center md:justify-between ${surface}`}>
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-bold text-indigo-500">
-              <MessageSquare className="h-3.5 w-3.5" />
-              {copy.channel}
-            </span>
-            <span className="text-xs font-semibold text-slate-400">· {copy.audience}</span>
-          </div>
-          <h1 className={`mt-2 text-2xl font-black tracking-tight ${title}`}>{copy.title}</h1>
-          <p className={`mt-1 text-sm ${muted}`}>{copy.subtitle}</p>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="flex items-center gap-2">
-          {resolvedRole === 'Teacher' && (
-            <button
-              onClick={() => {
-                setActiveSubTab('requests');
-                setShowLeaveForm(true);
-              }}
-              className="flex items-center gap-2 rounded-2xl bg-amber-500 px-5 py-3 text-xs font-extrabold text-white shadow-lg shadow-amber-500/20 transition hover:bg-amber-600 active:scale-95"
-            >
-              <Calendar className="h-4 w-4" />
-              Submit Leave / Holiday Request
-            </button>
-          )}
-
-          {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && (
-            <button
-              onClick={() => setActiveSubTab('broadcasts')}
-              className="flex items-center gap-2 rounded-2xl bg-indigo-600 px-5 py-3 text-xs font-extrabold text-white shadow-lg shadow-indigo-600/20 transition hover:bg-indigo-700 active:scale-95"
-            >
-              <Megaphone className="h-4 w-4" />
-              New Broadcast Announcement
-            </button>
-          )}
-
-          {resolvedRole === 'Student' && onNavigateToTab && (
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('homework')}
-              className="flex items-center gap-2 rounded-2xl bg-white border border-slate-200 px-4 py-2.5 text-xs font-extrabold text-indigo-700 shadow-sm transition hover:bg-indigo-50 active:scale-95 cursor-pointer"
-            >
-              <BookOpen className="h-4 w-4 text-indigo-600" />
-              View Class Homework →
-            </button>
-          )}
-
-          {resolvedRole === 'Parent' && onNavigateToTab && (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => onNavigateToTab('homework')}
-                className="flex items-center gap-2 rounded-2xl bg-white border border-slate-200 px-4 py-2.5 text-xs font-extrabold text-blue-700 shadow-sm transition hover:bg-blue-50 active:scale-95 cursor-pointer"
-              >
-                <BookOpen className="h-4 w-4 text-blue-600" />
-                Class Homework →
-              </button>
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* ── Main Navigation Sub-Tabs & Reset Control Bar (Hidden when single tab) ── */}
-      {allowedSubTabs.length > 1 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
-          <div className="flex flex-wrap items-center gap-2">
-            {allowedSubTabs.includes('chats') && (
-              <button
-                onClick={() => setActiveSubTab('chats')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition cursor-pointer ${activeSubTab === 'chats'
-                    ? 'bg-[#00a884] text-white shadow-md'
-                    : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-              >
-                <MessageSquare className="h-4 w-4" />
-                Direct Chat
-                {totalChatUnreadCount > 0 && (
-                  <span className="ml-1 rounded-full bg-[#25D366] px-2 py-0.5 text-[10px] font-black text-white shadow-xs">
-                    {totalChatUnreadCount}
-                  </span>
-                )}
-              </button>
-            )}
-
-            {allowedSubTabs.includes('requests') && (
-              <button
-                onClick={() => setActiveSubTab('requests')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition cursor-pointer ${activeSubTab === 'requests'
-                    ? 'bg-indigo-600 text-white shadow-md'
-                    : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-              >
-                <Bell className="h-4 w-4" />
-                {resolvedRole === 'Student'
-                  ? 'Class Notices & Announcements'
-                  : 'Community Notices & Requests'}
-                {pendingRequestsCount > 0 && (
-                  <span className="ml-1 rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-black text-white">
-                    {pendingRequestsCount} Pending
-                  </span>
-                )}
-                {unreadCount > 0 && pendingRequestsCount === 0 && (
-                  <span className="ml-1 rounded-full bg-indigo-400 px-2 py-0.5 text-[10px] font-black text-white">
-                    {unreadCount}
-                  </span>
-                )}
-              </button>
-            )}
-
-            {allowedSubTabs.includes('broadcasts') && (
-              <button
-                onClick={() => setActiveSubTab('broadcasts')}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-extrabold transition cursor-pointer ${activeSubTab === 'broadcasts'
-                    ? 'bg-indigo-600 text-white shadow-md'
-                    : isGlass ? 'bg-slate-900 text-slate-300 hover:bg-slate-800' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-              >
-                <Megaphone className="h-4 w-4" />
-                Community Broadcast Desk
-              </button>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Admin Reset Buttons */}
-            {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && activeSubTab === 'requests' && (
-              <button
-                onClick={() => setShowResetNotifModal(true)}
-                className="flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-extrabold text-rose-600 hover:bg-rose-100 transition"
-              >
-                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                Reset All Notifications
-              </button>
-            )}
-
-            {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && activeSubTab === 'chats' && (
-              <button
-                onClick={() => setShowResetChatModal(true)}
-                className="flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-extrabold text-rose-600 hover:bg-rose-100 transition"
-              >
-                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                Reset All Chats
-              </button>
-            )}
-
-            <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-[11px] font-bold text-emerald-600">
-              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-              Connected to Live Gateway
-            </span>
-
-            <button
-              onClick={() => void loadNotifications(true)}
-              className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition ${isGlass ? 'border-slate-800 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-                }`}
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${inboxLoading ? 'animate-spin text-indigo-500' : ''}`} />
-              Refresh
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────────────────── */}
-      {/* SUB-TAB 1: NOTIFICATIONS & LEAVE REQUESTS (NOT for Parent role)            */}
-      {/* ─────────────────────────────────────────────────────────────────────────── */}
-      {activeSubTab === 'requests' && allowedSubTabs.includes('requests') && resolvedRole !== 'Parent' && (
-        <div className={`rounded-3xl border ${surface}`}>
-          {/* Header & Filter Bar */}
-          <div className={`flex flex-wrap items-center justify-between gap-3 border-b p-5 ${divider}`}>
-            <div className="flex items-center gap-3">
-              <div className="grid h-9 w-9 place-items-center rounded-2xl bg-indigo-500/10 text-indigo-600">
-                <Bell className="h-5 w-5" />
-              </div>
-              <div>
-                <h2 className={`text-base font-extrabold ${title}`}>
-                  {resolvedRole === 'Student'
-                    ? 'Class Notices & School Announcements'
-                    : 'Notifications & Staff Requests'}
-                </h2>
-                <p className={`text-xs ${muted}`}>
-                  {resolvedRole === 'Student'
-                    ? 'Official class alerts, timetable changes and school announcements'
-                    : 'Manage staff leave requests, approvals and incoming announcements'}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              {resolvedRole === 'Teacher' && (
-                <button
-                  onClick={() => setShowLeaveForm(!showLeaveForm)}
-                  className="rounded-xl bg-amber-500 px-3.5 py-1.5 text-xs font-extrabold text-white shadow-xs transition hover:bg-amber-600 cursor-pointer"
-                >
-                  {showLeaveForm ? 'Close Form' : '+ New Leave Request'}
-                </button>
-              )}
-
-              {/* Category Filter Pills */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="mr-1 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  <Filter className="h-3 w-3" /> Filter:
-                </span>
-                {[
-                  { id: 'all', label: 'All' },
-                  ...(resolvedRole !== 'Student' ? [{ id: 'requests', label: 'Leave Requests' }] : []),
-                  { id: 'urgent', label: 'Urgent' },
-                  { id: 'general', label: 'Notices' },
-                ].map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => setRequestFilter(f.id as any)}
-                    className={`rounded-xl px-3 py-1 text-xs font-extrabold transition cursor-pointer ${requestFilter === f.id
-                        ? 'bg-indigo-600 text-white shadow-xs'
-                        : isGlass ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Teacher Submission Form Modal / Drawer */}
-          {showLeaveForm && resolvedRole === 'Teacher' && (
-            <form onSubmit={handleSubmitLeaveRequest} className={`space-y-4 border-b p-5 ${panelSoft} ${divider}`}>
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-extrabold text-amber-600 flex items-center gap-2">
-                  <Calendar className="h-4 w-4" /> Submit Official Staff Request
-                </h3>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setLeaveCategory('Leave Request')}
-                    className={`rounded-lg px-2.5 py-1 text-xs font-bold cursor-pointer ${leaveCategory === 'Leave Request' ? 'bg-amber-500 text-white' : 'bg-slate-200 text-slate-700'
-                      }`}
-                  >
-                    Leave Request
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLeaveCategory('Holiday Request')}
-                    className={`rounded-lg px-2.5 py-1 text-xs font-bold cursor-pointer ${leaveCategory === 'Holiday Request' ? 'bg-amber-500 text-white' : 'bg-slate-200 text-slate-700'
-                      }`}
-                  >
-                    Holiday Request
-                  </button>
-                </div>
-              </div>
-
-              <input
-                type="text"
-                placeholder="Reason summary (e.g. Medical leave for 2 days, Family emergency)…"
-                value={leaveTitle}
-                onChange={(e) => setLeaveTitle(e.target.value)}
-                required
-                className={`w-full rounded-xl border px-3 py-2 text-xs font-semibold ${inputClass}`}
-              />
-
-              <textarea
-                rows={2}
-                placeholder="Provide details of dates requested, reason and substitute arrangements…"
-                value={leaveReason}
-                onChange={(e) => setLeaveReason(e.target.value)}
-                required
-                className={`w-full rounded-xl border px-3 py-2 text-xs ${inputClass}`}
-              />
-
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowLeaveForm(false)}
-                  className="rounded-xl border border-slate-200 px-4 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSending}
-                  className="flex items-center gap-1.5 rounded-xl bg-amber-500 px-5 py-1.5 text-xs font-extrabold text-white shadow-md hover:bg-amber-600 disabled:opacity-50 cursor-pointer"
-                >
-                  {isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                  Submit to Admin
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* Notifications Stream Cards */}
-          <div ref={inboxContainerRef} className="p-5 space-y-3 max-h-[620px] overflow-y-auto">
-            {inboxLoading ? (
-              <div className="grid place-items-center py-16 text-center">
-                <Loader2 className="h-8 w-8 animate-spin text-indigo-500 mx-auto" />
-                <p className="mt-3 text-xs font-bold text-slate-400">Loading notices…</p>
-              </div>
-            ) : filteredNotifications.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 p-12 text-center bg-slate-50/50">
-                <Bell className="mx-auto h-8 w-8 text-slate-300" />
-                <h3 className="mt-2 text-sm font-extrabold text-slate-700">No notices in this view</h3>
-                <p className="mt-1 text-xs text-slate-400">Incoming broadcasts and official announcements will appear here automatically.</p>
-              </div>
-            ) : (
-              filteredNotifications.map((n) => {
-                const style = getNotificationCardStyle(n);
-                const isReq = isLeaveRequest(n);
-                const isChatNotif =
-                  n.channel === 'chat' ||
-                  n.channel === 'CHAT' ||
-                  n.category === 'Message' ||
-                  (n.category || '').toLowerCase().includes('chat') ||
-                  (n.title || '').toLowerCase().startsWith('new message from');
-
-                return (
-                  <div
-                    key={n.id}
-                    onClick={() => {
-                      if (isChatNotif) {
-                        openChatFromNotification(n);
-                      }
-                    }}
-                    className={`rounded-2xl border p-4 transition-all duration-200 space-y-3 ${style.border} ${
-                      !n.readAt ? 'ring-1 ring-indigo-500/20' : ''
-                    } ${
-                      isChatNotif
-                        ? 'cursor-pointer hover:border-indigo-400 hover:shadow-md hover:bg-indigo-50/20 active:scale-[0.99]'
-                        : ''
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3">
-                        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${style.iconBg}`}>
-                          <style.Icon className="h-4 w-4" />
-                        </div>
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className={`text-xs font-black ${title}`}>{n.senderName}</span>
-                            <span className={`rounded-full px-2.5 py-0.5 text-[10px] ${style.badge}`}>
-                              {style.tagText || n.category}
-                            </span>
-                          </div>
-                          <h3 className={`mt-1.5 text-sm font-black tracking-tight ${title}`}>{n.title}</h3>
-                          <p className={`mt-1 text-xs leading-relaxed font-medium ${muted}`}>{n.body}</p>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col items-end gap-2 shrink-0">
-                        <span className="text-[10px] font-mono text-slate-400">
-                          {new Date(n.createdAt).toLocaleString()}
-                        </span>
-                        {!n.readAt && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void markRead(n.id);
-                            }}
-                            className="rounded-lg bg-indigo-50 px-2 py-1 text-[10px] font-bold text-indigo-600 hover:bg-indigo-100 cursor-pointer"
-                          >
-                            Mark Read
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Direct Private Chat Action */}
-                    {isChatNotif && (
-                      <div className="flex items-center justify-between border-t pt-2.5 mt-1 border-indigo-100">
-                        <span className="text-[11px] font-bold text-indigo-700 flex items-center gap-1.5">
-                          <MessageSquare className="h-3.5 w-3.5 text-indigo-600" />
-                          Direct Private Message
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openChatFromNotification(n);
-                          }}
-                          className="flex items-center gap-1 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 px-3.5 py-1.5 rounded-xl transition cursor-pointer shadow-xs active:scale-95"
-                        >
-                          Open Chat & View Message →
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Direct Homework Shortcut Action */}
-                    {(n.category === 'Homework' || (n.category || '').toLowerCase().includes('homework') || (n.title || '').toLowerCase().includes('homework')) && onNavigateToTab && (
-                      <div className="flex items-center justify-between border-t pt-2.5 mt-1 border-blue-100">
-                        <span className="text-[11px] font-bold text-blue-700 flex items-center gap-1.5">
-                          <BookOpen className="h-3.5 w-3.5 text-blue-600" />
-                          Class Homework Assignment
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => onNavigateToTab('homework')}
-                          className="flex items-center gap-1 text-xs font-black text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded-xl transition cursor-pointer"
-                        >
-                          Open Class Homework →
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Leave Request Status & Actions for Admin */}
-                    {isReq && (resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') && (
-                      <div className="flex items-center justify-between border-t pt-3 mt-1 border-slate-200">
-                        {(n.requestStatus || n.status || 'Pending') === 'Pending' ? (
-                          <>
-                            <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
-                              <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
-                              Pending Admin Action
-                            </span>
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => void handleRequestDecision(n, 'Declined')}
-                                className="flex items-center gap-1 rounded-xl bg-rose-50 px-3.5 py-2 text-xs font-extrabold text-rose-600 hover:bg-rose-100 transition active:scale-95 cursor-pointer"
-                              >
-                                <UserX className="h-3.5 w-3.5" /> Decline
-                              </button>
-                              <button
-                                onClick={() => void handleRequestDecision(n, 'Approved')}
-                                className="flex items-center gap-1 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-md shadow-emerald-600/20 hover:bg-emerald-700 transition active:scale-95 cursor-pointer"
-                              >
-                                <UserCheck className="h-3.5 w-3.5" /> Approve Leave
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <span className={`text-xs font-bold flex items-center gap-1.5 ${(n.requestStatus || n.status) === 'Approved' ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            {(n.requestStatus || n.status) === 'Approved' ? (
-                              <>
-                                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                                Leave Approved
-                              </>
-                            ) : (
-                              <>
-                                <UserX className="h-4 w-4 text-rose-600" />
-                                Leave Declined
-                              </>
-                            )}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Leave Request Status Indicator for Teacher */}
-                    {isReq && resolvedRole === 'Teacher' && (
-                      <div className="flex items-center justify-between border-t pt-3 mt-1 border-slate-200">
-                        {(n.requestStatus || n.status || 'Pending') === 'Pending' ? (
-                          <span className="text-xs font-bold text-amber-700 flex items-center gap-1.5">
-                            <Clock className="h-4 w-4 text-amber-600 animate-pulse" />
-                            Pending Admin Approval
-                          </span>
-                        ) : (
-                          <span className={`text-xs font-bold flex items-center gap-1.5 ${(n.requestStatus || n.status) === 'Approved' ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            {(n.requestStatus || n.status) === 'Approved' ? (
-                              <>
-                                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                                Approved by Admin
-                              </>
-                            ) : (
-                              <>
-                                <UserX className="h-4 w-4 text-rose-600" />
-                                Declined by Admin
-                              </>
-                            )}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────────────────── */}
-      {/* SUB-TAB 2: BROADCAST DESK (ADMIN & TEACHER ONLY)                             */}
-      {/* ─────────────────────────────────────────────────────────────────────────── */}
-      {activeSubTab === 'broadcasts' && allowedSubTabs.includes('broadcasts') && (
-        <div className={`space-y-6 rounded-3xl border p-6 ${surface}`}>
-          <div className="flex items-center gap-3 border-b pb-4 border-slate-100">
-            <div className="grid h-10 w-10 place-items-center rounded-2xl bg-indigo-500/10 text-indigo-600">
-              <Megaphone className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className={`text-base font-extrabold ${title}`}>Broadcast Announcement Desk</h2>
-              <p className={`text-xs ${muted}`}>
-                {resolvedRole === 'Teacher'
-                  ? 'Send official announcements to your assigned class students and their parents'
-                  : 'Broadcast notices and announcements filtered by class, section, teachers or students'}
-              </p>
-            </div>
-          </div>
-
-          <form onSubmit={handleSendBroadcast} className="space-y-4 rounded-2xl border p-5 bg-slate-50/50">
-            {/* Target Audience Buttons */}
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Send To:</span>
-              {targets.map((t, i) => (
-                <button
-                  key={t.label}
-                  type="button"
-                  onClick={() => {
-                    setSelectedTargetIdx(i);
-                    setRecipientMode('all');
-                    setRecipients('');
-                    setSelectedClassId('All');
-                    setSelectedClassName('All');
-                    setSelectedSectionId('All');
-                    setSelectedSectionName('All');
-                  }}
-                  className={`rounded-xl px-3.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${selectedTargetIdx === i
-                      ? 'bg-indigo-600 text-white shadow-md'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                    }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-
-              <div className="ml-auto flex items-center gap-2">
-                <span className="text-xs font-bold text-slate-400">Category:</span>
-                <select
-                  value={broadcastCategory}
-                  onChange={(e) => setBroadcastCategory(e.target.value)}
-                  className={`rounded-xl border px-3 py-1.5 text-xs font-bold ${inputClass}`}
-                >
-                  {(selectedTarget?.categories ?? []).map((c) => (
-                    <option key={c}>{c}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* ADMIN AUDIENCE CONTROLS: FOR TEACHERS */}
-            {selectedTarget?.endpoint === '/notifications/school-to-teachers/' && (
-              <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-200">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Audience Selection:</span>
-                <button
-                  type="button"
-                  onClick={() => { setRecipientMode('all'); setRecipients(''); }}
-                  className={`rounded-full px-3 py-1 text-xs font-bold transition cursor-pointer ${recipientMode === 'all'
-                      ? 'bg-indigo-600 text-white shadow-xs'
-                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                    }`}
-                >
-                  All Teachers
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecipientMode('individual')}
-                  className={`rounded-full px-3 py-1 text-xs font-bold transition cursor-pointer ${recipientMode === 'individual'
-                      ? 'bg-indigo-600 text-white shadow-xs'
-                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                    }`}
-                >
-                  Particular Teacher(s)
-                </button>
-              </div>
-            )}
-
-            {/* Particular Teacher Chips */}
-            {selectedTarget?.endpoint === '/notifications/school-to-teachers/' && recipientMode === 'individual' && (
-              <div className="space-y-2 pt-1">
-                <input
-                  type="text"
-                  placeholder="Selected teacher names..."
-                  value={recipients}
-                  onChange={(e) => setRecipients(e.target.value)}
-                  className={`w-full rounded-xl border px-3 py-2 text-xs ${inputClass}`}
-                />
-                {teacherList.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[10px] font-bold uppercase text-slate-400">Click teacher to add:</span>
-                    {teacherList.map((t) => {
-                      const isSelected = recipients.split(/[\n,]/).map((v) => v.trim()).includes(t.name);
-                      return (
-                        <button
-                          type="button"
-                          key={t.id}
-                          onClick={() => {
-                            const list = recipients.split(/[\n,]/).map((v) => v.trim()).filter(Boolean);
-                            const updated = isSelected ? list.filter((item) => item !== t.name) : [...list, t.name];
-                            setRecipients(updated.join(', '));
-                          }}
-                          className={`rounded-full px-2.5 py-0.5 text-xs font-bold transition cursor-pointer ${isSelected ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                            }`}
-                        >
-                          {t.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ADMIN AUDIENCE CONTROLS: FOR STUDENTS AND PARENTS (CLASS & SECTION FILTERING) */}
-            {(resolvedRole === 'School Admin' || resolvedRole === 'Super Admin') &&
-              (selectedTarget?.endpoint === '/notifications/teacher-to-students/' || selectedTarget?.endpoint === '/notifications/teacher-to-parents/') && (
-                <div className="space-y-3 pt-2 border-t border-slate-200">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Audience Scope:</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRecipientMode('all');
-                        setRecipients('');
-                        setSelectedClassId('All');
-                        setSelectedClassName('All');
-                        setSelectedSectionId('All');
-                        setSelectedSectionName('All');
-                      }}
-                      className={`rounded-full px-3 py-1 text-xs font-bold transition cursor-pointer ${recipientMode === 'all'
-                          ? 'bg-indigo-600 text-white shadow-xs'
-                          : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                        }`}
-                    >
-                      All {selectedTarget.label.replace('Notify ', '')} (School-Wide)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { setRecipientMode('class_section'); }}
-                      className={`rounded-full px-3 py-1 text-xs font-bold transition cursor-pointer ${recipientMode === 'class_section'
-                          ? 'bg-indigo-600 text-white shadow-xs'
-                          : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                        }`}
-                    >
-                      Filter by Class & Section
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { setRecipientMode('individual'); }}
-                      className={`rounded-full px-3 py-1 text-xs font-bold transition cursor-pointer ${recipientMode === 'individual'
-                          ? 'bg-indigo-600 text-white shadow-xs'
-                          : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                        }`}
-                    >
-                      Particular Individual(s)
-                    </button>
-                  </div>
-
-                  {recipientMode === 'class_section' && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100">
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1 flex items-center gap-1.5">
-                          <Layers className="w-3.5 h-3.5 text-indigo-600" /> Target Class
-                        </label>
-                        <select
-                          value={selectedClassId}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setSelectedClassId(val === 'All' ? 'All' : Number(val));
-                            const cls = academicClasses.find((c) => String(c.id) === val);
-                            setSelectedClassName(cls ? cls.name : 'All');
-                            setSelectedSectionId('All');
-                            setSelectedSectionName('All');
-                          }}
-                          className={`w-full rounded-xl border p-2 text-xs font-bold ${inputClass}`}
-                        >
-                          <option value="All">All Classes (Entire School)</option>
-                          {academicClasses.map((c) => (
-                            <option key={c.id} value={c.id}>{c.name.startsWith('Class') ? c.name : `Class ${c.name}`}</option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1 flex items-center gap-1.5">
-                          <Users className="w-3.5 h-3.5 text-indigo-600" /> Target Section
-                        </label>
-                        <select
-                          value={selectedSectionId}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setSelectedSectionId(val === 'All' ? 'All' : Number(val));
-                            const sec = academicSections.find((s) => String(s.id) === val);
-                            setSelectedSectionName(sec ? sec.name : 'All');
-                          }}
-                          className={`w-full rounded-xl border p-2 text-xs font-bold ${inputClass}`}
-                        >
-                          <option value="All">All Sections of Selected Class</option>
-                          {academicSections
-                            .filter((s) => selectedClassId === 'All' || s.classId === Number(selectedClassId))
-                            .map((s) => (
-                              <option key={s.id} value={s.id}>Section {s.name}</option>
-                            ))}
-                        </select>
-                      </div>
-
-                      <div className="sm:col-span-2 text-[11px] font-bold text-indigo-800 bg-white p-2.5 rounded-xl border border-indigo-100 flex items-center gap-2">
-                        <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
-                        <span>
-                          Targeting: <strong>{selectedClassName === 'All' ? 'All Classes' : selectedClassName}</strong> — <strong>{selectedSectionName === 'All' ? 'All Sections' : `Section ${selectedSectionName}`}</strong> ({selectedTarget.label.includes('Parents') ? 'Parents classified by their child’s enrolled class & section' : 'Enrolled students'}).
-                        </span>
-                      </div>
-                    </div>
-                  )}
-
-                  {recipientMode === 'individual' && (
-                    <div className="space-y-1.5 pt-1">
-                      <input
-                        type="text"
-                        placeholder="Enter Student Name, Admission No, or ID (comma separated)…"
-                        value={recipients}
-                        onChange={(e) => setRecipients(e.target.value)}
-                        className={`w-full rounded-xl border px-3 py-2 text-xs ${inputClass}`}
-                      />
-                      <p className="text-[10px] text-slate-400">
-                        {selectedTarget.label.includes('Parents')
-                          ? 'Enter the student name or admission number to target their linked parent(s).'
-                          : 'Enter the student name or admission number to target.'}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-            {/* TEACHER AUDIENCE CONTROLS: STRICTLY ASSIGNED CLASS & SECTION STUDENTS AND PARENTS */}
-            {resolvedRole === 'Teacher' &&
-              (selectedTarget?.endpoint === '/notifications/teacher-to-students/' || selectedTarget?.endpoint === '/notifications/teacher-to-parents/') && (
-                <div className="space-y-3 pt-2 border-t border-slate-200">
-                  <div className="p-4 bg-amber-50/60 rounded-2xl border border-amber-200 space-y-2">
-                    <label className="block text-xs font-black text-amber-900 uppercase flex items-center gap-1.5">
-                      <Layers className="w-4 h-4 text-amber-600" /> Select Your Assigned Class & Section
-                    </label>
-                    <select
-                      value={selectedSectionId}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val === 'All') {
-                          setSelectedClassId('All');
-                          setSelectedClassName('All');
-                          setSelectedSectionId('All');
-                          setSelectedSectionName('All');
-                          setRecipientMode('all');
-                        } else {
-                          setRecipientMode('class_section');
-                          const opt = teacherAssignedOptions.find((o) => String(o.sectionId || o.label) === val);
-                          if (opt) {
-                            setSelectedClassId(opt.classId || 'All');
-                            setSelectedClassName(opt.className || 'All');
-                            setSelectedSectionId(opt.sectionId || 'All');
-                            setSelectedSectionName(opt.sectionName || 'All');
-                          }
-                        }
-                      }}
-                      className={`w-full rounded-xl border p-2.5 text-xs font-bold ${inputClass}`}
-                    >
-                      <option value="All">All My Assigned Classes & Sections</option>
-                      {teacherAssignedOptions.map((opt) => (
-                        <option key={opt.sectionId || opt.label} value={opt.sectionId || opt.label}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-[11px] font-semibold text-amber-800">
-                      Messages broadcast strictly to your assigned students and their parents.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-            <input
-              type="text"
-              placeholder="Announcement Title…"
-              value={broadcastTitle}
-              onChange={(e) => setBroadcastTitle(e.target.value)}
-              required
-              className={`w-full rounded-xl border px-4 py-2.5 text-sm font-semibold ${inputClass}`}
-            />
-
-            <textarea
-              rows={3}
-              placeholder="Announcement body content…"
-              value={broadcastBody}
-              onChange={(e) => setBroadcastBody(e.target.value)}
-              required
-              className={`w-full rounded-xl border px-4 py-2.5 text-sm ${inputClass}`}
-            />
-
-            <div className="flex items-center justify-between">
-              {sendError && <p className="text-xs font-bold text-rose-600">{sendError}</p>}
-              <button
-                type="submit"
-                disabled={isSending}
-                className="ml-auto flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-extrabold text-white shadow-md transition hover:bg-indigo-700 disabled:opacity-60 cursor-pointer"
-              >
-                {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                Publish Broadcast
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* ─────────────────────────────────────────────────────────────────────────── */}
-      {/* SUB-TAB 3: ISOLATED PRIVATE 1-ON-1 CHAT (TEACHER, PARENT, ADMIN ONLY)        */}
-      {/* ─────────────────────────────────────────────────────────────────────────── */}
-      {activeSubTab === 'chats' && allowedSubTabs.includes('chats') && (
-        <div className={`grid grid-cols-1 md:grid-cols-3 rounded-3xl border border-slate-200 shadow-sm overflow-hidden h-[calc(100vh-140px)] min-h-[580px] max-h-[840px] ${surface}`}>
-          {/* WhatsApp Contacts / Recent Chats Sidebar */}
-          <div className="flex flex-col h-full min-h-0 border-r border-[#e9edef] bg-white overflow-hidden">
+    <section className="h-full flex flex-col min-h-0 animate-fade-in" id="communication-direct-chat">
+        <div className={`flex rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xl overflow-hidden h-[calc(100vh-120px)] min-h-[540px] max-h-[860px] ${surface}`}>
+          {/* Direct Chats Contact List Sidebar (Full-width on mobile/tablet when no chat is open, fixed width on desktop) */}
+          <div className={`${(selectedConversationId || selectedContact) ? 'hidden lg:flex' : 'flex'} w-full lg:w-80 xl:w-96 flex-col h-full min-h-0 border-r border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0 overflow-hidden`}>
             {/* Sidebar Top Search & Header */}
-            <div className="p-3 border-b border-[#f0f2f5] bg-[#f0f2f5]/80 shrink-0 space-y-2 select-none">
+            <div className="p-3 border-b border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/80 backdrop-blur-md shrink-0 space-y-2.5 select-none">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className="grid h-7 w-7 place-items-center rounded-lg bg-[#00a884] text-white">
+                  <div className="grid h-8 w-8 place-items-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/20">
                     <MessageSquare className="w-4 h-4" />
                   </div>
                   <div>
@@ -2876,7 +2253,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                     </p>
                   </div>
                 </div>
-                <span className="text-[10px] font-extrabold text-[#008069] bg-[#e7f8f5] border border-[#c3ede6] px-2.5 py-0.5 rounded-full">
+                <span className="text-[10px] font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200/80 dark:border-indigo-800/80 px-2.5 py-0.5 rounded-full shadow-2xs">
                   {contactSearch.trim() ? `${filteredContacts.length} Found` : `${conversations.length} Active`}
                 </span>
               </div>
@@ -2895,7 +2272,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   }
                   value={contactSearch}
                   onChange={(e) => setContactSearch(e.target.value)}
-                  className={`w-full rounded-xl border pl-9 pr-8 py-2 text-xs bg-white border-slate-200 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#00a884]`}
+                  className={`w-full rounded-xl border pl-9 pr-8 py-2 text-xs bg-white border-slate-200 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20`}
                 />
                 {contactSearch && (
                   <button
@@ -2919,7 +2296,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         onClick={() => setParentChildFilter('All')}
                         className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
                           parentChildFilter === 'All'
-                            ? 'bg-[#00a884] text-white'
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-xs'
                             : 'bg-white border border-slate-200 text-slate-600'
                         }`}
                       >
@@ -2932,7 +2309,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                           onClick={() => setParentChildFilter(c.id)}
                           className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
                             parentChildFilter === c.id
-                              ? 'bg-[#00a884] text-white'
+                              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-xs'
                               : 'bg-white border border-slate-200 text-slate-600'
                           }`}
                         >
@@ -2980,7 +2357,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         onClick={() => setTeacherAudienceFilter('All')}
                         className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
                           teacherAudienceFilter === 'All'
-                            ? 'bg-[#00a884] text-white'
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-xs'
                             : 'bg-white border border-slate-200 text-slate-600'
                         }`}
                       >
@@ -2991,7 +2368,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         onClick={() => setTeacherAudienceFilter('Admin')}
                         className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
                           teacherAudienceFilter === 'Admin'
-                            ? 'bg-[#00a884] text-white'
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-xs'
                             : 'bg-white border border-slate-200 text-slate-600'
                         }`}
                       >
@@ -3002,7 +2379,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         onClick={() => setTeacherAudienceFilter('Parents')}
                         className={`rounded-lg px-2 py-0.5 text-[10px] font-bold cursor-pointer ${
                           teacherAudienceFilter === 'Parents'
-                            ? 'bg-[#00a884] text-white'
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-xs'
                             : 'bg-white border border-slate-200 text-slate-600'
                         }`}
                       >
@@ -3015,7 +2392,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
             </div>
 
             {/* Conversation / Contact List Body */}
-            <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-[#f0f2f5]">
+            <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60">
               {contactSearch.trim() === '' ? (
                 // ── DEFAULT VIEW: ACTIVE CONVERSATIONS ONLY (Zero Lag, WhatsApp Style) ──
                 conversations.length === 0 ? (
@@ -3068,8 +2445,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         onClick={() => void handleSelectConversation(conv)}
                         className={`w-full flex items-center gap-3 px-3 py-3 text-left transition cursor-pointer select-none border-l-4 ${
                           isSelected
-                            ? 'bg-[#f0f2f5] border-l-[#00a884]'
-                            : 'bg-white hover:bg-[#f5f6f6] border-l-transparent'
+                            ? 'bg-indigo-50/80 dark:bg-indigo-950/40 border-l-indigo-600 shadow-2xs text-slate-900 dark:text-white'
+                            : 'bg-white dark:bg-slate-900 hover:bg-slate-50/80 dark:hover:bg-slate-800/50 border-l-transparent text-slate-700 dark:text-slate-300'
                         }`}
                       >
                         {/* Avatar */}
@@ -3077,10 +2454,10 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                           <div
                             className={`grid h-12 w-12 place-items-center rounded-full font-black text-sm text-white shadow-2xs ${
                               isAdminOffice
-                                ? 'bg-purple-600'
+                                ? 'bg-gradient-to-br from-purple-600 to-indigo-600'
                                 : isParent
-                                  ? 'bg-[#00a884]'
-                                  : 'bg-indigo-600'
+                                  ? 'bg-gradient-to-br from-emerald-600 to-teal-600'
+                                  : 'bg-gradient-to-br from-indigo-600 to-violet-600'
                             }`}
                           >
                             {(other?.name || 'User').slice(0, 2).toUpperCase()}
@@ -3095,12 +2472,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         {/* Details */}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between gap-1">
-                            <p className="text-xs font-bold text-[#111b21] truncate">
+                            <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
                               {other?.name || 'Contact'}
                             </p>
                             <span
                               className={`text-[10px] shrink-0 ml-1 ${
-                                unread > 0 ? 'text-[#25D366] font-extrabold' : 'text-slate-400 font-medium'
+                                unread > 0 ? 'text-indigo-600 dark:text-indigo-400 font-extrabold' : 'text-slate-400 font-medium'
                               }`}
                             >
                               {timeLabel}
@@ -3112,19 +2489,37 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                           </p>
 
                           <div className="flex items-center justify-between gap-1 mt-1">
-                            <p className="text-[11px] text-[#667781] truncate flex items-center gap-1">
-                              {typingMap[conv.id]?.isTyping ? (
-                                <span className="text-[#00a884] font-medium italic flex items-center gap-1">
-                                  typing...
-                                </span>
-                              ) : (
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate flex items-center gap-1">
+                              {(() => {
+                                const otherUid = conv.otherParticipant ? Number(conv.otherParticipant.id) : null;
+                                const isItemTyping =
+                                  typingMap[String(conv.id)]?.isTyping ||
+                                  (otherUid ? typingMap['u_' + otherUid]?.isTyping : false);
+                                const itemText =
+                                  typingMap[String(conv.id)]?.text ||
+                                  (otherUid ? typingMap['u_' + otherUid]?.text : '');
+
+                                if (isItemTyping) {
+                                  return (
+                                    <span className="text-indigo-600 dark:text-indigo-400 font-semibold italic flex items-center gap-1 animate-pulse">
+                                      <span>typing...</span>
+                                      <span className="inline-flex gap-0.5">
+                                        <span className="w-1 h-1 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                                        <span className="w-1 h-1 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                                        <span className="w-1 h-1 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce"></span>
+                                      </span>
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })() || (
                                 <>
                                   {(user && lastMsg ? Number(lastMsg.senderId) === Number(user.id) : Boolean(lastMsg?.isMe)) && (
-                                    <CheckCheck
-                                      className={`w-3.5 h-3.5 inline shrink-0 ${
-                                        lastMsg?.readAt ? 'text-[#EF4444]' : 'text-slate-400'
-                                      }`}
-                                    />
+                                    lastMsg?.readAt ? (
+                                      <CheckCheck aria-label="Read" className="w-3.5 h-3.5 inline shrink-0 text-sky-500" />
+                                    ) : (
+                                      <Check aria-label="Sent" className="w-3.5 h-3.5 inline shrink-0 text-slate-400" />
+                                    )
                                   )}
                                   <span className="truncate">
                                     {lastMsg
@@ -3137,7 +2532,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
 
                             {/* WhatsApp Unread Badge: 1, 2, 3... - Disappears on click */}
                             {unread > 0 && (
-                              <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-[#25D366] text-white text-[10px] font-black shrink-0 shadow-xs animate-in zoom-in-75 duration-150">
+                              <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-[10px] font-black shrink-0 shadow-sm shadow-indigo-500/25 animate-in zoom-in-75 duration-150">
                                 {unread}
                               </span>
                             )}
@@ -3173,12 +2568,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                             }}
                             className={`w-full flex items-center gap-3 p-2.5 rounded-2xl text-left transition cursor-pointer select-none border-l-4 ${
                               isSelected
-                                ? 'bg-[#f0f2f5] border-l-[#00a884]'
-                                : 'bg-white hover:bg-[#f5f6f6] border border-slate-100 border-l-transparent'
+                                ? 'bg-indigo-50/80 dark:bg-indigo-950/40 border-l-indigo-600 shadow-2xs text-slate-900 dark:text-white'
+                                : 'bg-white dark:bg-slate-900 hover:bg-slate-50/80 dark:hover:bg-slate-800/50 border border-slate-100 dark:border-slate-800 border-l-transparent text-slate-700 dark:text-slate-300'
                             }`}
                           >
                             <div className="relative shrink-0">
-                              <div className="grid h-10 w-10 place-items-center rounded-full bg-[#00a884] font-black text-xs text-white">
+                              <div className="grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-indigo-600 to-violet-600 font-black text-xs text-white">
                                 {(other?.name || 'User').slice(0, 2).toUpperCase()}
                               </div>
                               <span
@@ -3189,9 +2584,9 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                             </div>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center justify-between">
-                                <p className="text-xs font-bold text-[#111b21] truncate">{other?.name}</p>
+                                <p className="text-xs font-bold text-slate-900 dark:text-white truncate">{other?.name}</p>
                                 {unread > 0 && (
-                                  <span className="min-w-[18px] h-4 px-1 flex items-center justify-center rounded-full bg-[#25D366] text-white text-[9px] font-black">
+                                  <span className="min-w-[18px] h-4 px-1 flex items-center justify-center rounded-full bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-[9px] font-black shadow-xs">
                                     {unread}
                                   </span>
                                 )}
@@ -3249,7 +2644,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                                   isAdminOffice
                                     ? 'bg-purple-600'
                                     : isParent
-                                      ? 'bg-[#00a884]'
+                                      ? 'bg-indigo-600 dark:bg-indigo-400'
                                       : 'bg-indigo-600'
                                 }`}
                               >
@@ -3286,14 +2681,32 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
             </div>
           </div>
 
-          {/* 1-on-1 Chat Stream Window (WhatsApp Style) */}
-          <div className="md:col-span-2 flex flex-col h-full min-h-0 overflow-hidden bg-[#efeae2]">
-            {/* WhatsApp Contact Header */}
-            <div className="shrink-0 border-b px-4 py-3 border-[#e9edef] bg-[#f0f2f5] select-none flex items-center justify-between shadow-2xs">
-              <div className="flex items-center gap-3 min-w-0">
+          {/* 1-on-1 Chat Stream Window (Full-width on mobile/tablet when active, flex-1 on desktop) */}
+          <div className={`${(!selectedConversationId && !selectedContact) ? 'hidden lg:flex' : 'flex'} flex-1 flex-col h-full min-h-0 overflow-hidden bg-slate-50/70 dark:bg-slate-950`}>
+            {/* Chat Contact Header */}
+            <div className="shrink-0 border-b px-3.5 sm:px-5 py-3 border-slate-200/80 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md select-none flex items-center justify-between shadow-xs z-10">
+              <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                {/* Responsive Back Button for Tablet / Split Screen (< lg) */}
+                <button
+                  type="button"
+                  id="btn-back-to-chats"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelectedConversationId(null);
+                    setSelectedContact(null);
+                    setChatMessages([]);
+                  }}
+                  className="lg:hidden p-2 -ml-1 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 active:scale-95 transition-all flex items-center justify-center cursor-pointer shrink-0"
+                  title="Back to all chats"
+                  aria-label="Back to all chats"
+                >
+                  <ArrowLeft className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                </button>
+
                 <div className="relative shrink-0">
-                  <div className="grid h-10 w-10 place-items-center rounded-full bg-[#00a884] text-white font-black text-sm shadow-xs">
-                    {selectedContact?.name.slice(0, 2).toUpperCase() || 'WA'}
+                  <div className="grid h-9 w-9 sm:h-10 sm:w-10 place-items-center rounded-full bg-gradient-to-tr from-indigo-600 to-violet-600 text-white font-black text-xs sm:text-sm shadow-xs">
+                    {selectedContact?.name.slice(0, 2).toUpperCase() || 'CH'}
                   </div>
                   <span
                     className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ring-2 ring-white ${selectedContact && selectedContact.isOnline ? 'bg-emerald-500' : 'bg-slate-300'
@@ -3301,32 +2714,46 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   />
                 </div>
                 <div className="min-w-0">
-                  <h3 className="text-sm font-bold text-[#111b21] truncate flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate flex items-center gap-2">
                     {selectedContact?.name || 'Select a Contact to Chat'}
                   </h3>
 
-                  {/* Typing Indicator or Role Subtitle */}
-                  {(selectedConversationId && typingMap[Number(selectedConversationId)]?.isTyping) ||
-                   (selectedContact && Object.entries(typingMap).some(([cId, t]) => t.isTyping && conversations.find(c => Number(c.id) === Number(cId))?.otherParticipant?.id === selectedContact.userId)) ? (
-                    <div className="text-xs text-[#008069] font-medium flex items-center gap-1.5 animate-pulse">
-                      <span>typing</span>
-                      <span className="inline-flex gap-0.5">
-                        <span className="w-1 h-1 bg-[#008069] rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                        <span className="w-1 h-1 bg-[#008069] rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                        <span className="w-1 h-1 bg-[#008069] rounded-full animate-bounce"></span>
-                      </span>
-                    </div>
-                  ) : selectedContact ? (
-                    <div className="flex items-center gap-2 truncate">
-                      <span className={selectedContact.isOnline ? "text-[#008069] font-medium" : "text-[#667781]"}>
-                        {formatPresenceStatus(Boolean(selectedContact.isOnline), selectedContact.lastSeenAt)}
-                      </span>
+                  {/* Typing Indicator with live text preview or Online/Offline presence */}
+                  {(() => {
+                    const activeTyping = getActiveTyping();
+
+                    if (activeTyping && activeTyping.isTyping) {
+                      return (
+                        <div className="text-xs text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5 animate-pulse">
+                          <span>{activeTyping.userName} is typing</span>
+                          <span className="inline-flex gap-0.5 ml-0.5">
+                            <span className="w-1.5 h-1.5 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                            <span className="w-1.5 h-1.5 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                            <span className="w-1.5 h-1.5 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce"></span>
+                          </span>
+                        </div>
+                      );
+                    }
+
+                    if (!selectedContact) return null;
+                    const isOnline = Boolean(selectedContact.isOnline);
+                    return (
+                      <div className="flex items-center gap-2 truncate">
+                        <div className={`flex items-center gap-1.5 text-xs font-semibold ${isOnline ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                          <span className={`inline-flex rounded-full h-2 w-2 ${isOnline ? 'bg-emerald-500 shadow-xs shadow-emerald-400' : 'bg-slate-400'}`}></span>
+                          <span>{isOnline ? 'Online' : 'Offline'}</span>
+                          {!isOnline && selectedContact.lastSeenAt && (
+                            <span className="text-[10px] font-normal text-slate-400">
+                              · {formatPresenceStatus(false, selectedContact.lastSeenAt)}
+                            </span>
+                          )}
+                        </div>
                       <span className="text-slate-300">·</span>
-                      <div className="text-[11px] text-[#667781] font-medium flex flex-wrap items-center gap-1.5 truncate">
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium flex flex-wrap items-center gap-1.5 truncate">
                       {/* PARENT VIEWING TEACHER: MENTION SECTION, CLASS & SUBJECTS */}
                       {resolvedRole === 'Parent' && selectedContact.childMappings && selectedContact.childMappings.length > 0 ? (
                         selectedContact.childMappings.map((cm, idx) => (
-                          <span key={idx} className="text-[#008069] font-semibold bg-[#e7f8f5] px-2 py-0.5 rounded-md border border-[#c3ede6]">
+                          <span key={idx} className="text-indigo-600 dark:text-indigo-400 font-semibold bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-lg border border-indigo-200/70 dark:border-indigo-800/70 text-indigo-700 dark:text-indigo-300">
                             Teacher for {cm.studentName} ({cm.className.startsWith('Class') ? cm.className : `Class ${cm.className}`} - Sec {cm.sectionName}) · Subjects: {cm.subjects.join(', ')}
                           </span>
                         ))
@@ -3334,12 +2761,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         /* TEACHER VIEWING PARENT: DIFFERENTIATE BASED ON STUDENT */
                         selectedContact.students && selectedContact.students.length > 0 ? (
                           selectedContact.students.map((st, idx) => (
-                            <span key={idx} className="text-[#008069] font-semibold bg-[#e7f8f5] px-2 py-0.5 rounded-md border border-[#c3ede6]">
+                            <span key={idx} className="text-indigo-600 dark:text-indigo-400 font-semibold bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-lg border border-indigo-200/70 dark:border-indigo-800/70 text-indigo-700 dark:text-indigo-300">
                               Parent of {st.name} ({st.className.startsWith('Class') ? st.className : `Class ${st.className}`} - Sec {st.section}, Roll #{st.rollNo})
                             </span>
                           ))
                         ) : (
-                          <span className="text-[#008069] font-semibold bg-[#e7f8f5] px-2 py-0.5 rounded-md border border-[#c3ede6]">
+                          <span className="text-indigo-600 dark:text-indigo-400 font-semibold bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-lg border border-indigo-200/70 dark:border-indigo-800/70 text-indigo-700 dark:text-indigo-300">
                             {selectedContact.studentSummary || 'Parent of Student'}
                           </span>
                         )
@@ -3350,13 +2777,13 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                       ) : (
                         /* ADMIN VIEWING TEACHER: MENTION CLASS, SECTION & SUBJECTS */
                         <>
-                          <span className="text-[#008069] font-semibold">
+                          <span className="text-indigo-600 dark:text-indigo-400 font-semibold">
                             {selectedContact.assignedSections && selectedContact.assignedSections.length > 0
                               ? selectedContact.assignedSections.map(s => s.startsWith('Class') ? s : `Class ${s}`).join(', ')
                               : 'Faculty Member'}
                           </span>
                           {selectedContact.subjects && selectedContact.subjects.length > 0 && (
-                            <span className="text-[#667781]">
+                            <span className="text-slate-500 dark:text-slate-400">
                               · {selectedContact.subjects.join(', ')}
                             </span>
                           )}
@@ -3364,35 +2791,8 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                       )}
                       </div>
                     </div>
-                  ) : null}
-                </div>
-              </div>
-
-              {/* Real-Time WebSocket Connection Status Badge */}
-              <div className="flex items-center gap-2 shrink-0">
-                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border transition-colors bg-white shadow-2xs">
-                  {socketStatus === 'connected' ? (
-                    <>
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                      <span className="text-[#008069] font-extrabold flex items-center gap-1">
-                        <Wifi className="w-3 h-3 text-emerald-600" /> Live
-                      </span>
-                    </>
-                  ) : socketStatus === 'connecting' ? (
-                    <>
-                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                      <span className="text-amber-700 font-bold flex items-center gap-1">
-                        <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" /> Connecting
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="w-2 h-2 rounded-full bg-slate-400" />
-                      <span className="text-slate-500 font-medium flex items-center gap-1">
-                        <WifiOff className="w-3 h-3 text-slate-400" /> Offline
-                      </span>
-                    </>
-                  )}
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -3416,30 +2816,30 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   setSelectedFiles((prev) => [...prev, ...droppedFiles]);
                 }
               }}
-              className={`flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-2 bg-[#efeae2] bg-[radial-gradient(#d1d7db_1.2px,transparent_1.2px)] [background-size:20px_20px] relative ${
-                isDragOver ? 'ring-2 ring-[#00a884] bg-emerald-50/40' : ''
+              className={`flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-2 bg-slate-50/70 dark:bg-slate-950 bg-[radial-gradient(#e2e8f0_1px,transparent_1px)] [background-size:24px_24px] dark:bg-[radial-gradient(#1e293b_1px,transparent_1px)] relative ${
+                isDragOver ? 'ring-2 ring-indigo-500 bg-indigo-50/30' : ''
               }`}
             >
               {isDragOver && (
-                <div className="absolute inset-4 z-30 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[#00a884] bg-white/95 backdrop-blur-xs shadow-xl pointer-events-none">
-                  <ImageIcon className="h-10 w-10 text-[#00a884] animate-bounce" />
-                  <p className="mt-2 text-sm font-black text-[#111b21]">Drop photos or files here to attach</p>
+                <div className="absolute inset-4 z-30 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-indigo-400 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md shadow-xl pointer-events-none">
+                  <ImageIcon className="h-10 w-10 text-indigo-600 dark:text-indigo-400 animate-bounce" />
+                  <p className="mt-2 text-sm font-black text-slate-900 dark:text-white">Drop photos or files here to attach</p>
                 </div>
               )}
 
               {chatLoading ? (
                 <div className="grid h-full place-items-center text-center p-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-[#00a884] mx-auto" />
-                  <p className="mt-2 text-xs font-bold text-[#667781]">Loading messages…</p>
+                  <Loader2 className="h-6 w-6 animate-spin text-indigo-600 dark:text-indigo-400 mx-auto" />
+                  <p className="mt-2 text-xs font-bold text-slate-500 dark:text-slate-400">Loading messages…</p>
                 </div>
               ) : chatMessages.length === 0 ? (
                 <div className="grid h-full place-items-center text-center p-8">
                   <div className="bg-white/80 backdrop-blur-xs p-5 rounded-2xl border border-black/5 shadow-xs max-w-sm">
-                    <MessageSquare className="mx-auto h-8 w-8 text-[#00a884]" />
-                    <p className="mt-2 text-xs font-extrabold text-[#111b21]">
+                    <MessageSquare className="mx-auto h-8 w-8 text-indigo-600 dark:text-indigo-400" />
+                    <p className="mt-2 text-xs font-extrabold text-slate-900 dark:text-white">
                       Conversation with {selectedContact?.name || 'Contact'}
                     </p>
-                    <p className="mt-1 text-[11px] text-[#667781] leading-relaxed">
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
                       {resolvedRole === 'Parent'
                         ? 'Reach out directly to discuss your child’s academic progress, assignments, or inquiries.'
                         : resolvedRole === 'Teacher'
@@ -3478,7 +2878,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                       {/* Date Separator Badge */}
                       {showDateDivider && (
                         <div className="flex justify-center my-3 sticky top-1 z-10 select-none">
-                          <span className="bg-white/90 backdrop-blur-xs text-[#54656f] text-[11px] font-semibold px-3 py-1 rounded-lg shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] uppercase tracking-wide border border-black/5">
+                          <span className="bg-white/90 backdrop-blur-xs text-slate-500 dark:text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-lg shadow-xs uppercase tracking-wide border border-black/5">
                             {currDateLabel}
                           </span>
                         </div>
@@ -3490,20 +2890,20 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         className={`flex ${isMe ? 'justify-end' : 'justify-start'} my-1 group`}
                       >
                         <div
-                          className={`relative shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] transition-all ${
+                          className={`relative shadow-xs transition-all ${
                             isImageOnly
                               ? 'p-1 rounded-2xl w-fit max-w-[260px] sm:max-w-[300px]'
                               : 'max-w-[85%] sm:max-w-[72%] p-2.5 rounded-2xl'
                           } ${
-                            isHighlighted ? 'ring-3 ring-[#00a884] shadow-lg shadow-emerald-500/20 scale-[1.01]' : ''
+                            isHighlighted ? 'ring-3 ring-indigo-400 shadow-lg shadow-indigo-500/20 scale-[1.01]' : ''
                           } ${
                             isMe
-                              ? 'bg-[#d9fdd3] text-[#111b21] rounded-tr-none'
-                              : 'bg-white text-[#111b21] rounded-tl-none'
+                              ? 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white rounded-2xl rounded-tr-xs shadow-md shadow-indigo-500/15'
+                              : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-2xl rounded-tl-xs border border-slate-200/80 dark:border-slate-700/80 shadow-xs'
                           }`}
                         >
                           {isHighlighted && (
-                            <div className="mb-1.5 flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-[#008069] bg-[#e7f8f5] px-2 py-0.5 rounded-md w-fit">
+                            <div className="mb-1.5 flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200/60 px-2 py-0.5 rounded-md w-fit">
                               <span>★</span>
                               <span>Selected Notification Message</span>
                             </div>
@@ -3537,20 +2937,20 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                                     onClick={() => void downloadSecureAttachment(attUrl, att.originalName)}
                                     className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer select-none ${
                                       isMe
-                                        ? 'bg-[#c5f8be] hover:bg-[#bbf3b3] text-[#111b21]'
-                                        : 'bg-slate-100 hover:bg-slate-200 text-[#111b21]'
+                                        ? 'bg-white/15 hover:bg-white/25 text-white border border-white/20'
+                                        : 'bg-slate-100 dark:bg-slate-800/80 hover:bg-slate-200/80 text-slate-800 dark:text-slate-200 border border-slate-200/60 dark:border-slate-700'
                                     }`}
                                   >
-                                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-[#00a884]/15 text-[#00a884] shadow-2xs font-bold text-xs uppercase">
+                                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-indigo-600 dark:bg-indigo-400/15 text-indigo-600 dark:text-indigo-400 shadow-2xs font-bold text-xs uppercase">
                                       {att.originalName.split('.').pop() || 'DOC'}
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                      <p className="text-xs font-bold truncate text-[#111b21]">{att.originalName}</p>
-                                      <p className="text-[10px] text-[#667781] font-medium">{Math.round(att.fileSize / 1024)} KB · Document</p>
+                                      <p className="text-xs font-bold truncate text-slate-900 dark:text-white">{att.originalName}</p>
+                                      <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium">{Math.round(att.fileSize / 1024)} KB · Document</p>
                                     </div>
                                     <button
                                       type="button"
-                                      className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/80 hover:bg-white text-[#54656f] shadow-2xs transition"
+                                      className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/80 hover:bg-white text-slate-500 dark:text-slate-400 shadow-2xs transition"
                                       title="Download file"
                                     >
                                       <Download className="w-4 h-4" />
@@ -3563,21 +2963,21 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
 
                           {/* Message Body Text */}
                           {msg.body && (
-                            <p className="text-[13px] leading-relaxed font-normal whitespace-pre-wrap break-words px-1 select-text">
+                            <p className={`text-[13px] leading-relaxed font-normal whitespace-pre-wrap break-words px-1 select-text ${isMe ? 'text-white' : 'text-slate-800 dark:text-slate-100'}`}>
                               {msg.body}
                             </p>
                           )}
 
-                          {/* WhatsApp Timestamp & Blue Double Checkmarks (Only for text or documents) */}
+                          {/* Message Timestamp & Checkmarks */}
                           {!isImageOnly && (
-                            <div className="mt-1 flex items-center justify-end gap-1 text-[10px] font-medium text-[#667781] select-none px-1">
+                            <div className={`mt-1 flex items-center justify-end gap-1 text-[10px] font-medium select-none px-1 ${isMe ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
                               {msg.editedAt && <span className="italic text-[9px] opacity-75">(edited)</span>}
                               <span>{timeStr}</span>
                               {isMe && (
                                 msg.readAt ? (
-                                  <span title="Read"><CheckCheck className="w-3.5 h-3.5 text-[#EF4444]" /></span>
+                                  <span title="Read"><CheckCheck className="w-3.5 h-3.5 text-sky-300" /></span>
                                 ) : (
-                                  <span title="Delivered"><CheckCheck className="w-3.5 h-3.5 text-[#8696a0]" /></span>
+                                  <span title="Sent"><Check className="w-3.5 h-3.5 text-indigo-200" /></span>
                                 )
                               )}
                             </div>
@@ -3588,25 +2988,36 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   );
                 })
               )}
-              {/* WhatsApp Floating Typing Bubble */}
-              {((selectedConversationId && typingMap[Number(selectedConversationId)]?.isTyping) ||
-                (selectedContact && Object.entries(typingMap).some(([cId, t]) => t.isTyping && conversations.find(c => Number(c.id) === Number(cId))?.otherParticipant?.id === selectedContact.userId))) && (
-                <div className="flex justify-start my-1 animate-in fade-in slide-in-from-bottom-2 duration-200">
-                  <div className="bg-white rounded-2xl rounded-tl-none px-4 py-2.5 shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                    <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                    <span className="w-1.5 h-1.5 bg-[#8696a0] rounded-full animate-bounce"></span>
+              {/* WhatsApp / Telegram Floating Typing Bubble with Live Text Preview */}
+              {(() => {
+                const activeTyping = getActiveTyping();
+                if (!activeTyping || !activeTyping.isTyping || activeTyping.isMe) return null;
+
+                return (
+                  <div className="flex justify-start my-2 animate-in fade-in slide-in-from-bottom-2 duration-150">
+                    <div className="bg-white/95 dark:bg-slate-800 backdrop-blur-md rounded-2xl rounded-tl-none px-4 py-2.5 shadow-sm border border-slate-200/80 flex items-center gap-2.5">
+                      <div className="flex items-center gap-1">
+                        <span className="w-2 h-2 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                        <span className="w-2 h-2 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                        <span className="w-2 h-2 bg-indigo-600 dark:bg-indigo-400 rounded-full animate-bounce"></span>
+                      </div>
+                      <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
+                        {activeTyping.userName} is typing...
+                      </span>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
               <div ref={chatBottomRef} />
             </div>
 
             {/* WhatsApp Chat Input Toolbar */}
-            <div className="border-t border-[#e9edef] bg-[#f0f2f5] p-2.5 sm:p-3 shrink-0 relative z-10">
+            <div className="border-t border-slate-200/80 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-3 sm:p-3.5 shrink-0 relative z-10">
+
+
               {/* Selected Files Preview Chips */}
               {selectedFiles.length > 0 && (
-                <div className="flex flex-wrap gap-2 mb-2 p-2 rounded-2xl bg-white border border-[#e9edef] shadow-2xs">
+                <div className="flex flex-wrap gap-2 mb-2 p-2 rounded-2xl bg-white border border-slate-200 dark:border-slate-700 shadow-2xs">
                   {selectedFiles.map((file, idx) => {
                     const isImg = file.type.startsWith('image/');
                     const objUrl = isImg ? URL.createObjectURL(file) : null;
@@ -3614,7 +3025,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                     return (
                       <div
                         key={idx}
-                        className="flex items-center gap-2 bg-[#f0f2f5] border border-slate-200 text-[#111b21] px-2.5 py-1.5 rounded-xl text-[11px] font-semibold"
+                        className="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 px-3 py-1.5 rounded-xl text-[11px] font-semibold"
                       >
                         {isImg && objUrl ? (
                           <img
@@ -3623,13 +3034,13 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                             className="h-8 w-8 rounded-lg object-cover border border-slate-200"
                           />
                         ) : (
-                          <div className="grid h-8 w-8 place-items-center rounded-lg bg-[#00a884]/15 text-[#00a884] font-bold text-[10px] uppercase">
+                          <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-100 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 font-bold text-[10px] uppercase">
                             {file.name.split('.').pop() || 'FILE'}
                           </div>
                         )}
                         <div className="flex flex-col min-w-0">
-                          <span className="truncate max-w-[130px] text-xs font-bold text-[#111b21]">{file.name}</span>
-                          <span className="text-[9px] text-[#667781] font-normal">{Math.round(file.size / 1024)} KB</span>
+                          <span className="truncate max-w-[130px] text-xs font-bold text-slate-900 dark:text-white">{file.name}</span>
+                          <span className="text-[9px] text-slate-500 dark:text-slate-400 font-normal">{Math.round(file.size / 1024)} KB</span>
                         </div>
                         <button
                           type="button"
@@ -3651,6 +3062,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                   ref={fileInputRef}
                   className="hidden"
                   multiple
+                  accept=".pdf,image/jpeg,image/png,image/webp"
                   onChange={(e) => {
                     if (e.target.files && e.target.files.length > 0) {
                       const newFiles = Array.from(e.target.files);
@@ -3662,7 +3074,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                 <input
                   type="file"
                   ref={imageInputRef}
-                  accept="image/*"
+                  accept="image/jpeg,image/png,image/webp"
                   className="hidden"
                   multiple
                   onChange={(e) => {
@@ -3675,12 +3087,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                 />
 
                 {/* WhatsApp Action Icons (Photo, Attachment) */}
-                <div className="flex items-center gap-1 text-[#54656f]">
+                <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
                   <button
                     type="button"
                     onClick={() => imageInputRef.current?.click()}
                     title="Attach Photos"
-                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-black/5 transition cursor-pointer text-[#54656f] hover:text-[#00a884]"
+                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-black/5 transition cursor-pointer text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:text-indigo-400"
                   >
                     <ImageIcon className="h-5 w-5" />
                   </button>
@@ -3688,13 +3100,13 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     title="Attach Documents"
-                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-black/5 transition cursor-pointer text-[#54656f] hover:text-[#00a884]"
+                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-black/5 transition cursor-pointer text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:text-indigo-400"
                   >
                     <Paperclip className="h-5 w-5" />
                   </button>
                 </div>
 
-                {/* WhatsApp Rounded Pill Input */}
+                {/* Modern Executive Input Field */}
                 <div className="flex-1 relative flex items-center">
                   <input
                     type="text"
@@ -3717,16 +3129,16 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
                         }
                       }
                     }}
-                    className="w-full rounded-full bg-white px-4 py-2.5 text-xs text-[#111b21] placeholder-[#8696a0] border border-transparent focus:border-[#00a884] focus:ring-1 focus:ring-[#00a884] outline-none shadow-2xs transition"
+                    className="w-full rounded-2xl bg-slate-50 dark:bg-slate-800 px-4 py-2.5 text-xs text-slate-800 dark:text-slate-100 placeholder-slate-400 border border-slate-200 dark:border-slate-700 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none shadow-2xs transition"
                   />
                 </div>
 
-                {/* WhatsApp Signature Circular Green Send Button */}
+                {/* Modern Executive Send Button */}
                 <button
                   type="submit"
                   disabled={isSendingChat || (!chatMessage.trim() && selectedFiles.length === 0) || !selectedConversationId}
                   title="Send message"
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#00a884] hover:bg-[#008f6f] text-white transition active:scale-95 disabled:opacity-40 disabled:hover:bg-[#00a884] cursor-pointer shadow-sm"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white transition active:scale-95 disabled:opacity-40 cursor-pointer shadow-md shadow-indigo-500/25"
                 >
                   {isSendingChat ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4 -mr-0.5" />}
                 </button>
@@ -3734,45 +3146,6 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
             </div>
           </div>
         </div>
-      )}
-
-      {/* ── Admin Reset Confirmation Modal: Notifications ── */}
-      {showResetNotifModal && createPortal(
-        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex min-h-full items-center justify-center p-3 sm:p-5 animate-fade-in" role="presentation">
-          <div className="w-full max-w-lg max-h-[85vh] my-auto flex flex-col rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 overflow-hidden animate-in fade-in zoom-in-95" role="dialog" aria-modal="true" aria-labelledby="reset-notif-modal-title">
-            <div className="flex-shrink-0 flex items-center gap-3 text-rose-600 border-b border-slate-100 pb-3">
-              <div className="grid h-10 w-10 place-items-center rounded-2xl bg-rose-100">
-                <AlertTriangle className="h-5 w-5 text-rose-600" />
-              </div>
-              <h3 id="reset-notif-modal-title" className="text-base font-black text-slate-900">Clear All School Notifications?</h3>
-            </div>
-            <div className="flex-1 overflow-y-auto min-h-0 py-3">
-              <p className="text-xs leading-relaxed text-slate-600">
-                This action will permanently delete all notification records, leave requests, and announcements for your school. This action cannot be undone.
-              </p>
-            </div>
-            <div className="flex-shrink-0 flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setShowResetNotifModal(false)}
-                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-extrabold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleClearAllNotifications()}
-                disabled={isResetting}
-                className="flex items-center gap-1.5 rounded-xl bg-rose-600 px-5 py-2 text-xs font-black text-white shadow-md hover:bg-rose-700 disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                {isResetting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                Confirm Reset All
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
 
       {/* ── Admin Reset Confirmation Modal: Chats ── */}
       {showResetChatModal && createPortal(
@@ -3824,12 +3197,12 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#00a884] font-black text-xs text-white">
+              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-600 to-violet-600 font-black text-xs text-white">
                 {selectedContact?.name?.slice(0, 2).toUpperCase() || 'WA'}
               </div>
               <div className="min-w-0">
                 <h4 className="text-sm font-bold text-white truncate">{selectedContact?.name || 'Photo Viewer'}</h4>
-                <p className="text-[11px] text-[#8696a0] font-medium truncate max-w-md">{lightboxImage.title || 'Image Preview'}</p>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 font-medium truncate max-w-md">{lightboxImage.title || 'Image Preview'}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">

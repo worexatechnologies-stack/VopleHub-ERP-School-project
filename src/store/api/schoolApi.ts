@@ -12,6 +12,52 @@ export interface SchoolRecord {
   theme?: string;
   is_active?: boolean;
   isDemo?: boolean;
+  studentCount?: number;
+}
+
+export interface SchoolRecordCounts {
+  students: number;
+  teachers: number;
+}
+
+export interface HallTicketSettings {
+  layout: 'classic' | 'compact';
+  heading: string;
+  accentColor: string;
+  showWatermark: boolean;
+  showInstructions: boolean;
+  footerNote: string;
+  logoImageUrl: string;
+  showAdmissionNo: boolean;
+  showClassSection: boolean;
+  showRollNumber: boolean;
+  showExamDate: boolean;
+  showExamTimings: boolean;
+  showMaxMarks: boolean;
+  showVenue: boolean;
+  showSignatures: boolean;
+  controllerSignatureImage: string;
+  invigilatorSignatures: Record<string, string>;
+  instructions: string[];
+  labels: {
+    officialBadge: string;
+    ticketNumber: string;
+    academicSession: string;
+    candidateName: string;
+    admissionNo: string;
+    classSection: string;
+    rollNumber: string;
+    papersTitle: string;
+    subject: string;
+    examDate: string;
+    examTimings: string;
+    maxMarks: string;
+    venue: string;
+    instructionsTitle: string;
+    candidateSignature: string;
+    schoolSeal: string;
+    controllerSignature: string;
+  };
 }
 
 type Page<T> = { next?: string | null; results?: T[] } | T[];
@@ -77,9 +123,22 @@ export const schoolApi = baseApi.injectEndpoints({
       queryFn: (_arg, _api, _extra, baseQuery) => fetchAllPages<SchoolRecord>('/schools/', baseQuery),
       providesTags: ['School'],
     }),
+    getSchoolRecordCounts: build.query<Record<string, SchoolRecordCounts>, void>({
+      query: () => '/schools/school-counts/',
+      providesTags: ['SchoolCounts', 'Student', 'Teacher', 'School'],
+      keepUnusedDataFor: 0,
+    }),
     getSchoolDocumentsQueue: build.query<SchoolDocumentsQueueResponse, void>({
       query: () => ({ url: '/school/documents/queue/' }),
       providesTags: ['Student', 'Teacher'],
+    }),
+    getHallTicketSettings: build.query<HallTicketSettings, void>({
+      query: () => '/schools/hall-ticket-settings/',
+      providesTags: ['School'],
+    }),
+    updateHallTicketSettings: build.mutation<HallTicketSettings, FormData>({
+      query: (body) => ({ url: '/schools/hall-ticket-settings/', method: 'PATCH', body }),
+      invalidatesTags: ['School'],
     }),
     createSchool: build.mutation<SchoolRecord, FormData>({
       query: (body) => ({ url: '/schools/', method: 'POST', body }),
@@ -102,7 +161,10 @@ export const schoolApi = baseApi.injectEndpoints({
 
 export const {
   useGetSchoolsQuery,
+  useGetSchoolRecordCountsQuery,
   useGetSchoolDocumentsQueueQuery,
+  useGetHallTicketSettingsQuery,
+  useUpdateHallTicketSettingsMutation,
   useCreateSchoolMutation,
   useUpdateSchoolMutation,
   useDeleteSchoolMutation,

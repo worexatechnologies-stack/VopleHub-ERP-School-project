@@ -11,7 +11,9 @@ import {
   Eye,
   FileText,
   GraduationCap,
+  ImagePlus,
   Layers,
+  Palette,
   Plus,
   Printer,
   RefreshCw,
@@ -22,6 +24,7 @@ import {
   Trash2,
   User,
   Users,
+  X,
 } from 'lucide-react';
 import { GRADE_CARDS } from '../data/mockData';
 import {
@@ -33,8 +36,10 @@ import {
 } from '../types';
 import type { AuthUser } from '../utils/auth';
 import { emitNotification } from '../services/notificationBus';
+import { printElement } from '../utils/printElement';
 import MarksEntry from './MarksEntry';
 import ParentExamResults from './ParentExamResults';
+import AuthenticatedImage from './AuthenticatedImage';
 import {
   ACADEMIC_STRUCTURE_CHANGED_EVENT,
   loadAcademicStructure,
@@ -54,8 +59,76 @@ import {
   useReleaseHallTicketsMutation,
   useGetHallTicketsQuery,
 } from '../store/api/examApi';
+import {
+  useGetHallTicketSettingsQuery,
+  useUpdateHallTicketSettingsMutation,
+  type HallTicketSettings,
+} from '../store/api/schoolApi';
 
 const BROADCAST_STORAGE_KEY = 'erp_exam_notification_broadcasts';
+const DEFAULT_HALL_TICKET_LABELS: HallTicketSettings['labels'] = {
+  officialBadge: 'Official Admit Card',
+  ticketNumber: 'Hall Ticket No.',
+  academicSession: 'Academic Session',
+  candidateName: 'Candidate Name',
+  admissionNo: 'Admission No',
+  classSection: 'Class & Section',
+  rollNumber: 'Roll Number',
+  papersTitle: 'Admitted Subject Papers & Venue',
+  subject: 'Subject Paper',
+  examDate: 'Exam Date',
+  examTimings: 'Exam Timings',
+  maxMarks: 'Max Marks',
+  venue: 'Assigned Venue',
+  instructionsTitle: 'Mandatory Examination Rules & Instructions:',
+  candidateSignature: 'Candidate Signature',
+  schoolSeal: 'Official School Authorized Seal',
+  controllerSignature: 'Controller of Examinations',
+};
+const DEFAULT_HALL_TICKET_SETTINGS: HallTicketSettings = {
+  layout: 'classic',
+  heading: 'Examination Hall Ticket',
+  accentColor: '#4f46e5',
+  showWatermark: true,
+  showInstructions: true,
+  footerNote: '',
+  instructions: [
+    'Candidates must arrive at the examination hall at least 15 minutes before the scheduled start time.',
+    'Carrying this Hall Ticket / Admit Card and the valid Student ID is strictly mandatory for admission.',
+    'Electronic gadgets including mobile phones, smartwatches, and programmable calculators are strictly prohibited.',
+    'Follow all instructions given by the invigilator and maintain absolute silence in the examination room.',
+  ],
+  showAdmissionNo: true,
+  showClassSection: true,
+  showRollNumber: true,
+  showExamDate: true,
+  showExamTimings: true,
+  showMaxMarks: true,
+  showVenue: true,
+  showSignatures: true,
+  controllerSignatureImage: '',
+  invigilatorSignatures: {},
+  labels: DEFAULT_HALL_TICKET_LABELS,
+  logoImageUrl: '',
+};
+type HallTicketStyleDraft = Omit<HallTicketSettings, 'logoImageUrl'>;
+const HALL_TICKET_LABEL_GROUPS: { title: string; fields: { key: keyof HallTicketSettings['labels']; title: string }[] }[] = [
+  { title: 'Header & student details', fields: [
+    { key: 'officialBadge', title: 'Top badge' }, { key: 'ticketNumber', title: 'Ticket number label' },
+    { key: 'academicSession', title: 'Academic session label' }, { key: 'candidateName', title: 'Candidate name label' },
+    { key: 'admissionNo', title: 'Admission number label' }, { key: 'classSection', title: 'Class and section label' },
+    { key: 'rollNumber', title: 'Roll number label' },
+  ] },
+  { title: 'Exam papers table', fields: [
+    { key: 'papersTitle', title: 'Table section heading' }, { key: 'subject', title: 'Subject column' },
+    { key: 'examDate', title: 'Date column' }, { key: 'examTimings', title: 'Timing column' },
+    { key: 'maxMarks', title: 'Maximum marks column' }, { key: 'venue', title: 'Venue column' },
+  ] },
+  { title: 'Instructions & signatures', fields: [
+    { key: 'instructionsTitle', title: 'Instructions heading' }, { key: 'candidateSignature', title: 'Student signature' },
+    { key: 'schoolSeal', title: 'School seal text' }, { key: 'controllerSignature', title: 'Exam controller signature' },
+  ] },
+];
 
 type ExamApiRecord = {
   id: number;
@@ -79,6 +152,31 @@ const toSchedule = (exam: ExamApiRecord): ExamSchedule => ({
   time: exam.time ? exam.time.slice(0, 5) : '',
   maxMarks: exam.max_marks,
 });
+
+const readImageAsDataUrl = async (file: File) => {
+  const image = await createImageBitmap(file);
+  const scale = Math.min(1, 1024 / Math.max(image.width, image.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    image.close();
+    throw new Error('Could not process this image.');
+  }
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  image.close();
+  const webp = canvas.toDataURL('image/webp', 0.82);
+  return webp.startsWith('data:image/webp,') ? webp : canvas.toDataURL('image/png');
+};
+
+const toDateTimeLocal = (value?: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 16);
+};
 
 interface SubjectFormRow {
   subjectId: number;
@@ -107,6 +205,8 @@ export default function ExamModule({
 
   // Form state
   const [examName, setExamName] = useState('');
+  const [marksEntryDays, setMarksEntryDays] = useState(3);
+  const [marksEntryDeadline, setMarksEntryDeadline] = useState('');
   const [selectedClassId, setSelectedClassId] = useState<number | ''>('');
   const [subjectRows, setSubjectRows] = useState<SubjectFormRow[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -118,6 +218,14 @@ export default function ExamModule({
   const [selectedScheduleIdForTickets, setSelectedScheduleIdForTickets] = useState<number | null>(null);
   const [ticketSearchQuery, setTicketSearchQuery] = useState('');
   const [ticketSectionFilter, setTicketSectionFilter] = useState('ALL');
+  const [ticketSettingsOpen, setTicketSettingsOpen] = useState(false);
+  const [ticketLogoFile, setTicketLogoFile] = useState<File | null>(null);
+  const [removeTicketLogo, setRemoveTicketLogo] = useState(false);
+  const [ticketLogoPreview, setTicketLogoPreview] = useState('');
+  const [ticketStyleDraft, setTicketStyleDraft] = useState<HallTicketStyleDraft>(() => {
+    const { logoImageUrl: _logoImageUrl, ...draft } = DEFAULT_HALL_TICKET_SETTINGS;
+    return draft;
+  });
   const [selectedWardId, setSelectedWardId] = useState<string>(() => {
     return students.length > 0 ? String(students[0].id) : 'all';
   });
@@ -130,6 +238,14 @@ export default function ExamModule({
   const isTeacher = user.role === 'Teacher';
   const isParent = user.role === 'Parent';
   const isStudent = user.role === 'Student';
+  const canEditTicketStyle = user.role === 'School Admin' && Boolean(user.schoolId);
+
+  const { data: ticketSettings = DEFAULT_HALL_TICKET_SETTINGS } = useGetHallTicketSettingsQuery(undefined, {
+    skip: !user.schoolId,
+    pollingInterval: ticketSettingsOpen ? 0 : 10000,
+    refetchOnMountOrArgChange: true,
+  });
+  const [updateHallTicketSettings, { isLoading: savingTicketStyle }] = useUpdateHallTicketSettingsMutation();
 
   const { data: examRows = [], isLoading: examsLoading } = useGetExamsQuery();
   const { data: timetableRecords = [], isLoading: timetablesLoading, error: timetablesError, refetch: refetchSchedules } = useGetExamSchedulesQuery();
@@ -141,6 +257,42 @@ export default function ExamModule({
   const [deleteScheduleMutation] = useDeleteExamScheduleMutation();
   const [generateHallTicketsMutation, { isLoading: isGeneratingTickets }] = useGenerateHallTicketsMutation();
   const [releaseHallTicketsMutation, { isLoading: isReleasingTickets }] = useReleaseHallTicketsMutation();
+
+  useEffect(() => {
+    const { logoImageUrl: _logoImageUrl, ...draft } = ticketSettings;
+    setTicketStyleDraft({
+      ...draft,
+      labels: { ...DEFAULT_HALL_TICKET_LABELS, ...(ticketSettings.labels || {}) },
+      instructions: [...(ticketSettings.instructions || [])],
+      controllerSignatureImage: ticketSettings.controllerSignatureImage || '',
+      invigilatorSignatures: { ...(ticketSettings.invigilatorSignatures || {}) },
+    });
+  }, [ticketSettings]);
+
+  useEffect(() => {
+    if (!ticketLogoFile) {
+      setTicketLogoPreview('');
+      return;
+    }
+    const url = URL.createObjectURL(ticketLogoFile);
+    setTicketLogoPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [ticketLogoFile]);
+
+  const saveTicketStyle = async () => {
+    const body = new FormData();
+    Object.entries(ticketStyleDraft).forEach(([key, value]) => body.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value)));
+    if (ticketLogoFile) body.append('logoFile', ticketLogoFile);
+    if (removeTicketLogo) body.append('removeLogo', 'true');
+    try {
+      await updateHallTicketSettings(body).unwrap();
+      setTicketLogoFile(null);
+      setRemoveTicketLogo(false);
+      emitNotification({ title: 'Hall ticket format saved', message: 'Your school logo and hall ticket design are now shared with students and parents.', tone: 'success', source: 'exams' });
+    } catch (error: any) {
+      emitNotification({ title: 'Could not save hall ticket format', message: error?.data?.logoFile?.[0] || error?.data?.controllerSignatureImage?.[0] || error?.data?.invigilatorSignatures?.[0] || error?.data?.detail || 'Check the selected images and try again.', tone: 'danger', source: 'exams' });
+    }
+  };
 
   // Active schedule for hall tickets
   const activeScheduleForTickets = useMemo(() => {
@@ -246,6 +398,8 @@ export default function ExamModule({
   const handleEditSchedule = (timetable: ExamTimetableRecord) => {
     setEditingScheduleId(timetable.id);
     setExamName(timetable.name);
+    setMarksEntryDays(timetable.marks_entry_days || 3);
+    setMarksEntryDeadline(toDateTimeLocal(timetable.marks_entry_deadline));
     setSelectedClassId(timetable.classroom);
     setShowCreator(true);
     setRequestError('');
@@ -286,6 +440,8 @@ export default function ExamModule({
     setShowCreator(false);
     setEditingScheduleId(null);
     setExamName('');
+    setMarksEntryDays(3);
+    setMarksEntryDeadline('');
     setSelectedClassId('');
     setSubjectRows([]);
     setRequestError('');
@@ -345,6 +501,8 @@ export default function ExamModule({
       const payload = {
         name: examName.trim(),
         classroom: Number(selectedClassId),
+        marks_entry_days: marksEntryDays,
+        marks_entry_deadline: marksEntryDeadline ? new Date(marksEntryDeadline).toISOString() : null,
         items: itemsPayload,
       };
 
@@ -405,6 +563,8 @@ export default function ExamModule({
         const payload = {
           name: examName.trim(),
           classroom: Number(selectedClassId),
+          marks_entry_days: marksEntryDays,
+          marks_entry_deadline: marksEntryDeadline ? new Date(marksEntryDeadline).toISOString() : null,
           items: itemsPayload,
         };
 
@@ -533,40 +693,7 @@ export default function ExamModule({
     }
   };
 
-  const handlePrint = (elementId: string) => {
-    const printContent = document.getElementById(elementId);
-    if (!printContent) {
-      window.print();
-      return;
-    }
-    const win = window.open('', '_blank');
-    if (win) {
-      win.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Official Exam Hall Ticket</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <style>
-              @media print {
-                body { -webkit-print-color-adjust: exact; print-color-adjust: exact; padding: 20px; }
-                .no-print { display: none !important; }
-              }
-            </style>
-          </head>
-          <body class="bg-white p-6">
-            ${printContent.innerHTML}
-            <script>
-              setTimeout(() => { window.print(); window.close(); }, 500);
-            </script>
-          </body>
-        </html>
-      `);
-      win.document.close();
-    } else {
-      window.print();
-    }
-  };
+  const handlePrint = (elementId: string) => printElement(elementId, 'Official Exam Hall Ticket');
 
   const filteredTimetables = useMemo(() => {
     if (selectedClassFilter === 'ALL') return timetableRecords;
@@ -720,6 +847,8 @@ export default function ExamModule({
                     setShowCreator(true);
                     setEditingScheduleId(null);
                     setExamName('');
+                    setMarksEntryDays(3);
+                    setMarksEntryDeadline('');
                     setSelectedClassId('');
                     setSubjectRows([]);
                     setRequestError('');
@@ -775,6 +904,23 @@ export default function ExamModule({
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-indigo-100 bg-white p-4 space-y-3">
+                <div>
+                  <h5 className="text-xs font-extrabold text-slate-800">Marks submission deadline</h5>
+                  <p className="mt-0.5 text-[11px] text-slate-500">Teachers can submit marks until this time. Leave the exact deadline blank to use the number of days after each subject exam.</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="text-[11px] font-bold text-slate-600">
+                    Days after each subject exam
+                    <input type="number" min="1" max="60" value={marksEntryDays} onChange={(e) => setMarksEntryDays(Math.max(1, Number(e.target.value) || 1))} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800" />
+                  </label>
+                  <label className="text-[11px] font-bold text-slate-600">
+                    One deadline for the whole exam (optional)
+                    <input type="datetime-local" value={marksEntryDeadline} onChange={(e) => setMarksEntryDeadline(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800" />
+                  </label>
                 </div>
               </div>
 
@@ -966,7 +1112,10 @@ export default function ExamModule({
                             </span>
                           ) : isPublished ? (
                             <span className="text-indigo-700 font-bold flex items-center gap-1">
-                              <Clock className="h-3.5 w-3.5 text-indigo-600" /> 3 Days Post-Exam
+                              <Clock className="h-3.5 w-3.5 text-indigo-600" />
+                              {t.marks_entry_deadline
+                                ? `Due ${new Date(t.marks_entry_deadline).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`
+                                : `${t.marks_entry_days || 3} Days Post-Exam`}
                             </span>
                           ) : (
                             <span className="text-slate-400 italic">Upon exam completion</span>
@@ -1119,8 +1268,170 @@ export default function ExamModule({
                     </select>
                   </div>
                 )}
+                {canEditTicketStyle && (
+                  <button
+                    type="button"
+                    onClick={() => setTicketSettingsOpen((open) => !open)}
+                    className="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-white px-3 py-2 text-xs font-bold text-indigo-700 shadow-2xs hover:bg-indigo-50"
+                  >
+                    <Palette className="h-4 w-4" /> {ticketSettingsOpen ? 'Close format editor' : 'Edit ticket format'}
+                  </button>
+                )}
               </div>
             </div>
+
+            {canEditTicketStyle && ticketSettingsOpen && (
+              <section className="rounded-2xl border border-indigo-100 bg-indigo-50/40 p-4 sm:p-5">
+                <div className="mb-4">
+                  <h4 className="text-sm font-black text-slate-900">School hall ticket design</h4>
+                  <p className="mt-1 text-xs text-slate-500">Upload your logo and set the layout, heading, color, and printed notes. Changes apply to hall tickets for this school.</p>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2 md:row-span-2">
+                    <span className="block text-xs font-bold text-slate-700">School logo</span>
+                    <div className="flex min-h-24 items-center gap-4 rounded-xl border border-dashed border-indigo-200 bg-white p-3">
+                      <div className="grid h-20 w-20 shrink-0 place-items-center overflow-hidden rounded-xl border border-slate-100 bg-slate-50">
+                        {ticketLogoPreview ? <img src={ticketLogoPreview} alt="Selected school logo preview" className="h-full w-full object-contain" /> : ticketSettings.logoImageUrl && !removeTicketLogo ? <AuthenticatedImage src={ticketSettings.logoImageUrl} alt="Current school logo" className="h-full w-full object-contain" /> : <ImagePlus className="h-7 w-7 text-slate-300" />}
+                      </div>
+                      <div className="min-w-0 space-y-2">
+                        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-700">
+                          <ImagePlus className="h-3.5 w-3.5" /> Choose logo
+                          <input
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp"
+                            className="sr-only"
+                            onChange={(event) => {
+                              const file = event.target.files?.[0];
+                              if (!file) return;
+                              if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 10 * 1024 * 1024) {
+                                emitNotification({ title: 'Choose a smaller supported logo', message: 'Upload a JPEG, PNG, or WebP image under 10 MB.', tone: 'danger', source: 'exams' });
+                                event.target.value = '';
+                                return;
+                              }
+                              setTicketLogoFile(file);
+                              setRemoveTicketLogo(false);
+                            }}
+                          />
+                        </label>
+                        {ticketSettings.logoImageUrl && !removeTicketLogo && !ticketLogoFile && (
+                          <button type="button" onClick={() => { setRemoveTicketLogo(true); setTicketLogoFile(null); }} className="block text-xs font-semibold text-rose-600 hover:text-rose-700">Remove current logo</button>
+                        )}
+                        {removeTicketLogo && <p className="text-[11px] font-semibold text-amber-700">Logo will be removed when you save.</p>}
+                        {ticketLogoFile && <p className="max-w-48 truncate text-[11px] text-slate-500">{ticketLogoFile.name}</p>}
+                        <p className="text-[10px] leading-relaxed text-slate-400">JPEG, PNG, or WebP · max 10 MB</p>
+                      </div>
+                    </div>
+                  </div>
+                  <section className="rounded-xl border border-slate-200 bg-white p-3 space-y-3 md:col-span-2">
+                    <div>
+                      <h5 className="text-xs font-black text-slate-800">Digital signature images</h5>
+                      <p className="mt-0.5 text-[11px] text-slate-500">Upload a controller signature for the ticket and an invigilator signature for each subject. These are printed on every student’s hall ticket.</p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                        <p className="mb-2 text-[11px] font-bold text-slate-700">Controller of Examinations</p>
+                        <div className="flex items-center gap-3">
+                          {ticketStyleDraft.controllerSignatureImage ? <img src={ticketStyleDraft.controllerSignatureImage} alt="Controller signature preview" className="h-12 w-28 rounded border border-slate-200 bg-white object-contain p-1" /> : <div className="grid h-12 w-28 place-items-center rounded border border-dashed border-slate-300 bg-white text-[10px] text-slate-400">No signature</div>}
+                          <label className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-2 text-[11px] font-bold text-indigo-700 hover:bg-indigo-50">
+                            Upload image
+                            <input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={async (event) => {
+                              const file = event.target.files?.[0];
+                              if (!file) return;
+                              if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+                                emitNotification({ title: 'Unsupported signature image', message: 'Choose a JPEG, PNG, or WebP image under 5 MB.', tone: 'danger', source: 'exams' });
+                                event.target.value = '';
+                                return;
+                              }
+                              try { const image = await readImageAsDataUrl(file); setTicketStyleDraft((draft) => ({ ...draft, controllerSignatureImage: image })); }
+                              catch { emitNotification({ title: 'Could not read signature image', message: 'Choose the image again and retry.', tone: 'danger', source: 'exams' }); }
+                              event.target.value = '';
+                            }} />
+                          </label>
+                          {ticketStyleDraft.controllerSignatureImage && <button type="button" onClick={() => setTicketStyleDraft((draft) => ({ ...draft, controllerSignatureImage: '' }))} className="text-[11px] font-bold text-rose-600 hover:text-rose-700">Remove</button>}
+                        </div>
+                      </div>
+                      {activeScheduleForTickets?.items.map((item) => {
+                        const signature = ticketStyleDraft.invigilatorSignatures[item.subject_name] || '';
+                        return <div key={item.subject_name} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                          <p className="mb-2 text-[11px] font-bold text-slate-700">{item.subject_name} invigilator</p>
+                          <div className="flex items-center gap-3">
+                            {signature ? <img src={signature} alt={`${item.subject_name} invigilator signature preview`} className="h-12 w-28 rounded border border-slate-200 bg-white object-contain p-1" /> : <div className="grid h-12 w-28 place-items-center rounded border border-dashed border-slate-300 bg-white text-[10px] text-slate-400">No signature</div>}
+                            <label className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-2 text-[11px] font-bold text-indigo-700 hover:bg-indigo-50">
+                              Upload image
+                              <input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={async (event) => {
+                                const file = event.target.files?.[0];
+                                if (!file) return;
+                                if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+                                  emitNotification({ title: 'Unsupported signature image', message: 'Choose a JPEG, PNG, or WebP image under 5 MB.', tone: 'danger', source: 'exams' });
+                                  event.target.value = '';
+                                  return;
+                                }
+                                try {
+                                  const image = await readImageAsDataUrl(file);
+                                  setTicketStyleDraft((draft) => ({ ...draft, invigilatorSignatures: { ...draft.invigilatorSignatures, [item.subject_name]: image } }));
+                                } catch { emitNotification({ title: 'Could not read signature image', message: 'Choose the image again and retry.', tone: 'danger', source: 'exams' }); }
+                                event.target.value = '';
+                              }} />
+                            </label>
+                            {signature && <button type="button" onClick={() => setTicketStyleDraft((draft) => {
+                              const signatures = { ...draft.invigilatorSignatures };
+                              delete signatures[item.subject_name];
+                              return { ...draft, invigilatorSignatures: signatures };
+                            })} className="text-[11px] font-bold text-rose-600 hover:text-rose-700">Remove</button>}
+                          </div>
+                        </div>;
+                      })}
+                    </div>
+                    <p className="text-[10px] text-slate-400">JPEG, PNG, or WebP · max 5 MB per image. Subject signatures are saved by subject name for this school.</p>
+                  </section>
+                  <label className="space-y-1 text-xs font-bold text-slate-700">Ticket heading<input maxLength={80} value={ticketStyleDraft.heading} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, heading: event.target.value }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium" /></label>
+                  <label className="space-y-1 text-xs font-bold text-slate-700">Layout<select value={ticketStyleDraft.layout} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, layout: event.target.value as HallTicketStyleDraft['layout'] }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold"><option value="classic">Classic · spacious</option><option value="compact">Compact · fits more on a page</option></select></label>
+                  <label className="space-y-1 text-xs font-bold text-slate-700">Accent color<span className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-1.5"><input type="color" value={ticketStyleDraft.accentColor} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, accentColor: event.target.value }))} className="h-8 w-10 cursor-pointer border-0 bg-transparent p-0" /><span className="font-mono text-xs text-slate-600">{ticketStyleDraft.accentColor.toUpperCase()}</span></span></label>
+                  <label className="space-y-1 text-xs font-bold text-slate-700 md:col-span-2">Printed footer note <span className="font-normal text-slate-400">(optional)</span><textarea maxLength={240} rows={2} value={ticketStyleDraft.footerNote} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, footerNote: event.target.value }))} placeholder="e.g. Please arrive 30 minutes before the examination." className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium" /></label>
+                  <details className="rounded-xl border border-slate-200 bg-white p-3 md:col-span-2">
+                    <summary className="cursor-pointer text-xs font-bold text-indigo-700">Edit every printed heading and label</summary>
+                    <p className="mt-1 text-[11px] text-slate-500">Change the text shown on the admit card. Leave wording as you want it printed.</p>
+                    <div className="mt-3 space-y-4">
+                      {HALL_TICKET_LABEL_GROUPS.map((group) => <fieldset key={group.title} className="space-y-2">
+                        <legend className="text-[10px] font-black uppercase tracking-wider text-slate-500">{group.title}</legend>
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {group.fields.map(({ key, title }) => <label key={key} className="space-y-1 text-[11px] font-semibold text-slate-600">{title}<input maxLength={80} value={ticketStyleDraft.labels[key]} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, labels: { ...draft.labels, [key]: event.target.value } }))} className="w-full rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-medium" /></label>)}
+                        </div>
+                      </fieldset>)}
+                    </div>
+                  </details>
+                  <section className="rounded-xl border border-slate-200 bg-white p-3 md:col-span-2">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div><h5 className="text-xs font-black text-slate-800">Examination instructions</h5><p className="mt-0.5 text-[11px] text-slate-500">Edit the rules printed on every hall ticket. Each student’s name and admission number are filled from their student record.</p></div>
+                      <button type="button" disabled={ticketStyleDraft.instructions.length >= 10} onClick={() => setTicketStyleDraft((draft) => ({ ...draft, instructions: [...draft.instructions, ''] }))} className="inline-flex items-center gap-1 rounded-lg border border-indigo-100 px-2.5 py-1.5 text-[11px] font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40"><Plus className="h-3.5 w-3.5" /> Add rule</button>
+                    </div>
+                    <div className="space-y-2">
+                      {ticketStyleDraft.instructions.map((instruction, index) => <div key={index} className="flex items-start gap-2">
+                        <span className="mt-2.5 w-5 shrink-0 text-right text-[11px] font-black text-slate-400">{index + 1}.</span>
+                        <textarea maxLength={240} rows={2} value={instruction} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, instructions: draft.instructions.map((item, rowIndex) => rowIndex === index ? event.target.value : item) }))} placeholder="Enter an examination instruction" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-medium" />
+                        <button type="button" aria-label={`Remove instruction ${index + 1}`} onClick={() => setTicketStyleDraft((draft) => ({ ...draft, instructions: draft.instructions.filter((_, rowIndex) => rowIndex !== index) }))} className="mt-1 rounded-lg p-2 text-rose-500 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button>
+                      </div>)}
+                      {!ticketStyleDraft.instructions.length && <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">No rules added. Add a rule above or turn off “Print exam instructions”.</p>}
+                    </div>
+                  </section>
+                  <div className="grid gap-2 sm:grid-cols-2 md:col-span-2 lg:grid-cols-4">
+                    {([
+                      ['showAdmissionNo', 'Show admission number'], ['showClassSection', 'Show class & section'], ['showRollNumber', 'Show roll number'],
+                      ['showExamDate', 'Show exam date'], ['showExamTimings', 'Show exam timings'], ['showMaxMarks', 'Show maximum marks'], ['showVenue', 'Show venue'], ['showSignatures', 'Show signature block'],
+                    ] as const).map(([key, title]) => <label key={key} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-[11px] font-semibold text-slate-700"><input type="checkbox" checked={ticketStyleDraft[key]} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, [key]: event.target.checked }))} />{title}</label>)}
+                  </div>
+                  <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-xs font-semibold text-slate-700"><input type="checkbox" checked={ticketStyleDraft.showWatermark} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, showWatermark: event.target.checked }))} /> Show logo watermark</label>
+                  <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-xs font-semibold text-slate-700"><input type="checkbox" checked={ticketStyleDraft.showInstructions} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, showInstructions: event.target.checked }))} /> Print exam instructions</label>
+                </div>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-white p-3" style={{ borderColor: `${ticketStyleDraft.accentColor}55` }}>
+                  <div className="flex items-center gap-3">
+                    {ticketLogoPreview ? <img src={ticketLogoPreview} alt="Logo preview" className="h-10 w-10 object-contain" /> : ticketSettings.logoImageUrl && !removeTicketLogo ? <AuthenticatedImage src={ticketSettings.logoImageUrl} alt="School logo preview" className="h-10 w-10 object-contain" /> : <GraduationCap className="h-9 w-9" style={{ color: ticketStyleDraft.accentColor }} />}
+                    <div><p className="text-[9px] font-black uppercase tracking-widest" style={{ color: ticketStyleDraft.accentColor }}>{ticketStyleDraft.labels.officialBadge}</p><p className="text-sm font-black text-slate-800">{user.schoolName || schoolName || 'School name'}</p><p className="text-xs font-bold" style={{ color: ticketStyleDraft.accentColor }}>{ticketStyleDraft.heading || 'Examination Hall Ticket'}</p></div>
+                  </div>
+                  <button type="button" disabled={savingTicketStyle || !ticketStyleDraft.heading.trim()} onClick={() => void saveTicketStyle()} className="rounded-xl px-4 py-2.5 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50" style={{ backgroundColor: ticketStyleDraft.accentColor }}>{savingTicketStyle ? 'Saving design…' : 'Save hall ticket design'}</button>
+                </div>
+              </section>
+            )}
 
             {/* Admin Workflow Status & Actions Bar */}
             {isAdmin && activeScheduleForTickets && (
@@ -1269,41 +1580,45 @@ export default function ExamModule({
                   user?.schoolName ||
                   schoolName ||
                   '';
+                const ticketLabels = ticketSettings.labels || DEFAULT_HALL_TICKET_LABELS;
 
                 return (
                 <article
                   key={ticket.id}
                   id={`ticket-${ticket.id}`}
-                  className="relative overflow-hidden rounded-3xl border-2 border-slate-300 bg-white p-6 sm:p-8 shadow-sm print:border print:shadow-none space-y-6"
+                  className={`hall-ticket-print-page relative overflow-hidden rounded-3xl border-2 bg-white shadow-sm print:shadow-none ${ticketSettings.layout === 'compact' ? 'p-4 sm:p-5 space-y-4' : 'p-6 sm:p-8 space-y-6'}`}
+                  style={{ borderColor: ticketSettings.accentColor }}
                 >
-                  {/* Watermark Logo */}
-                  <div className="absolute right-8 top-1/2 -translate-y-1/2 opacity-5 pointer-events-none select-none">
-                    <GraduationCap className="h-96 w-96 text-slate-900" />
-                  </div>
+                  {ticketSettings.showWatermark && <div className="absolute right-8 top-1/2 -translate-y-1/2 opacity-[0.06] pointer-events-none select-none">
+                    {ticketSettings.logoImageUrl ? <AuthenticatedImage src={ticketSettings.logoImageUrl} alt="" className="h-72 w-72 object-contain" /> : <GraduationCap className="h-72 w-72" style={{ color: ticketSettings.accentColor }} />}
+                  </div>}
 
                   {/* Header Branding */}
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b-2 border-slate-900 pb-5">
-                    <div>
-                      <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-600 bg-indigo-50 px-2.5 py-0.5 rounded-full">
-                        Official Admit Card
+                  <div className="hall-ticket-header flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b-2 pb-5" style={{ borderColor: ticketSettings.accentColor }}>
+                    <div className="flex items-center gap-4">
+                      {ticketSettings.logoImageUrl && <AuthenticatedImage src={ticketSettings.logoImageUrl} alt={`${ticketSchoolName} logo`} className="h-16 w-16 shrink-0 rounded-xl border border-slate-100 bg-white object-contain p-1" />}
+                      <div>
+                      <span className="text-[10px] font-black uppercase tracking-[0.2em] px-2.5 py-0.5 rounded-full" style={{ color: ticketSettings.accentColor, backgroundColor: `${ticketSettings.accentColor}18` }}>
+                        {ticketLabels.officialBadge}
                       </span>
                       {ticketSchoolName && (
                         <h1 className="text-xl sm:text-2xl font-black text-slate-950 uppercase tracking-tight mt-1.5">
                           {ticketSchoolName}
                         </h1>
                       )}
-                      <h2 className={`${ticketSchoolName ? 'text-sm sm:text-base font-extrabold text-indigo-700 mt-0.5' : 'text-xl font-black text-slate-950 mt-1'} uppercase tracking-tight`}>
-                        Examination Hall Ticket
+                      <h2 className={`${ticketSchoolName ? 'text-sm sm:text-base font-extrabold mt-0.5' : 'text-xl font-black mt-1'} uppercase tracking-tight`} style={{ color: ticketSettings.accentColor }}>
+                        {ticketSettings.heading || 'Examination Hall Ticket'}
                       </h2>
                       <p className="text-xs font-bold text-slate-600 mt-0.5">
-                        {ticket.exam_name} · Academic Session {ticket.academic_year}
+                        {ticket.exam_name} · {ticketLabels.academicSession} {ticket.academic_year}
                       </p>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-3">
                       <div className="text-right">
-                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Hall Ticket No.</p>
-                        <p className="font-mono text-sm font-black text-indigo-700">{ticket.hall_ticket_no}</p>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{ticketLabels.ticketNumber}</p>
+                        <p className="font-mono text-sm font-black" style={{ color: ticketSettings.accentColor }}>{ticket.hall_ticket_no}</p>
                       </div>
                       <button
                         type="button"
@@ -1319,51 +1634,55 @@ export default function ExamModule({
                   {/* Student Credentials Grid */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
                     <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Candidate Name</p>
+                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.candidateName}</p>
                       <p className="text-sm font-black text-slate-900">{ticket.student_name}</p>
                     </div>
-                    <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Admission No</p>
+                    {ticketSettings.showAdmissionNo && <div className="space-y-0.5">
+                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.admissionNo}</p>
                       <p className="font-mono text-xs font-extrabold text-slate-800">{ticket.admission_no || 'N/A'}</p>
-                    </div>
-                    <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Class & Section</p>
-                      <p className="text-xs font-extrabold text-slate-800">
-                        {ticket.class_name} {ticket.section ? `- ${ticket.section}` : ''}
-                      </p>
-                    </div>
-                    <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Roll Number</p>
-                      <p className="font-mono text-xs font-black text-indigo-700">#{ticket.roll_no}</p>
-                    </div>
+                    </div>}
+                    {ticketSettings.showClassSection && <div className="space-y-0.5">
+                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.classSection}</p>
+                      <p className="text-xs font-extrabold text-slate-800">{ticket.class_name} {ticket.section ? `- ${ticket.section}` : ''}</p>
+                    </div>}
+                    {ticketSettings.showRollNumber && <div className="space-y-0.5">
+                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.rollNumber}</p>
+                      <p className="font-mono text-xs font-black" style={{ color: ticketSettings.accentColor }}>#{ticket.roll_no}</p>
+                    </div>}
                   </div>
 
                   {/* Scheduled Papers Table */}
                   <div className="space-y-2">
                     <h5 className="text-[11px] font-black uppercase tracking-wider text-slate-700">
-                      Admitted Subject Papers & Venue
+                      {ticketLabels.papersTitle}
                     </h5>
                     <div className="overflow-x-auto rounded-2xl border border-slate-200">
                       <table className="w-full text-left text-xs">
                         <thead className="bg-slate-100 text-slate-800 font-bold uppercase text-[10px] tracking-wider">
                           <tr>
-                            <th className="p-3">Subject Paper</th>
-                            <th className="p-3">Exam Date</th>
-                            <th className="p-3">Exam Timings</th>
-                            <th className="p-3">Max Marks</th>
-                            <th className="p-3">Assigned Venue</th>
+                            <th className="p-3">{ticketLabels.subject}</th>
+                            {ticketSettings.showExamDate && <th className="p-3">{ticketLabels.examDate}</th>}
+                            {ticketSettings.showExamTimings && <th className="p-3">{ticketLabels.examTimings}</th>}
+                            {ticketSettings.showMaxMarks && <th className="p-3">{ticketLabels.maxMarks}</th>}
+                            {ticketSettings.showVenue && <th className="p-3">{ticketLabels.venue}</th>}
+                            <th className="p-3">Invigilator Signature</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 font-medium">
                           {ticket.papers.map((paper, pIdx) => (
                             <tr key={pIdx} className="hover:bg-slate-50">
                               <td className="p-3 font-black text-slate-900">{paper.subject_name}</td>
-                              <td className="p-3 font-semibold text-slate-700">{paper.exam_date}</td>
-                              <td className="p-3 font-mono font-bold text-indigo-700">
+                              {ticketSettings.showExamDate && <td className="p-3 font-semibold text-slate-700">{paper.exam_date}</td>}
+                              {ticketSettings.showExamTimings && <td className="p-3 font-mono font-bold" style={{ color: ticketSettings.accentColor }}>
                                 {paper.start_time} — {paper.end_time}
+                              </td>}
+                              {ticketSettings.showMaxMarks && <td className="p-3 font-semibold text-slate-600">{paper.max_marks}</td>}
+                              {ticketSettings.showVenue && <td className="p-3 font-semibold text-emerald-700">{paper.room_number || 'Main Hall'}</td>}
+                              <td className="p-2 text-center align-middle">
+                                {ticketSettings.invigilatorSignatures?.[paper.subject_name]
+                                  ? <img src={ticketSettings.invigilatorSignatures[paper.subject_name]} alt={`${paper.subject_name} invigilator signature`} className="hall-ticket-invigilator-signature mx-auto h-10 w-24 object-contain" />
+                                  : <div className="mx-auto h-7 w-24 border-b border-dashed border-slate-400" />}
                               </td>
-                              <td className="p-3 font-semibold text-slate-600">{paper.max_marks}</td>
-                              <td className="p-3 font-semibold text-emerald-700">{paper.room_number || 'Main Hall'}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1372,36 +1691,40 @@ export default function ExamModule({
                   </div>
 
                   {/* Exam Instructions */}
-                  <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-4 space-y-1.5 text-[11px] text-slate-600">
+                  {ticketSettings.showInstructions && ticketSettings.instructions.length > 0 && <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-4 space-y-1.5 text-[11px] text-slate-600">
                     <p className="font-bold uppercase tracking-wider text-slate-800 text-[10px]">
-                      Mandatory Examination Rules & Instructions:
+                      {ticketLabels.instructionsTitle}
                     </p>
-                    <ul className="space-y-1 list-disc list-inside">
-                      {ticket.instructions.map((ins, iIdx) => (
+                    <ol className="space-y-1 list-decimal list-inside">
+                      {ticketSettings.instructions.map((ins, iIdx) => (
                         <li key={iIdx}>{ins}</li>
                       ))}
-                    </ul>
-                  </div>
+                    </ol>
+                  </div>}
+
+                  {ticketSettings.footerNote && <p className="rounded-xl px-3 py-2 text-center text-[11px] font-semibold" style={{ color: ticketSettings.accentColor, backgroundColor: `${ticketSettings.accentColor}12` }}>{ticketSettings.footerNote}</p>}
 
                   {/* Footer Signatures */}
-                  <div className="pt-6 border-t border-slate-200 flex items-end justify-between text-center text-xs">
+                  {ticketSettings.showSignatures && <div className="hall-ticket-signatures pt-6 border-t border-slate-200 flex items-end justify-between gap-3 text-center text-xs">
                     <div>
                       <div className="h-10 w-32 border-b border-dashed border-slate-400 mx-auto" />
                       <p className="mt-1 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-                        Candidate Signature
+                        {ticketLabels.candidateSignature}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-indigo-100 bg-indigo-50/50 p-2 text-indigo-800 text-[10px] font-bold flex items-center gap-1.5">
                       <ShieldCheck className="h-4 w-4 text-indigo-600" />
-                      Official School Authorized Seal
+                      {ticketLabels.schoolSeal}
                     </div>
                     <div>
-                      <div className="h-10 w-32 border-b border-dashed border-slate-400 mx-auto" />
+                      {ticketSettings.controllerSignatureImage
+                        ? <img src={ticketSettings.controllerSignatureImage} alt="Controller of Examinations signature" className="hall-ticket-controller-signature mx-auto h-10 w-32 object-contain" />
+                        : <div className="h-10 w-32 border-b border-dashed border-slate-400 mx-auto" />}
                       <p className="mt-1 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-                        Controller of Examinations
+                        {ticketLabels.controllerSignature}
                       </p>
                     </div>
-                  </div>
+                  </div>}
                 </article>
               );
               })}

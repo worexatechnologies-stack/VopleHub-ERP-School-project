@@ -3,7 +3,10 @@ import csv
 import logging
 from django.utils import timezone
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from rest_framework.test import APIRequestFactory, force_authenticate
 from config.celery import app
+from .import_queue import decrypt_import_payload, set_import_status
 from .models import ExportJob
 
 logger = logging.getLogger(__name__)
@@ -150,8 +153,59 @@ def export_resource_task(self, job_id):
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'processed_records', 'file_path', 'file_size', 'completed_at'])
 
-    except Exception as exc:
-        logger.exception("ExportJob %s failed: %s", job_id, exc)
+    except Exception:
+        logger.exception("ExportJob %s failed", job_id)
         job.status = ExportJob.Status.FAILED
-        job.error_message = str(exc)
+        job.error_message = 'Export failed. Please try again or contact support.'
         job.save(update_fields=['status', 'error_message'])
+
+
+@app.task(
+    ignore_result=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name='apps.common.tasks.process_import_batch',
+)
+def process_import_batch(*, entity, school_id, user_id, job_id, batch_number, encrypted_payload):
+    """Run a validated student or teacher bulk-import batch in a worker."""
+    key_args = {
+        'entity': entity,
+        'school_id': school_id,
+        'user_id': user_id,
+        'job_id': job_id,
+        'batch_number': batch_number,
+    }
+    set_import_status(**key_args, status='processing')
+
+    try:
+        User = get_user_model()
+        user = User.objects.get(pk=user_id, school_id=school_id)
+        payload = decrypt_import_payload(encrypted_payload)
+
+        # Re-enter the existing DRF action to keep validation, transactions,
+        # idempotency, and cache invalidation in one implementation.
+        from apps.sis.views import StudentViewSet
+        from apps.staff.views import TeacherViewSet
+
+        if entity not in {'students', 'teachers'}:
+            raise ValueError('Unknown import entity')
+        viewset = StudentViewSet if entity == 'students' else TeacherViewSet
+        request = APIRequestFactory().post(
+            f'/api/v1/{entity}/bulk-import/', payload, format='json'
+        )
+        force_authenticate(request, user=user)
+        response = viewset.as_view({'post': 'bulk_import'})(request)
+        result = getattr(response, 'data', {})
+        final_status = 'failed' if response.status_code >= 400 else 'completed'
+        set_import_status(**key_args, status=final_status, result=result)
+    except Exception:
+        logger.exception('Asynchronous %s import batch failed (job %s, batch %s)', entity, job_id, batch_number)
+        set_import_status(
+            **key_args,
+            status='failed',
+            result={
+                'success': False,
+                'errorCategory': 'IMPORT_PROCESSING_ERROR',
+                'detail': 'The import batch could not be completed. Retry the batch or contact support.',
+            },
+        )

@@ -417,7 +417,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from typing import List
 
-SECRET_KEY = "SUPER_SECRET_VOLPEHUB_EDUCATION_KEY"
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "<GENERATE_SECURE_RANDOM_KEY>")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -572,7 +572,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: erp_admin
-      POSTGRES_PASSWORD: SecretSecurePassword99
+      POSTGRES_PASSWORD: <STRONG_DB_PASSWORD>
       POSTGRES_DB: school_erp
     ports:
       - "5432:5432"
@@ -588,10 +588,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://erp_admin:SecretSecurePassword99@db:5432/school_erp
-      - SECRET_KEY=SUPER_SECRET_VOLPEHUB_EDUCATION_KEY
+      - DATABASE_URL=postgresql://erp_admin:<STRONG_DB_PASSWORD>@db:5432/school_erp
+      - SECRET_KEY=<GENERATE_SECURE_RANDOM_KEY_AT_LEAST_50_CHARS>
       - RAZORPAY_KEY_ID=rzp_test_mockKeyId123
-      - RAZORPAY_KEY_SECRET=rzp_secret_mockSecretKey123
+      - RAZORPAY_KEY_SECRET=<YOUR_SERVER_ONLY_RAZORPAY_SECRET_KEY>
     depends_on:
       - db
 
@@ -634,10 +634,10 @@ volumes:
 4. **Environment Configuration**:
    Create a \`.env\` file:
    \`\`\`env
-   DATABASE_URL=postgresql://erp_admin:SecretSecurePassword99@localhost:5432/school_erp
-   SECRET_KEY=SUPER_SECRET_VOLPEHUB_EDUCATION_KEY
+   DATABASE_URL=postgresql://erp_admin:<STRONG_DB_PASSWORD>@localhost:5432/school_erp
+   SECRET_KEY=<GENERATE_SECURE_RANDOM_KEY_AT_LEAST_50_CHARS>
    RAZORPAY_KEY_ID=rzp_test_mockKeyId123
-   RAZORPAY_KEY_SECRET=rzp_secret_mockSecretKey123
+   RAZORPAY_KEY_SECRET=<YOUR_SERVER_ONLY_RAZORPAY_SECRET_KEY>
    \`\`\`
 
 5. **Initialize Database Tables**:

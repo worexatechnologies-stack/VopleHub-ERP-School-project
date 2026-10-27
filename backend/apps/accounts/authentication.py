@@ -1,4 +1,4 @@
-"""High-performance JWT authentication with sub-millisecond Redis/in-memory caching."""
+"""Cached bearer-token authentication for native clients."""
 import logging
 import time
 from collections import OrderedDict
@@ -64,28 +64,13 @@ def invalidate_user_cache(user_id):
 
 
 class CachedJWTAuthentication(JWTAuthentication):
-    """Zero-overhead JWT authenticator that resolves users in sub-millisecond time from cache."""
+    """Authenticate bearer tokens only; browser auth uses Django sessions."""
 
     def authenticate(self, request):
         cached = getattr(request, '_cached_jwt_auth', None)
         if cached is not None:
             return cached
         result = super().authenticate(request)
-        if result is None:
-            # Fallback for direct browser document downloads/previews: check query parameter
-            query_params = getattr(request, 'query_params', None)
-            if query_params is None and hasattr(request, 'GET'):
-                query_params = request.GET
-            raw_token = None
-            if query_params:
-                raw_token = query_params.get('token') or query_params.get('access_token')
-            if raw_token:
-                try:
-                    validated_token = self.get_validated_token(raw_token)
-                    user = self.get_user(validated_token)
-                    result = (user, validated_token)
-                except Exception:
-                    result = None
         if result is not None:
             request._cached_jwt_auth = result
         return result

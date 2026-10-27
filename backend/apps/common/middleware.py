@@ -1,6 +1,8 @@
 """Request-level security, tenant RLS isolation, and performance monitoring middleware."""
 import logging
 import time
+from django.conf import settings
+from django.contrib.auth import logout as django_logout
 from django.db import connection
 from django.http import JsonResponse
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
@@ -12,6 +14,54 @@ PASSWORD_CHANGE_PATHS = {
     '/api/v1/auth/change-password/',
     '/api/v1/auth/logout/',
 }
+
+
+class AuthSessionExpiryMiddleware:
+    """Apply sliding idle and fixed absolute lifetimes to Django auth sessions."""
+
+    CREATED_AT_KEY = '_auth_session_created_at'
+    LAST_ACTIVITY_KEY = '_auth_session_last_activity_at'
+    ACTIVITY_WRITE_INTERVAL_SECONDS = 60
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        user = getattr(request, 'user', None)
+        if user and user.is_authenticated and request.session.get('_auth_user_id'):
+            now = time.time()
+            created_at = request.session.get(self.CREATED_AT_KEY)
+            last_activity_at = request.session.get(self.LAST_ACTIVITY_KEY)
+            idle_timeout = settings.SESSION_IDLE_TIMEOUT_SECONDS
+            absolute_timeout = settings.SESSION_ABSOLUTE_TIMEOUT_SECONDS
+
+            try:
+                expired = (
+                    created_at is not None
+                    and last_activity_at is not None
+                    and (
+                        now - float(last_activity_at) >= idle_timeout
+                        or now - float(created_at) >= absolute_timeout
+                    )
+                )
+            except (TypeError, ValueError):
+                expired = True
+
+            # Sessions created before these timestamps were introduced receive
+            # a fresh, bounded lifetime on their first request after deployment.
+            if expired:
+                django_logout(request)
+            else:
+                if created_at is None or last_activity_at is None:
+                    request.session[self.CREATED_AT_KEY] = now
+                    request.session[self.LAST_ACTIVITY_KEY] = now
+                elif now - float(last_activity_at) >= self.ACTIVITY_WRITE_INTERVAL_SECONDS:
+                    request.session[self.LAST_ACTIVITY_KEY] = now
+
+            if request.user.is_authenticated:
+                request.session.set_expiry(idle_timeout)
+
+        return self.get_response(request)
 
 
 class PerformanceMonitoringMiddleware:

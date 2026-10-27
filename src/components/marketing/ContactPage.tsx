@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import volpeLogo from '../../assets/volpe-logo.png';
 import MarketingNavbar from './MarketingNavbar';
+import MarketingFooter from './MarketingFooter';
 import './LandingPage.css';
 
 export default function ContactPage() {
@@ -238,23 +239,8 @@ export default function ContactPage() {
         </div>
       </section>
 
-      {/* ─── FOOTER ────────────────────────────────────────────────── */}
-      <footer className="lp-footer">
-        <div className="lp-footer-inner">
-          <div className="lp-footer-brand">
-            <img src={volpeLogo} alt="Volpehub Education logo" className="lp-footer-logo" />
-            <span className="lp-footer-brand-text">VOLPEHUB EDUCATION</span>
-            <span className="lp-footer-copy">© {new Date().getFullYear()} Worexa Technologies. All rights reserved.</span>
-          </div>
-          <div className="lp-footer-links">
-            <Link to="/platform">Platform</Link>
-            <Link to="/solutions">Solutions</Link>
-            <Link to="/how-it-works">How it works</Link>
-            <Link to="/security">Security</Link>
-            <Link to="/contact">Contact</Link>
-          </div>
-        </div>
-      </footer>
+      {/* ─── RICH MODERN FOOTER ────────────────────────────────────── */}
+      <MarketingFooter />
     </div>
   );
 }

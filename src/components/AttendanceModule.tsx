@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
@@ -248,7 +249,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     }
   };
 
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const { data: dateAttendanceData, refetch: refetchAttendance } = useGetAttendanceQuery(
     { date: currentDateISO },
     { skip: !isServerBacked }

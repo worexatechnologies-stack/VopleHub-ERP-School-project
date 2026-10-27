@@ -1,4 +1,5 @@
 import { baseApi } from './baseApi';
+import { waitForImportBatch } from './importQueue';
 import type { Student, StudentDocument } from '../../types';
 
 type Page<T> = { next?: string | null; results?: T[] } | T[];
@@ -249,9 +250,9 @@ export const studentApi = baseApi.injectEndpoints({
         batchSize?: number;
       } | FormData
     >({
-      query: (arg) => {
+      queryFn: async (arg, api, _extraOptions, baseQuery) => {
         if (arg instanceof FormData) {
-          return { url: '/students/bulk-import/', method: 'POST', body: arg };
+          return baseQuery({ url: '/students/bulk-import/', method: 'POST', body: arg }) as any;
         }
         if (arg.file) {
           const fd = new FormData();
@@ -262,9 +263,9 @@ export const studentApi = baseApi.injectEndpoints({
           if (arg.batchNumber != null) fd.append('batchNumber', String(arg.batchNumber));
           if (arg.totalBatches != null) fd.append('totalBatches', String(arg.totalBatches));
           if (arg.batchSize != null) fd.append('batchSize', String(arg.batchSize));
-          return { url: '/students/bulk-import/', method: 'POST', body: fd };
+          return baseQuery({ url: '/students/bulk-import/', method: 'POST', body: fd }) as any;
         }
-        return {
+        const submitted = await baseQuery({
           url: '/students/bulk-import/',
           method: 'POST',
           body: {
@@ -274,8 +275,18 @@ export const studentApi = baseApi.injectEndpoints({
             batchNumber: arg.batchNumber,
             totalBatches: arg.totalBatches,
             batchSize: arg.batchSize,
+            async_import: true,
           },
-        };
+        });
+        if (submitted.error) return { error: submitted.error };
+        const accepted = submitted.data as { queued?: boolean; jobId?: string; batchNumber?: number };
+        if (!accepted.queued || !accepted.jobId || !accepted.batchNumber) return { data: submitted.data };
+        return waitForImportBatch(
+          baseQuery,
+          `/students/bulk-import/status/?jobId=${encodeURIComponent(accepted.jobId)}&batchNumber=${accepted.batchNumber}`,
+          accepted,
+          api.signal,
+        );
       },
       invalidatesTags: ['Student', 'Auth', 'CredentialVault'],
     }),

@@ -189,6 +189,7 @@ export default function MarksEntry({
   // Admin Extension Modal State
   const [showExtendModal, setShowExtendModal] = useState(false);
   const [extensionTargetSection, setExtensionTargetSection] = useState<string>('all');
+  const [extensionTargetSubject, setExtensionTargetSubject] = useState<string>('');
   const [extensionDays, setExtensionDays] = useState<number>(3);
   const [customDeadline, setCustomDeadline] = useState<string>('');
   const [extensionReason, setExtensionReason] = useState<string>('');
@@ -216,19 +217,27 @@ export default function MarksEntry({
     return exts[extensionTargetSection] || null;
   }, [extensionTargetSection, sheetData, activeSchedule]);
 
+  const targetSubjectExtension = useMemo(() => {
+    if (!extensionTargetSubject) return null;
+    const exts = sheetData?.subject_extensions || (activeSchedule?.subject_extensions as any) || {};
+    return Object.entries(exts).find(([name]) => name.toLowerCase() === extensionTargetSubject.toLowerCase())?.[1] as any || null;
+  }, [extensionTargetSubject, sheetData, activeSchedule]);
+
   const currentTargetDeadline = useMemo(() => {
+    if (targetSubjectExtension?.deadline) return targetSubjectExtension.deadline;
     if (extensionTargetSection !== 'all' && targetSectionExtension?.deadline) {
       return targetSectionExtension.deadline;
     }
     return sheetData?.marks_entry_deadline || activeSchedule?.marks_entry_deadline;
-  }, [extensionTargetSection, targetSectionExtension, sheetData, activeSchedule]);
+  }, [extensionTargetSection, extensionTargetSubject, targetSubjectExtension, targetSectionExtension, sheetData, activeSchedule]);
 
   const isTargetExtended = useMemo(() => {
+    if (extensionTargetSubject) return !!targetSubjectExtension?.extended;
     if (extensionTargetSection !== 'all') {
       return !!targetSectionExtension?.extended;
     }
     return !!(sheetData?.marks_entry_extended || activeSchedule?.marks_entry_extended);
-  }, [extensionTargetSection, targetSectionExtension, sheetData, activeSchedule]);
+  }, [extensionTargetSection, extensionTargetSubject, targetSubjectExtension, targetSectionExtension, sheetData, activeSchedule]);
 
   const formatDeadline = (isoString?: string | null) => {
     if (!isoString) return 'Standard 3 days';
@@ -254,13 +263,16 @@ export default function MarksEntry({
       if (extensionTargetSection && extensionTargetSection !== 'all') {
         payload.section = extensionTargetSection;
       }
+      if (extensionTargetSubject) payload.subject = extensionTargetSubject;
       if (customDeadline) {
         payload.deadline = new Date(customDeadline).toISOString();
       } else {
         payload.extension_days = extensionDays;
       }
       const res = await extendMarksMutation(payload).unwrap();
-      const scopeDesc = extensionTargetSection && extensionTargetSection !== 'all'
+      const scopeDesc = extensionTargetSubject
+        ? `Subject ${extensionTargetSubject}`
+        : extensionTargetSection && extensionTargetSection !== 'all'
         ? `Section ${extensionTargetSection}`
         : 'All Sections';
       setSavedMessage(res.detail || `Marks entry deadline for ${activeSchedule.class_name} (${scopeDesc}) extended successfully.`);
@@ -282,18 +294,22 @@ export default function MarksEntry({
 
   const handleResetDeadline = async () => {
     if (!activeSchedule) return;
-    const isSectionSpecific = extensionTargetSection && extensionTargetSection !== 'all';
+    const isSubjectSpecific = Boolean(extensionTargetSubject);
+    const isSectionSpecific = !isSubjectSpecific && extensionTargetSection && extensionTargetSection !== 'all';
     const scopeLabel = isSectionSpecific
       ? `Section ${extensionTargetSection}`
+      : isSubjectSpecific
+      ? `Subject ${extensionTargetSubject}`
       : `all sections of ${activeSchedule.class_name}`;
 
-    if (!window.confirm(`Reset marks entry deadline for ${scopeLabel} to the standard 3-day post-exam window?`)) return;
+    if (!window.confirm(`Reset marks entry deadline for ${scopeLabel} to this exam schedule's default marks window?`)) return;
     setErrorMessage('');
     setSavedMessage('');
     try {
       const res = await resetMarksMutation({
         scheduleId: activeSchedule.id,
         section: isSectionSpecific ? extensionTargetSection : undefined,
+        subject: isSubjectSpecific ? extensionTargetSubject : undefined,
       }).unwrap();
       setSavedMessage(res.detail || 'Marks entry deadline reset to default 3 days.');
       setShowExtendModal(false);
@@ -655,7 +671,7 @@ export default function MarksEntry({
                               </span>
                             ) : (
                               <span className="rounded-full bg-slate-100 text-slate-600 px-2 py-0.5 text-[9px] font-bold flex items-center gap-1">
-                                <Clock className="h-2.5 w-2.5 text-slate-500" /> 3-Day Window
+                                <Clock className="h-2.5 w-2.5 text-slate-500" /> {sched.marks_entry_days || 3}-Day Window
                               </span>
                             )}
                           </div>
@@ -728,7 +744,7 @@ export default function MarksEntry({
                           </span>
                         ) : (
                           <span className="rounded-full bg-slate-100 text-slate-600 px-2.5 py-0.5 text-[10px] font-bold flex items-center gap-1">
-                            <Clock className="h-3 w-3 text-slate-500" /> Standard 3-Day Window
+                            <Clock className="h-3 w-3 text-slate-500" /> Standard {activeSchedule.marks_entry_days || 3}-Day Window
                           </span>
                         )}
                         <span className="text-[11px] text-slate-500 font-medium">
@@ -742,6 +758,7 @@ export default function MarksEntry({
                           onClick={() => {
                             setSelectedSection(sec);
                             setExtensionTargetSection(sec);
+                            setExtensionTargetSubject('');
                             setShowExtendModal(true);
                           }}
                           className="rounded-xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-800 px-2.5 py-1 text-[11px] font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
@@ -797,7 +814,7 @@ export default function MarksEntry({
                       </span>
                     ) : (
                       <span className="rounded-full bg-indigo-50 border border-indigo-100 px-3 py-0.5 text-[11px] font-bold text-indigo-700 flex items-center gap-1">
-                        <Clock className="h-3.5 w-3.5 text-indigo-600" /> Teacher Window: 3 Days Post-Exam
+                        <Clock className="h-3.5 w-3.5 text-indigo-600" /> Teacher Window: {activeSchedule.marks_entry_days || 3} Days Post-Exam
                       </span>
                     )}
                   </div>
@@ -895,6 +912,7 @@ export default function MarksEntry({
                       type="button"
                       onClick={() => {
                         setExtensionTargetSection(selectedSection);
+                        setExtensionTargetSubject('');
                         setShowExtendModal(true);
                       }}
                       className="rounded-xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-800 px-3 py-1.5 text-xs font-black transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
@@ -1015,7 +1033,7 @@ export default function MarksEntry({
                 <div className="flex items-center gap-2.5">
                   <button
                     type="button"
-                    onClick={() => setShowExtendModal(true)}
+                    onClick={() => { setExtensionTargetSection('all'); setExtensionTargetSubject(''); setShowExtendModal(true); }}
                     className="rounded-2xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-800 px-4 py-2.5 text-xs font-black transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
                   >
                     <Clock className="h-3.5 w-3.5 text-purple-600" />
@@ -1231,7 +1249,7 @@ export default function MarksEntry({
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-1 text-[10px] text-slate-500 font-semibold">
-                                  <Clock className="h-2.5 w-2.5 text-slate-400" /> 3-Day Window
+                                  <Clock className="h-2.5 w-2.5 text-slate-400" /> {activeSchedule?.marks_entry_days || 3}-Day Window
                                 </span>
                               )}
                             </div>
@@ -1369,7 +1387,7 @@ export default function MarksEntry({
                                 </span>
                               </span>
                             ) : (
-                              <span>Marks Entry Window Active (3 Days Post-Exam)</span>
+                              <span>Marks Entry Window Active ({activeSchedule.marks_entry_days || 3} Days Post-Exam)</span>
                             )
                           ) : (
                             <span>Marks Entry Period Closed for Section {selectedSection}</span>
@@ -1393,7 +1411,7 @@ export default function MarksEntry({
                         <p className="text-[11px] font-medium mt-0.5 opacity-90">
                           {sheetData.overall_marks_entry_open ? (
                             <>
-                              Teachers have 3 days following exam completion to enter marks.
+                              Teachers have {activeSchedule.marks_entry_days || 3} days following each subject exam to enter marks.
                               {sheetData.marks_entry_deadline && ` Window closes: ${formatDeadline(sheetData.marks_entry_deadline)}`}
                               {sheetData.overall_days_remaining !== undefined && sheetData.overall_days_remaining !== null && (
                                 <strong className="ml-1 text-slate-800">({sheetData.overall_days_remaining}d remaining)</strong>
@@ -1757,15 +1775,27 @@ export default function MarksEntry({
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Section</label>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Apply extension to</label>
                     <select
-                      value={extensionTargetSection}
-                      onChange={(e) => setExtensionTargetSection(e.target.value)}
+                      value={extensionTargetSubject ? `subject:${extensionTargetSubject}` : extensionTargetSection === 'all' ? 'all' : `section:${extensionTargetSection}`}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value.startsWith('subject:')) {
+                          setExtensionTargetSubject(value.slice(8));
+                          setExtensionTargetSection('all');
+                        } else {
+                          setExtensionTargetSubject('');
+                          setExtensionTargetSection(value === 'all' ? 'all' : value.slice(8));
+                        }
+                      }}
                       className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-purple-400 cursor-pointer"
                     >
-                      <option value="all">🌐 All Sections</option>
+                      <option value="all">🌐 All subjects and sections</option>
+                      {(sheetData?.subjects || []).map((subject) => (
+                        <option key={subject.subject_name} value={`subject:${subject.subject_name}`}>📚 {subject.subject_name} · all sections</option>
+                      ))}
                       {availableSections.map((sec) => (
-                        <option key={sec} value={sec}>📌 Section {sec}</option>
+                        <option key={sec} value={`section:${sec}`}>📌 Section {sec} · all subjects</option>
                       ))}
                     </select>
                   </div>
@@ -1781,17 +1811,17 @@ export default function MarksEntry({
                     {isTargetExtended ? (
                       <span className="font-bold text-purple-700 flex items-center gap-1">
                         <ShieldCheck className="h-3 w-3 text-purple-600" />
-                        {extensionTargetSection === 'all' ? 'Extended (All)' : `Extended (Sec ${extensionTargetSection})`}
+                        {extensionTargetSubject ? `Extended (${extensionTargetSubject})` : extensionTargetSection === 'all' ? 'Extended (All)' : `Extended (Sec ${extensionTargetSection})`}
                       </span>
                     ) : (
                       <span className="text-slate-500 flex items-center gap-1">
-                        <Clock className="h-3 w-3 text-slate-400" /> Standard (3-Day)
+                        <Clock className="h-3 w-3 text-slate-400" /> Standard ({activeSchedule.marks_entry_days || 3}-Day)
                       </span>
                     )}
                   </div>
-                  {(targetSectionExtension?.reason || (extensionTargetSection === 'all' && activeSchedule.marks_entry_extension_reason)) && (
+                  {(targetSubjectExtension?.reason || targetSectionExtension?.reason || (!extensionTargetSubject && extensionTargetSection === 'all' && activeSchedule.marks_entry_extension_reason)) && (
                     <p className="text-[10px] italic text-purple-600 truncate">
-                      "{targetSectionExtension?.reason || activeSchedule.marks_entry_extension_reason}"
+                      "{targetSubjectExtension?.reason || targetSectionExtension?.reason || activeSchedule.marks_entry_extension_reason}"
                     </p>
                   )}
                 </div>
@@ -1858,7 +1888,7 @@ export default function MarksEntry({
                   className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 transition cursor-pointer flex items-center gap-1.5"
                 >
                   <RotateCcw className="h-3 w-3" />
-                  {isResetting ? 'Resetting...' : extensionTargetSection === 'all' ? 'Reset Class (3 Days)' : `Reset Sec ${extensionTargetSection}`}
+                  {isResetting ? 'Resetting...' : extensionTargetSubject ? `Reset ${extensionTargetSubject}` : extensionTargetSection === 'all' ? `Reset Class (${activeSchedule.marks_entry_days || 3} Days)` : `Reset Sec ${extensionTargetSection}`}
                 </button>
               ) : <div />}
 
@@ -1879,7 +1909,9 @@ export default function MarksEntry({
                   <ShieldCheck className="h-3.5 w-3.5" />
                   {isExtending
                     ? 'Extending...'
-                    : extensionTargetSection === 'all'
+                    : extensionTargetSubject
+                      ? `Confirm Extension (${extensionTargetSubject})`
+                      : extensionTargetSection === 'all'
                       ? 'Confirm Extension (All)'
                       : `Confirm Extension (Sec ${extensionTargetSection})`}
                 </button>

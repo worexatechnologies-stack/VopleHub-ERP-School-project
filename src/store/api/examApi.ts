@@ -127,6 +127,7 @@ export const examApi = baseApi.injectEndpoints({
       assigned_teachers?: Array<{ teacher_id: number; teacher_name: string; teacher_email?: string; subject_name: string; section: string }>;
       section_teachers?: Array<{ teacher_id: number; teacher_name: string; teacher_email?: string; subject_name?: string; section?: string }>;
       section_extensions?: Record<string, any>;
+      subject_extensions?: Record<string, any>;
       marks_entry_days?: number;
       marks_entry_deadline?: string | null;
       marks_entry_extended?: boolean;
@@ -162,6 +163,7 @@ export const examApi = baseApi.injectEndpoints({
       detail: string;
       schedule_id: number;
       section?: string;
+      subject?: string;
       marks_entry_deadline: string;
       marks_entry_extended: boolean;
       marks_entry_extension_reason: string;
@@ -169,6 +171,7 @@ export const examApi = baseApi.injectEndpoints({
     }, {
       scheduleId: number;
       section?: string;
+      subject?: string;
       extension_days?: number;
       deadline?: string;
       reason?: string;
@@ -180,14 +183,15 @@ export const examApi = baseApi.injectEndpoints({
       }),
       invalidatesTags: ['Exam', 'ExamResult', 'Notification'],
     }),
-    resetMarksEntry: build.mutation<{ detail: string; schedule_id: number; section?: string }, { scheduleId: number; section?: string } | number>({
+    resetMarksEntry: build.mutation<{ detail: string; schedule_id: number; section?: string; subject?: string }, { scheduleId: number; section?: string; subject?: string } | number>({
       query: (arg) => {
         const scheduleId = typeof arg === 'number' ? arg : arg.scheduleId;
         const section = typeof arg === 'object' ? arg.section : undefined;
+        const subject = typeof arg === 'object' ? arg.subject : undefined;
         return {
           url: `/exam-schedules/${scheduleId}/reset-marks-entry/`,
           method: 'POST',
-          body: { section },
+          body: { section, subject },
         };
       },
       invalidatesTags: ['Exam', 'ExamResult'],

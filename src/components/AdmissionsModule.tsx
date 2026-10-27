@@ -38,7 +38,6 @@ import {
   Loader2,
 } from 'lucide-react';
 import { apiDownload } from '../services/api';
-import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
 import {
   useGetEnrollmentApplicationsQuery,
   useApproveEnrollmentApplicationMutation,

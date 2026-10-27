@@ -11,8 +11,8 @@ from drf_spectacular.utils import OpenApiResponse, extend_schema
 
 from apps.accounts.models import User
 from apps.common.tenancy import TenantScopedViewSet
-from apps.notifications.models import Notification
 from apps.sis.models import Student
+from apps.sis.access import teacher_can_access_student
 from apps.staff.models import Teacher, TeacherTeachingAssignment
 from .models import Exam, ExamResult, ExamSchedule, ExamScheduleItem
 from .serializers import (
@@ -60,7 +60,21 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         qs = qs.filter(status=ExamSchedule.Status.PUBLISHED)
 
         if user.role == User.Role.TEACHER:
-            return qs
+            teacher = getattr(user, 'teacher_profile', None)
+            if not teacher:
+                return qs.none()
+            assigned_class_ids = teacher.sections.filter(
+                school_id=user.school_id,
+            ).values_list('class_room_id', flat=True)
+            assigned_class_ids = list(assigned_class_ids)
+            if not assigned_class_ids:
+                assigned_class_ids = list(
+                    TeacherTeachingAssignment.objects.filter(
+                        teacher=teacher,
+                        section__school_id=user.school_id,
+                    ).values_list('section__class_room_id', flat=True).distinct()
+                )
+            return qs.filter(classroom_id__in=assigned_class_ids).distinct()
 
         if user.role == User.Role.STUDENT:
             profile = getattr(user, 'student_profile', None)
@@ -90,7 +104,13 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         return qs.none()
 
     def perform_create(self, serializer):
-        serializer.save(school=self.request.user.school)
+        user = self.request.user
+        classroom = serializer.validated_data.get('classroom')
+        school = classroom.school if user.role == User.Role.SUPER_ADMIN and classroom else user.school
+        if not school or not classroom or classroom.school_id != school.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'classroom': 'Select a classroom in the school you manage.'})
+        serializer.save(school=school)
 
     @action(detail=True, methods=['post'], url_path='publish')
     def publish(self, request, pk=None):
@@ -160,33 +180,33 @@ class ExamScheduleViewSet(TenantScopedViewSet):
 
         student_user_ids = list(class_students.filter(login_profile__isnull=False).values_list('login_profile__user_id', flat=True))
         parent_user_ids = list(User.objects.filter(parent_profile__students__in=class_students).values_list('id', flat=True).distinct())
-        teacher_user_ids = list(User.objects.filter(teacher_profile__sections__class_room=schedule.classroom, teacher_profile__school=schedule.school).values_list('id', flat=True).distinct())
+        teacher_user_ids = list(User.objects.filter(
+            Q(teacher_profile__sections__class_room=schedule.classroom)
+            | Q(teacher_profile__teaching_assignments__section__class_room=schedule.classroom),
+            teacher_profile__school=schedule.school,
+            teacher_profile__status=Teacher.Status.ACTIVE,
+        ).values_list('id', flat=True).distinct())
 
         all_target_ids = set(student_user_ids + parent_user_ids + teacher_user_ids)
-        recipients = User.objects.filter(id__in=all_target_ids)
-
         student_names = list(class_students.values_list('name', flat=True)[:10])
         student_ids = list(class_students.values_list('id', flat=True))
-
-        Notification.objects.bulk_create([
-            Notification(
-                school=schedule.school,
-                sender=request.user,
-                recipient=u,
-                channel='exam-schedule',
-                category='Academic',
-                title=f'Exam Timetable Published: {schedule.name}',
-                body=f'Official exam timetable for {schedule.class_name} ({schedule.name}) is now published with {items.count()} subjects.',
-                related_object={
-                    'schedule_id': schedule.id,
-                    'class_name': schedule.class_name,
-                    'targetClass': schedule.class_name,
-                    'studentNames': student_names,
-                    'studentIds': student_ids,
-                },
-            )
-            for u in recipients
-        ])
+        from apps.notifications.tasks import enqueue_notification_fanout
+        enqueue_notification_fanout(
+            school_id=schedule.school_id,
+            sender_id=request.user.id,
+            recipient_ids=list(all_target_ids),
+            channel='exam-schedule',
+            category='Academic',
+            title=f'Exam Timetable Published: {schedule.name}',
+            body=f'Official exam timetable for {schedule.class_name} ({schedule.name}) is now published with {items.count()} subjects.',
+            related={
+                'schedule_id': schedule.id,
+                'class_name': schedule.class_name,
+                'targetClass': schedule.class_name,
+                'studentNames': student_names,
+                'studentIds': student_ids,
+            },
+        )
 
         return Response(ExamScheduleSerializer(schedule, context={'request': request}).data)
 
@@ -259,31 +279,26 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         parent_user_ids = list(User.objects.filter(parent_profile__students__in=class_students).values_list('id', flat=True).distinct())
 
         target_recipient_ids = set(student_user_ids + parent_user_ids)
-        recipients = User.objects.filter(id__in=target_recipient_ids)
-
         student_names = list(class_students.values_list('name', flat=True)[:10])
         student_ids = list(class_students.values_list('id', flat=True))
-
-        Notification.objects.bulk_create([
-            Notification(
-                school=schedule.school,
-                sender=request.user,
-                recipient=u,
-                channel='exam-hallticket',
-                category='Academic',
-                title=f'Official Hall Tickets Released: {schedule.name}',
-                body=f'Official exam admit cards / hall tickets for {schedule.class_name} ({schedule.name}) have been approved and released by administration.',
-                related_object={
-                    'schedule_id': schedule.id,
-                    'class_name': schedule.class_name,
-                    'targetClass': schedule.class_name,
-                    'hall_ticket_released': True,
-                    'studentNames': student_names,
-                    'studentIds': student_ids,
-                },
-            )
-            for u in recipients
-        ])
+        from apps.notifications.tasks import enqueue_notification_fanout
+        enqueue_notification_fanout(
+            school_id=schedule.school_id,
+            sender_id=request.user.id,
+            recipient_ids=list(target_recipient_ids),
+            channel='exam-hallticket',
+            category='Academic',
+            title=f'Official Hall Tickets Released: {schedule.name}',
+            body=f'Official exam admit cards / hall tickets for {schedule.class_name} ({schedule.name}) have been approved and released by administration.',
+            related={
+                'schedule_id': schedule.id,
+                'class_name': schedule.class_name,
+                'targetClass': schedule.class_name,
+                'hall_ticket_released': True,
+                'studentNames': student_names,
+                'studentIds': student_ids,
+            },
+        )
 
         return Response({
             'detail': f'Hall tickets approved and released to {len(student_user_ids)} students and {len(parent_user_ids)} parents.',
@@ -690,6 +705,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             'assigned_teachers': assigned_teachers_list,
             'section_teachers': unique_section_teachers,
             'section_extensions': schedule.section_extensions or {},
+            'subject_extensions': schedule.subject_extensions or {},
             'marks_entry_days': schedule.marks_entry_days,
             'marks_entry_deadline': overall_window['deadline'].isoformat() if overall_window.get('deadline') else (schedule.marks_entry_deadline.isoformat() if schedule.marks_entry_deadline else None),
             'marks_entry_extended': overall_window.get('is_extended', False),
@@ -847,6 +863,31 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         schedule.marks_published_at = now
         schedule.save(update_fields=['marks_published', 'marks_published_at', 'updated_at'])
 
+        target_students = Student.objects.filter(
+            school=schedule.school,
+            status=Student.Status.ACTIVE,
+        ).filter(
+            Q(section_record__class_room=schedule.classroom)
+            | Q(class_name__iexact=schedule.class_name)
+        )
+        if section_name:
+            target_students = target_students.filter(
+                Q(section_record__name__iexact=section_name) | Q(section__iexact=section_name)
+            )
+        target_ids = set(target_students.filter(login_profile__isnull=False).values_list('login_profile__user_id', flat=True))
+        target_ids.update(User.objects.filter(parent_profile__students__in=target_students).values_list('id', flat=True))
+        from apps.notifications.tasks import enqueue_notification_fanout
+        enqueue_notification_fanout(
+            school_id=schedule.school_id,
+            sender_id=user.id,
+            recipient_ids=list(target_ids),
+            channel='exam-result',
+            category='Academic',
+            title=f'Marks Published: {schedule.name}',
+            body=f'Marks for {schedule.class_name} ({section_name or "all sections"}) have been verified and published.',
+            related={'schedule_id': schedule.id, 'class_name': schedule.class_name, 'section': section_name or 'all'},
+        )
+
         return Response({
             'detail': f'Marks for {schedule.name} ({schedule.class_name} {section_name}) have been verified and published. You can now generate official report cards.',
             'updated': updated,
@@ -861,12 +902,16 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             return Response({'detail': 'Only school administrators can extend marks entry deadlines.'}, status=status.HTTP_403_FORBIDDEN)
 
         target_section = str(request.data.get('section', '')).strip()
+        target_subject = str(request.data.get('subject', '')).strip()
         extension_days = request.data.get('extension_days')
         custom_deadline = request.data.get('deadline')
         reason = str(request.data.get('reason', '')).strip() or 'Extension granted by administrator'
 
         now = timezone.now()
-        current_deadline = schedule.get_marks_entry_deadline(section_name=target_section if target_section else None) or now
+        current_deadline = schedule.get_marks_entry_deadline(
+            subject_name=target_subject or None,
+            section_name=target_section if target_section else None,
+        ) or now
 
         new_deadline = None
         if custom_deadline:
@@ -877,8 +922,11 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                 if parsed_dt <= now:
                     return Response({'detail': 'Extended deadline must be in the future.'}, status=status.HTTP_400_BAD_REQUEST)
                 new_deadline = parsed_dt
-            except Exception as e:
-                return Response({'detail': f'Invalid deadline format: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': 'Invalid deadline format. Enter a valid date and time.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         elif extension_days is not None:
             try:
                 days = int(extension_days)
@@ -894,8 +942,28 @@ class ExamScheduleViewSet(TenantScopedViewSet):
 
         user_display_name = f"{user.first_name} {user.last_name}".strip() or user.username
         is_specific_section = bool(target_section and target_section.lower() not in ['all', 'all sections', ''])
+        is_specific_subject = bool(target_subject and target_subject.lower() not in ['all', 'all subjects', ''])
 
-        if is_specific_section:
+        if is_specific_subject:
+            matched_item = next(
+                (item for item in schedule.items.all() if item.subject_name.strip().lower() == target_subject.lower()),
+                None,
+            )
+            if not matched_item:
+                return Response({'detail': 'Choose a subject in this exam schedule.'}, status=status.HTTP_400_BAD_REQUEST)
+            current_exts = dict(schedule.subject_extensions or {})
+            current_exts[matched_item.subject_name] = {
+                'extended': True,
+                'deadline': new_deadline.isoformat(),
+                'reason': reason,
+                'extended_at': now.isoformat(),
+                'extended_by_id': user.id,
+                'extended_by_name': user_display_name,
+            }
+            schedule.subject_extensions = current_exts
+            schedule.save(update_fields=['subject_extensions', 'updated_at'])
+            Exam.objects.filter(schedule=schedule, subject__iexact=matched_item.subject_name).update(marks_entry_deadline=new_deadline)
+        elif is_specific_section:
             # Store per-section extension
             current_exts = dict(schedule.section_extensions or {})
             current_exts[target_section] = {
@@ -910,18 +978,23 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             schedule.save(update_fields=['section_extensions', 'updated_at'])
             Exam.objects.filter(schedule=schedule, section__iexact=target_section).update(marks_entry_deadline=new_deadline)
         else:
-            # Schedule-wide extension (All sections)
+            # Schedule-wide extension replaces scoped overrides so every subject
+            # and section receives the same updated deadline.
             schedule.marks_entry_deadline = new_deadline
             schedule.marks_entry_extended = True
             schedule.marks_entry_extension_reason = reason
             schedule.marks_entry_extended_at = now
             schedule.marks_entry_extended_by = user
+            schedule.section_extensions = {}
+            schedule.subject_extensions = {}
             schedule.save(update_fields=[
                 'marks_entry_deadline',
                 'marks_entry_extended',
                 'marks_entry_extension_reason',
                 'marks_entry_extended_at',
                 'marks_entry_extended_by',
+                'section_extensions',
+                'subject_extensions',
                 'updated_at',
             ])
             Exam.objects.filter(schedule=schedule).update(marks_entry_deadline=new_deadline)
@@ -932,7 +1005,12 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                 school_id=schedule.school_id,
                 status=Teacher.Status.ACTIVE,
             )
-            if is_specific_section:
+            if is_specific_subject:
+                class_teachers_qs = class_teachers_qs.filter(
+                    Q(teaching_assignments__section__class_room=schedule.classroom, teaching_assignments__subject__name__iexact=target_subject) |
+                    Q(subject_records__name__iexact=target_subject)
+                )
+            elif is_specific_section:
                 class_teachers_qs = class_teachers_qs.filter(
                     Q(sections__class_room=schedule.classroom, sections__name__iexact=target_section) |
                     Q(teaching_assignments__section__class_room=schedule.classroom, teaching_assignments__section__name__iexact=target_section) |
@@ -945,34 +1023,40 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                     Q(assigned_sections__contains=schedule.class_name)
                 )
 
-            teacher_user_ids = class_teachers_qs.distinct().values_list('user_id', flat=True)
-            scope_desc = f"{schedule.class_name} - Section {target_section}" if is_specific_section else f"{schedule.class_name} (All Sections)"
-            notifications = [
-                Notification(
-                    school=schedule.school,
-                    recipient_id=uid,
-                    channel='marks-entry',
-                    title=f'Marks Entry Deadline Extended: {schedule.name}',
-                    body=f'The marks entry deadline for {scope_desc} ({schedule.name}) has been extended to {new_deadline.strftime("%b %d, %Y %I:%M %p")}. Reason: {reason}',
-                    data={
-                        'schedule_id': schedule.id,
-                        'class_name': schedule.class_name,
-                        'section': target_section if is_specific_section else 'all',
-                        'deadline': new_deadline.isoformat(),
-                    }
-                )
-                for uid in teacher_user_ids if uid
-            ]
-            if notifications:
-                Notification.objects.bulk_create(notifications)
+            teacher_user_ids = list(class_teachers_qs.distinct().values_list('user_id', flat=True))
+            scope_desc = (
+                f"{schedule.class_name} - {target_subject}"
+                if is_specific_subject else
+                f"{schedule.class_name} - Section {target_section}"
+                if is_specific_section else
+                f"{schedule.class_name} (All Subjects and Sections)"
+            )
+            from apps.notifications.tasks import enqueue_notification_fanout
+            enqueue_notification_fanout(
+                school_id=schedule.school_id,
+                sender_id=user.id,
+                recipient_ids=[uid for uid in teacher_user_ids if uid],
+                channel='marks-entry',
+                category='Academic',
+                title=f'Marks Entry Deadline Extended: {schedule.name}',
+                body=f'The marks entry deadline for {scope_desc} ({schedule.name}) has been extended to {new_deadline.strftime("%b %d, %Y %I:%M %p")}. Reason: {reason}',
+                related={
+                    'schedule_id': schedule.id,
+                    'class_name': schedule.class_name,
+                    'section': target_section if is_specific_section else 'all',
+                    'subject': target_subject if is_specific_subject else 'all',
+                    'deadline': new_deadline.isoformat(),
+                },
+            )
         except Exception:
             pass
 
-        target_label = f"Section {target_section}" if is_specific_section else "all sections"
+        target_label = f"Subject {target_subject}" if is_specific_subject else f"Section {target_section}" if is_specific_section else "all subjects and sections"
         return Response({
             'detail': f'Marks entry deadline for {schedule.class_name} ({target_label}) successfully extended to {new_deadline.strftime("%b %d, %Y %I:%M %p")}.',
             'schedule_id': schedule.id,
             'section': target_section if is_specific_section else 'all',
+            'subject': target_subject if is_specific_subject else 'all',
             'marks_entry_deadline': new_deadline.isoformat(),
             'marks_entry_extended': True,
             'marks_entry_extension_reason': reason,
@@ -987,9 +1071,20 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             return Response({'detail': 'Only school administrators can modify deadlines.'}, status=status.HTTP_403_FORBIDDEN)
 
         target_section = str(request.data.get('section', '')).strip()
+        target_subject = str(request.data.get('subject', '')).strip()
         is_specific_section = bool(target_section and target_section.lower() not in ['all', 'all sections', ''])
+        is_specific_subject = bool(target_subject and target_subject.lower() not in ['all', 'all subjects', ''])
 
-        if is_specific_section:
+        if is_specific_subject:
+            current_exts = dict(schedule.subject_extensions or {})
+            matched_key = next((k for k in current_exts if str(k).strip().lower() == target_subject.lower()), None)
+            if matched_key:
+                del current_exts[matched_key]
+            schedule.subject_extensions = current_exts
+            schedule.save(update_fields=['subject_extensions', 'updated_at'])
+            Exam.objects.filter(schedule=schedule, subject__iexact=target_subject).update(marks_entry_deadline=None)
+            msg = f'Marks entry deadline for {target_subject} now follows this exam schedule’s default deadline.'
+        elif is_specific_section:
             current_exts = dict(schedule.section_extensions or {})
             matched_key = None
             for k in current_exts:
@@ -1009,6 +1104,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             schedule.marks_entry_extended_at = None
             schedule.marks_entry_extended_by = None
             schedule.section_extensions = {}
+            schedule.subject_extensions = {}
             schedule.save(update_fields=[
                 'marks_entry_deadline',
                 'marks_entry_extended',
@@ -1016,15 +1112,17 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                 'marks_entry_extended_at',
                 'marks_entry_extended_by',
                 'section_extensions',
+                'subject_extensions',
                 'updated_at',
             ])
             Exam.objects.filter(schedule=schedule).update(marks_entry_deadline=None)
-            msg = f'Marks entry deadlines for all sections of {schedule.class_name} have been reset to the standard 3-day post-exam window.'
+            msg = f'Marks entry deadlines for all subjects and sections of {schedule.class_name} have been reset to the schedule default window.'
 
         return Response({
             'detail': msg,
             'schedule_id': schedule.id,
             'section': target_section if is_specific_section else 'all',
+            'subject': target_subject if is_specific_subject else 'all',
             'marks_entry_extended': False,
             'section_extensions': schedule.section_extensions or {},
         })
@@ -1089,37 +1187,33 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             Q(class_name__iexact=schedule.class_name)
         )
 
-        parent_users = list(User.objects.filter(parent_profile__students__in=class_students).distinct())
-        student_users = list(User.objects.filter(login_profile__student__in=class_students).distinct())
-
-        target_recipients = set(parent_users + student_users)
+        parent_user_ids = list(User.objects.filter(parent_profile__students__in=class_students).values_list('id', flat=True).distinct())
+        student_user_ids = list(User.objects.filter(login_profile__student__in=class_students).values_list('id', flat=True).distinct())
 
         student_names = list(class_students.values_list('name', flat=True)[:10])
         student_ids = list(class_students.values_list('id', flat=True))
 
-        Notification.objects.bulk_create([
-            Notification(
-                school=schedule.school,
-                sender=request.user,
-                recipient=u,
-                channel='exam-result',
-                category='Academic',
-                title=f'Official Report Cards Published: {schedule.name}',
-                body=f'Official terminal examination report cards for {schedule.class_name} ({schedule.name}) have been verified and published by the administration. You can now view and download your official grade card.',
-                related_object={
-                    'schedule_id': schedule.id,
-                    'class_name': schedule.class_name,
-                    'targetClass': schedule.class_name,
-                    'report_cards_published': True,
-                    'studentNames': student_names,
-                    'studentIds': student_ids,
-                },
-            )
-            for u in target_recipients
-        ])
+        from apps.notifications.tasks import enqueue_notification_fanout
+        enqueue_notification_fanout(
+            school_id=schedule.school_id,
+            sender_id=user.id,
+            recipient_ids=list(set(parent_user_ids + student_user_ids)),
+            channel='exam-result',
+            category='Academic',
+            title=f'Official Report Cards Published: {schedule.name}',
+            body=f'Official terminal examination report cards for {schedule.class_name} ({schedule.name}) have been verified and published by the administration. You can now view and download your official grade card.',
+            related={
+                'schedule_id': schedule.id,
+                'class_name': schedule.class_name,
+                'targetClass': schedule.class_name,
+                'report_cards_published': True,
+                'studentNames': student_names,
+                'studentIds': student_ids,
+            },
+        )
 
         return Response({
-            'detail': f'Official report cards for {schedule.name} ({schedule.class_name}) have been approved and published to {len(student_users)} students and {len(parent_users)} parents.',
+            'detail': f'Official report cards for {schedule.name} ({schedule.class_name}) have been approved and published to {len(student_user_ids)} students and {len(parent_user_ids)} parents.',
             'published_at': schedule.report_cards_published_at,
             'schedule': ExamScheduleSerializer(schedule, context={'request': request}).data,
         })
@@ -1374,6 +1468,19 @@ class ExamViewSet(TenantScopedViewSet):
             ).first()
             if not teacher:
                 return qs.none()
+            exact_assignments = TeacherTeachingAssignment.objects.filter(
+                school_id=user.school_id,
+                teacher=teacher,
+            ).select_related('section__class_room', 'subject')
+            if exact_assignments.exists():
+                exact_scope = Q(pk__in=[])
+                for assignment in exact_assignments:
+                    exact_scope |= Q(
+                        class_name=assignment.section.class_room.name,
+                        section=assignment.section.name,
+                        subject=assignment.subject.name,
+                    )
+                return qs.filter(exact_scope)
             sections = teacher.sections.filter(school_id=user.school_id).select_related('class_room')
             subject_names = teacher.subject_records.filter(
                 school_id=user.school_id,
@@ -1404,7 +1511,13 @@ class ExamViewSet(TenantScopedViewSet):
         return qs
 
     def perform_create(self, serializer):
-        serializer.save(school=self.request.user.school)
+        user = self.request.user
+        schedule = serializer.validated_data.get('schedule')
+        school = schedule.school if user.role == User.Role.SUPER_ADMIN and schedule else user.school
+        if not school or (schedule and schedule.school_id != school.id):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'schedule': 'Select an exam schedule in the school you manage, or create this exam from your school account.'})
+        serializer.save(school=school)
 
     @action(detail=True, methods=['get'], url_path='results')
     def results(self, request, pk=None):
@@ -1425,7 +1538,7 @@ class ExamViewSet(TenantScopedViewSet):
                 status=ExamResult.Status.SUBMITTED,
             )
         elif request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]:
-            qs = ExamResult.objects.filter(exam=exam)
+            qs = ExamResult.objects.filter(exam=exam, school_id=exam.school_id)
         else:
             return Response({'detail': 'You may only view your own child’s results.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(ExamResultSerializer(qs.select_related('student'), many=True).data)
@@ -1525,26 +1638,27 @@ class ExamViewSet(TenantScopedViewSet):
             result.save()
 
             if result.status == ExamResult.Status.SUBMITTED:
-                parent_profiles = result.student.parent_profiles.select_related('user')
-                Notification.objects.bulk_create([
-                    Notification(
-                        school=exam.school,
-                        sender=request.user,
-                        recipient=p.user,
-                        channel='exam-result',
-                        category='Academic',
-                        title=f'Exam Results Published: {exam.name}',
-                        body=f'Official marks for {result.student.name} in {exam.subject} ({exam.class_name} {exam.section}) are now published.',
-                        related_object={
-                            'exam_id': exam.id,
-                            'student_id': result.student_id,
-                            'class_name': exam.class_name,
-                            'section': exam.section,
-                            'targetClass': exam.class_name,
-                        },
-                    )
-                    for p in parent_profiles
-                ])
+                recipient_ids = list(result.student.parent_profiles.filter(user__is_active=True).values_list('user_id', flat=True))
+                student_user_id = result.student.login_profile.user_id if getattr(result.student, 'login_profile', None) else None
+                if student_user_id:
+                    recipient_ids.append(student_user_id)
+                from apps.notifications.tasks import enqueue_notification_fanout
+                enqueue_notification_fanout(
+                    school_id=exam.school_id,
+                    sender_id=request.user.id,
+                    recipient_ids=list(set(recipient_ids)),
+                    channel='exam-result',
+                    category='Academic',
+                    title=f'Exam Results Published: {exam.name}',
+                    body=f'Official marks for {result.student.name} in {exam.subject} ({exam.class_name} {exam.section}) are now published.',
+                    related={
+                        'exam_id': exam.id,
+                        'student_id': result.student_id,
+                        'class_name': exam.class_name,
+                        'section': exam.section,
+                        'targetClass': exam.class_name,
+                    },
+                )
         
         return Response({'updated': len(entries), 'detail': f'Marks successfully saved for {len(entries)} students.'})
 
@@ -1554,13 +1668,42 @@ class StudentResultsView(APIView):
 
     @extend_schema(responses={200: ExamResultSerializer(many=True), 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Not found')})
     def get(self, request, student_id):
-        student = Student.objects.filter(id=student_id, school=request.user.school).first()
+        student_qs = Student.objects.filter(pk=student_id)
+        if request.user.role != User.Role.SUPER_ADMIN:
+            student_qs = student_qs.filter(school_id=request.user.school_id)
+        student = student_qs.first()
         if not student:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if request.user.role == User.Role.PARENT and (not hasattr(request.user, 'parent_profile') or not request.user.parent_profile.students.filter(id=student_id).exists()):
+        if request.user.role == User.Role.PARENT and (not hasattr(request.user, 'parent_profile') or not request.user.parent_profile.students.filter(pk=student.pk, school_id=request.user.school_id).exists()):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if request.user.role == User.Role.STUDENT and (not hasattr(request.user, 'student_profile') or request.user.student_profile.student_id != student_id):
+        if request.user.role == User.Role.STUDENT and (not hasattr(request.user, 'student_profile') or request.user.student_profile.student_id != student.pk or student.school_id != request.user.school_id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if request.user.role not in [User.Role.PARENT, User.Role.STUDENT, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]:
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        return Response(ExamResultSerializer(ExamResult.objects.filter(student=student, status=ExamResult.Status.SUBMITTED).select_related('student', 'exam'), many=True).data)
+        results = ExamResult.objects.filter(
+            student=student, school_id=student.school_id,
+            status=ExamResult.Status.SUBMITTED,
+        ).select_related('student', 'exam')
+        if request.user.role == User.Role.TEACHER:
+            teacher = Teacher.objects.filter(
+                user=request.user,
+                school_id=request.user.school_id,
+                status=Teacher.Status.ACTIVE,
+            ).first()
+            if not teacher_can_access_student(teacher, student, school_id=request.user.school_id):
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            exact_subjects = TeacherTeachingAssignment.objects.filter(
+                school_id=student.school_id,
+                teacher=teacher,
+                section_id=student.section_record_id,
+            ).values_list('subject__name', flat=True)
+            if exact_subjects.exists():
+                results = results.filter(exam__subject__in=exact_subjects)
+            else:
+                # Legacy teachers have separate section and subject links. Keep
+                # both boundaries enforced until their exact assignments exist.
+                subject_names = teacher.subject_records.filter(
+                    school_id=student.school_id,
+                ).values_list('name', flat=True)
+                results = results.filter(exam__subject__in=subject_names)
+        return Response(ExamResultSerializer(results, many=True).data)

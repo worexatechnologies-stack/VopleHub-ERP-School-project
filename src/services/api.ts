@@ -1,12 +1,11 @@
 import type { UserRole } from '../types';
 import type { AuthUser } from '../utils/auth';
 import {
-  ACCESS_TOKEN_STORAGE_KEY,
   AUTH_SESSION_EXPIRED_EVENT,
-  REFRESH_TOKEN_STORAGE_KEY,
+  getCsrfToken,
 } from '../utils/auth';
 
-// Same-origin avoids HTTPS mixed-content failures and keeps authentication behind Caddy.
+// Same-origin avoids HTTPS mixed-content failures and keeps authentication behind Caddy/Nginx.
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '');
 
 const roleMap: Record<string, UserRole> = {
@@ -18,20 +17,56 @@ const roleMap: Record<string, UserRole> = {
   public_learner: 'Public Learner',
 };
 
-export async function loginWithApi(email: string, password: string): Promise<{ user: AuthUser; access: string }> {
+export async function fetchCsrfToken(): Promise<string> {
   try {
+    const response = await fetch(`${API_BASE_URL}/auth/csrf/`, {
+      method: 'GET',
+      credentials: 'include',
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return data.csrfToken || getCsrfToken();
+    }
+  } catch {}
+  return getCsrfToken();
+}
+
+export async function loginWithApi(
+  email: string,
+  password: string,
+  role?: string,
+): Promise<{ user: AuthUser; mfaRequired?: boolean; mfaToken?: string; devOtp?: string }> {
+  try {
+    let csrf = getCsrfToken();
+    if (!csrf) {
+      csrf = await fetchCsrfToken();
+    }
+
     const response = await fetch(`${API_BASE_URL}/auth/login/`, {
       method: 'POST',
-      // Send the HttpOnly refresh-token cookie automatically.
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      // Login IDs are generated lowercase. Normalising pasted whitespace/case here
-      // prevents a correct generated login ID from being rejected by an exact DB lookup.
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Type': 'web',
+        'X-Auth-Mode': 'session',
+        ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+      },
+      body: JSON.stringify({
+        email: email.trim().toLowerCase(),
+        password,
+        role,
+        client_type: 'web',
+        auth_mode: 'session',
+      }),
     });
+
     if (!response.ok) {
       if (response.status === 401) {
         throw new Error('Invalid login ID or password. Check that you selected the matching role tab.');
+      }
+      if (response.status === 403) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Access forbidden. Please check your role selection.');
       }
       if (response.status === 429) {
         const retryAfter = Number(response.headers.get('Retry-After'));
@@ -44,17 +79,26 @@ export async function loginWithApi(email: string, password: string): Promise<{ u
     }
 
     const data = await response.json();
-    const role = roleMap[data.user?.role];
-    if (!role || !data.access) {
+
+    if (data.mfa_required) {
+      return {
+        user: {} as any,
+        mfaRequired: true,
+        mfaToken: data.mfa_token,
+        devOtp: data.dev_otp,
+      };
+    }
+
+    const resolvedRole = roleMap[data.user?.role];
+    if (!resolvedRole) {
       throw new Error('The sign-in service returned an incomplete session. Please try again.');
     }
 
     return {
-      access: data.access,
       user: {
         email: data.user.email,
         name: data.user.name || data.user.email,
-        role,
+        role: resolvedRole,
         schoolId: data.user.schoolId || undefined,
         schoolName: data.user.schoolName || undefined,
         studentId: data.user.studentId || undefined,
@@ -70,9 +114,21 @@ export async function loginWithApi(email: string, password: string): Promise<{ u
 }
 
 export async function getCurrentUser(): Promise<AuthUser> {
-  const data = await apiRequest<{ email: string; name: string; role: string; schoolId?: string; schoolName?: string; studentId?: string; parentStudentIds?: string[]; permissions?: string[]; mustChangePassword?: boolean }>('/auth/me/');
+  const data = await apiRequest<{
+    email: string;
+    name: string;
+    role: string;
+    schoolId?: string;
+    schoolName?: string;
+    studentId?: string;
+    parentStudentIds?: string[];
+    permissions?: string[];
+    mustChangePassword?: boolean;
+  }>('/auth/me/');
+
   const role = roleMap[data.role];
   if (!role) throw new Error('The account has an unsupported role.');
+
   return {
     email: data.email,
     name: data.name || data.email,
@@ -87,16 +143,18 @@ export async function getCurrentUser(): Promise<AuthUser> {
 }
 
 export async function logoutWithApi(): Promise<void> {
-  const access = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+  const csrf = getCsrfToken();
   const response = await fetch(`${API_BASE_URL}/auth/logout/`, {
     method: 'POST',
-    // Send the HttpOnly refresh-token cookie automatically.
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
-      ...(access ? { Authorization: `Bearer ${access}` } : {}),
+      'X-Client-Type': 'web',
+      'X-Auth-Mode': 'session',
+      ...(csrf ? { 'X-CSRFToken': csrf } : {}),
     },
   });
+
   if (!response.ok && response.status !== 401) {
     throw new Error(`Sign-out could not be completed (${response.status}).`);
   }
@@ -111,11 +169,6 @@ export interface ApiErrorBody {
   [key: string]: unknown;
 }
 
-/**
- * HTTP error that keeps the server's structured response available to callers.
- * Screens can use fields such as `references` for actionable conflict messages
- * without parsing a JSON string out of `Error.message`.
- */
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly body: ApiErrorBody | null;
@@ -126,34 +179,6 @@ export class ApiRequestError extends Error {
     this.status = status;
     this.body = body;
   }
-}
-
-let refreshInFlight: Promise<string | null> | null = null;
-
-async function refreshAccessToken(): Promise<string | null> {
-  if (refreshInFlight) return refreshInFlight;
-
-  refreshInFlight = (async () => {
-    try {
-      // The refresh token is sent automatically as an HttpOnly cookie.
-      const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (!response.ok) return null;
-      const data = await response.json() as { access?: string };
-      if (!data.access) return null;
-      localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, data.access);
-      return data.access;
-    } catch {
-      return null;
-    } finally {
-      refreshInFlight = null;
-    }
-  })();
-
-  return refreshInFlight;
 }
 
 function normalizeApiPath(path: string): string {
@@ -176,21 +201,31 @@ function normalizeApiPath(path: string): string {
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isFormData = init.body instanceof FormData;
   const targetUrl = normalizeApiPath(path);
-  const makeRequest = (token: string | null) => fetch(targetUrl, {
-    ...init,
-    headers: { ...(isFormData ? {} : { 'Content-Type': 'application/json' }), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers },
-  });
-  let response = await makeRequest(localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY));
-  if (response.status === 401 && !path.startsWith('/auth/refresh/')) {
-    const refreshedAccessToken = await refreshAccessToken();
-    if (refreshedAccessToken) response = await makeRequest(refreshedAccessToken);
+  const method = (init.method || 'GET').toUpperCase();
+  const isMutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+
+  let csrf = isMutating ? getCsrfToken() : '';
+  if (isMutating && !csrf) {
+    csrf = await fetchCsrfToken();
   }
-  if (response.status === 401) window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+
+  const response = await fetch(targetUrl, {
+    ...init,
+    credentials: 'include',
+    headers: {
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      'X-Client-Type': 'web',
+      'X-Auth-Mode': 'session',
+      ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+      ...init.headers,
+    },
+  });
+
   if (!response.ok) {
     let detail = '';
     let parsedBody: ApiErrorBody | null = null;
     try {
-      const errorBody = await response.json() as { detail?: unknown; errors?: unknown };
+      const errorBody = (await response.json()) as { detail?: unknown; errors?: unknown };
       parsedBody = errorBody;
       const message = errorBody.detail ?? errorBody.errors ?? errorBody;
       if (typeof message === 'string') detail = `: ${message}`;
@@ -198,49 +233,45 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     } catch {
       // Preserve the HTTP status when an upstream response is not JSON.
     }
+    const unauthenticated = response.status === 401 ||
+      (response.status === 403 && parsedBody?.detail === 'Authentication credentials were not provided.');
+    if (unauthenticated && !path.startsWith('/auth/login/') && !path.startsWith('/auth/verify-otp/')) {
+      window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+    }
     throw new ApiRequestError(response.status, `API request failed (${response.status})${detail}.`, parsedBody);
   }
+
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
-/** Download a protected binary API response while preserving JWT refresh behavior. */
+/** Download a protected binary API response via session credentials. */
 export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string; contentType: string }> {
   const targetUrl = normalizeApiPath(path);
-  const makeRequest = (token: string | null) => fetch(targetUrl, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  const response = await fetch(targetUrl, {
+    credentials: 'include',
+    headers: {
+      'X-Client-Type': 'web',
+      'X-Auth-Mode': 'session',
+    },
   });
-  let response = await makeRequest(localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY));
-  if (response.status === 401) {
-    const refreshedAccessToken = await refreshAccessToken();
-    if (refreshedAccessToken) response = await makeRequest(refreshedAccessToken);
+
+  let unauthenticated = response.status === 401;
+  if (response.status === 403) {
+    const errorBody = await response.clone().json().catch(() => ({})) as { detail?: string };
+    unauthenticated = errorBody.detail === 'Authentication credentials were not provided.';
   }
-  if (response.status === 401) window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+  if (unauthenticated) {
+    window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+    throw new Error(`Download failed: session expired (${response.status}).`);
+  }
+
   if (!response.ok) throw new Error(`Document download failed (${response.status}).`);
+
   const header = response.headers.get('Content-Disposition') || '';
-  const contentType = response.headers.get('Content-Type') || '';
-
-  // Extract filename safely handling RFC 5987 / 6266 utf-8 encoded filenames and standard quotes
-  let filename = '';
-  const utf8Match = /filename\*=utf-8''([^;]+)/i.exec(header);
-  if (utf8Match && utf8Match[1]) {
-    try {
-      filename = decodeURIComponent(utf8Match[1].trim());
-    } catch {
-      filename = utf8Match[1].trim();
-    }
-  }
-  if (!filename) {
-    const match = /filename="?([^";]+)"?/i.exec(header);
-    if (match && match[1]) {
-      filename = match[1].trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  if (!filename) {
-    filename = 'document';
-  }
-
-  const rawBlob = await response.blob();
-  const blob = new Blob([rawBlob], { type: contentType || rawBlob.type || 'application/octet-stream' });
+  const match = header.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+  const filename = match ? decodeURIComponent(match[1]) : 'downloaded-file';
+  const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
+  const blob = await response.blob();
   return { blob, filename, contentType };
 }

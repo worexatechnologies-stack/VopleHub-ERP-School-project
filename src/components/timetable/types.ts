@@ -19,6 +19,7 @@ export interface TimetableSlot {
 }
 
 export interface SchoolTimingConfig {
+  schoolName?: string;
   workingDays: DayOfWeek[];
   startTime: string; // e.g. "08:30"
   periodDuration: number; // e.g. 45

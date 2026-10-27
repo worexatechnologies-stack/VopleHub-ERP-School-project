@@ -13,21 +13,41 @@ export interface AuthUser {
   mustChangePassword?: boolean;
 }
 
-export const ACCESS_TOKEN_STORAGE_KEY = 'school_erp_api_token';
-export const REFRESH_TOKEN_STORAGE_KEY = 'school_erp_api_refresh_token';
+/**
+ * Browser authentication uses a Django server-side session in an HttpOnly
+ * cookie. The browser never reads or persists mobile access/refresh tokens.
+ */
+
+export function getCsrfToken(): string {
+  if (typeof document === 'undefined') return '';
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+/** @deprecated Web flow uses HttpOnly session cookies. Retained for backward typing compatibility. */
+export function getAccessToken(): string | null {
+  return null;
+}
+
+/** @deprecated Web flow uses HttpOnly session cookies. Retained for backward typing compatibility. */
+export function setAccessTokenInMemory(_token: string | null): void {}
+
 export const AUTH_SESSION_EXPIRED_EVENT = 'school-erp:session-expired';
 
 export function clearAuthenticatedSession(): void {
-  localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-  localStorage.removeItem('erp_students');
-  localStorage.removeItem('erp_individual_fees');
-  localStorage.removeItem('erp_fee_categories');
-  localStorage.removeItem('erp_fee_structures');
-  localStorage.removeItem('sa_schools');
-  localStorage.removeItem('sa_admins');
-  localStorage.removeItem('sa_users');
-  localStorage.removeItem('sa_audit_logs');
+  try {
+    localStorage.removeItem('school_erp_api_token');
+    localStorage.removeItem('school_erp_api_refresh_token');
+    localStorage.removeItem('school_erp_session_id');
+    localStorage.removeItem('erp_students');
+    localStorage.removeItem('erp_individual_fees');
+    localStorage.removeItem('erp_fee_categories');
+    localStorage.removeItem('erp_fee_structures');
+    localStorage.removeItem('sa_schools');
+    localStorage.removeItem('sa_admins');
+    localStorage.removeItem('sa_users');
+    localStorage.removeItem('sa_audit_logs');
+  } catch {}
   clearAuthenticatedUser();
 }
 
@@ -41,14 +61,16 @@ export const SUPER_ADMIN_PASSWORD = '';
 export const PRESET_ACCOUNTS: Array<AuthUser & { password: string; description: string }> = [];
 
 /** @deprecated Replaced by server validation in App.tsx. */
-export function decodeJWT(_token: string): AuthUser | null {
+export function decodeJWT(_token?: string): AuthUser | null {
   return getStoredAuthenticatedUser();
 }
 
 const AUTH_USER_STORAGE_KEY = 'school_erp_authenticated_user';
 
 export function storeAuthenticatedUser(user: AuthUser): void {
-  localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
+  try {
+    localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
+  } catch {}
 }
 
 export function getStoredAuthenticatedUser(): AuthUser | null {
@@ -63,9 +85,15 @@ export function getStoredAuthenticatedUser(): AuthUser | null {
 }
 
 export function clearAuthenticatedUser(): void {
-  localStorage.removeItem(AUTH_USER_STORAGE_KEY);
+  try {
+    localStorage.removeItem(AUTH_USER_STORAGE_KEY);
+  } catch {}
 }
 
 export function hasPermission(user: AuthUser | null, permission: string): boolean {
   return Boolean(user?.permissions.includes(permission));
+}
+
+export function isUserAuthenticated(): boolean {
+  return Boolean(getStoredAuthenticatedUser());
 }

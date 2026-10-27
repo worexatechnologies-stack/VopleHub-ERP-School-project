@@ -1,4 +1,7 @@
 from datetime import timedelta
+from io import BytesIO
+from django.core.files.uploadedfile import SimpleUploadedFile
+from PIL import Image
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -109,6 +112,27 @@ class CommunityAndEventsTests(APITestCase):
         delete_response = self.client.delete(f'/api/v1/events/{event_id}/')
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(SchoolEvent.objects.filter(id=event_id).exists())
+
+    def test_admin_can_upload_and_read_event_image(self):
+        """Event artwork is validated, stored, and served only through the event endpoint."""
+        self.client.force_authenticate(user=self.admin)
+        image_bytes = BytesIO()
+        Image.new('RGB', (1, 1), color='red').save(image_bytes, format='PNG')
+        image = SimpleUploadedFile('event.png', image_bytes.getvalue(), content_type='image/png')
+        response = self.client.post('/api/v1/events/', {
+            'title': 'Art Exhibition',
+            'date': (timezone.now() + timedelta(days=5)).isoformat(),
+            'venue': 'Gallery',
+            'capacity': 30,
+            'imageFile': image,
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['imageUrl'])
+
+        image_response = self.client.get(response.data['imageUrl'])
+        self.assertEqual(image_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(image_response['Content-Type'], 'image/webp')
+        self.assertEqual(image_response['X-Content-Type-Options'], 'nosniff')
 
     def test_registration_deadline_stops_registration(self):
         """Registration is strictly stopped when the registration deadline date has passed."""

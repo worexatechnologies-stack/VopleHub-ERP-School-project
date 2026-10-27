@@ -64,6 +64,16 @@ def create_teacher_with_login(*, school, data, created_by=None):
                 )
                 for assignment in teaching_assignments
             ], ignore_conflicts=True)
+
+            # Assign as Class Teacher to Classes / Sections if specified
+            managed_class_ids = data.get('managedClassIds') or []
+            managed_section_ids = data.get('managedSectionIds') or []
+            if managed_class_ids:
+                from apps.academics.models import Class
+                Class.objects.filter(school=school, id__in=managed_class_ids).update(class_teacher=teacher)
+            if managed_section_ids:
+                from apps.academics.models import Section
+                Section.objects.filter(school=school, id__in=managed_section_ids).update(class_teacher=teacher)
         except IntegrityError as exc:
             if email and User.objects.filter(email__iexact=email).exists():
                 raise serializers.ValidationError({

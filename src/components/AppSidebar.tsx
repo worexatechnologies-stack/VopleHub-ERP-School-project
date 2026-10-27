@@ -44,13 +44,21 @@ export default function AppSidebar({
       ? brandSettings.logoImageUrl
       : volpeLogo;
 
-  const schoolName = brandSettings?.schoolName || 'Volpehub Education';
+  // School admins work inside a tenant. Keep that tenant name visible instead
+  // of making every school look like the platform's global brand.
+  const isPlatformAdmin = user.role === 'Super Admin';
+  const workspaceName = isPlatformAdmin
+    ? (brandSettings?.schoolName || 'Volpehub Education')
+    : (user.schoolName || brandSettings?.schoolName || 'Your School');
+  const workspaceSubtitle = isPlatformAdmin
+    ? 'Platform administration'
+    : 'School management portal';
 
   return (
     <aside
       className={`app-sidebar ${
-        isSidebarOpen ? 'w-72' : 'w-20'
-      } h-full min-h-0 shrink-0 transition-all duration-300 hidden md:flex flex-col justify-between relative z-20 overflow-hidden select-none`}
+        isSidebarOpen ? 'w-60 sm:w-64 md:w-72' : 'w-16 sm:w-20'
+      } h-full min-h-0 shrink-0 transition-all duration-300 flex flex-col justify-between relative z-20 overflow-hidden select-none`}
       style={{
         background:
           'linear-gradient(180deg, #090d16 0%, #0d1322 45%, #080c14 100%)',
@@ -77,7 +85,7 @@ export default function AppSidebar({
                 isSidebarOpen ? 'w-11 h-11' : 'w-11 h-11 mx-auto'
               } p-2 bg-gradient-to-b from-white/[0.12] to-white/[0.03] border border-white/[0.18] shadow-[0_4px_16px_rgba(0,0,0,0.45),inset_0_1px_1px_rgba(255,255,255,0.25)] group cursor-pointer`}
               onClick={!isSidebarOpen ? onToggleSidebar : undefined}
-              title={!isSidebarOpen ? `Expand - ${schoolName}` : schoolName}
+              title={!isSidebarOpen ? `Expand - ${workspaceName}` : workspaceName}
             >
               <img
                 src={logoSrc}
@@ -100,14 +108,14 @@ export default function AppSidebar({
               <div className="min-w-0 flex-1">
                 <h2
                   className="text-[12px] font-black font-sans leading-tight tracking-wide uppercase text-white truncate drop-shadow-sm"
-                  title={schoolName}
+                  title={workspaceName}
                 >
-                  {schoolName}
+                  {workspaceName}
                 </h2>
                 <div className="mt-1 flex items-center gap-1.5">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400 shadow-[0_0_6px_rgba(129,140,248,0.8)]" />
                   <p className="text-[10px] font-semibold text-slate-400 tracking-normal truncate">
-                    School management portal
+                    {workspaceSubtitle}
                   </p>
                 </div>
               </div>

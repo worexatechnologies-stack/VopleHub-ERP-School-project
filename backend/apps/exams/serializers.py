@@ -17,6 +17,15 @@ class ExamScheduleItemSerializer(serializers.ModelSerializer):
             'exam_date', 'start_time', 'end_time', 'max_marks', 'order',
         ]
 
+    def get_fields(self):
+        fields = super().get_fields()
+        user = getattr(self.context.get('request'), 'user', None)
+        school_id = getattr(user, 'school_id', None)
+        if user and getattr(user, 'role', None) == User.Role.SUPER_ADMIN:
+            return fields
+        fields['subject'].queryset = Subject.objects.filter(school_id=school_id) if school_id else Subject.objects.none()
+        return fields
+
     def validate(self, attrs):
         start_time = attrs.get('start_time')
         end_time = attrs.get('end_time')
@@ -48,6 +57,7 @@ class ExamScheduleSerializer(serializers.ModelSerializer):
     teacher_assigned_sections = serializers.SerializerMethodField()
     teacher_assigned_subjects = serializers.SerializerMethodField()
     section_extensions = serializers.JSONField(read_only=True)
+    subject_extensions = serializers.JSONField(read_only=True)
 
     class Meta:
         model = ExamSchedule
@@ -64,10 +74,16 @@ class ExamScheduleSerializer(serializers.ModelSerializer):
             'exam_completion_date',
             'is_teacher_assigned', 'teacher_assigned_sections', 'teacher_assigned_subjects',
             'section_extensions',
+            'subject_extensions',
             'items', 'sections',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_marks_entry_days(self, value):
+        if value < 1 or value > 60:
+            raise serializers.ValidationError('Enter a number of days between 1 and 60.')
+        return value
 
     def _get_teacher_scope(self):
         if '_teacher_scope_cache' in self.context:
@@ -209,12 +225,22 @@ class ExamScheduleSerializer(serializers.ModelSerializer):
         return dt.date().isoformat() if dt else None
 
     def validate(self, attrs):
-        school_id = getattr(getattr(self.context.get('request'), 'user', None), 'school_id', None)
+        user = getattr(self.context.get('request'), 'user', None)
         classroom = attrs.get('classroom', getattr(self.instance, 'classroom', None))
-        if classroom and school_id and classroom.school_id != school_id:
+        schedule = self.instance if self.instance else None
+        school_id = schedule.school_id if schedule else getattr(getattr(user, 'school', None), 'id', None)
+        if getattr(user, 'role', None) == User.Role.SUPER_ADMIN:
+            school_id = classroom.school_id if classroom else getattr(attrs.get('school'), 'id', None)
+        if not school_id:
+            raise serializers.ValidationError({'classroom': 'A school and classroom are required.'})
+        if classroom and classroom.school_id != school_id:
             raise serializers.ValidationError({'classroom': 'Classroom does not belong to your school.'})
         if classroom:
             attrs['class_name'] = classroom.name
+        for index, item in enumerate(attrs.get('items', [])):
+            subject = item.get('subject')
+            if subject and subject.school_id != school_id:
+                raise serializers.ValidationError({'items': {index: {'subject': 'Subject is outside this school.'}}})
         return attrs
 
     def create(self, validated_data):
@@ -260,7 +286,15 @@ class ExamSerializer(serializers.ModelSerializer):
         fields = ['id', 'schedule', 'name', 'class_name', 'section', 'subject', 'date', 'time', 'end_time', 'max_marks', 'marks_entry_deadline']
 
     def validate(self, attrs):
-        school_id = getattr(getattr(self.context.get('request'), 'user', None), 'school_id', None)
+        user = getattr(self.context.get('request'), 'user', None)
+        schedule = attrs.get('schedule', getattr(self.instance, 'schedule', None))
+        school_id = getattr(user, 'school_id', None)
+        if getattr(user, 'role', None) == User.Role.SUPER_ADMIN:
+            school_id = getattr(schedule, 'school_id', None)
+        if not school_id:
+            raise serializers.ValidationError({'schedule': 'Select a schedule in a school before creating an exam, or sign in to a school account.'})
+        if schedule and schedule.school_id != school_id:
+            raise serializers.ValidationError({'schedule': 'Schedule is outside this school.'})
         class_name = attrs.get('class_name', getattr(self.instance, 'class_name', '')).strip()
         section_name = attrs.get('section', getattr(self.instance, 'section', '')).strip()
         subject_name = attrs.get('subject', getattr(self.instance, 'subject', '')).strip()

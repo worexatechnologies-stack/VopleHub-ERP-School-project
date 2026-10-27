@@ -1,9 +1,16 @@
 name: volpehub
 
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: backend/.env
         required: false
@@ -47,9 +54,52 @@ services:
       - 8.8.8.8
       - 1.1.1.1
 
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - path: backend/.env
+        required: false
+      - path: .env
+        required: false
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${APP_DB_USER:-volpehub_education}
+      DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env}
+      DB_NAME: ${POSTGRES_DB:-volpehub_education}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-5000}
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-50}
+      MIN_POOL_SIZE: 10
+      RESERVE_POOL_SIZE: 10
+      RESERVE_POOL_TIMEOUT: 5
+      # PostgreSQL is configured for 100 total connections; reserve headroom
+      # for migrations, monitoring, and administrative sessions.
+      MAX_DB_CONNECTIONS: 80
+      SERVER_IDLE_TIMEOUT: 600
+      SERVER_LIFETIME: 3600
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
+    expose:
+      - "5432"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${APP_DB_USER:-volpehub_education} -d ${POSTGRES_DB:-volpehub_education}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: backend/.env
         required: false
@@ -57,7 +107,8 @@ services:
         required: false
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
-    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""]
+    # Broker/channel keys must not be evicted: reject writes at capacity instead.
+    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
     volumes:
       - redis_data:/data
     healthcheck:
@@ -69,12 +120,35 @@ services:
       - 8.8.8.8
       - 1.1.1.1
 
+  redis_cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - path: backend/.env
+        required: false
+      - path: .env
+        required: false
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", "exec redis-server --save \"\" --appendonly no --maxmemory 1gb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
   api:
+    scale: ${API_REPLICAS:-2}
     image: ${VOLPEHUB_API_IMAGE:-ghcr.io/${GHCR_NAMESPACE:-worexatechnologies-stack}/volpehub-api:${IMAGE_TAG:-latest}}
     build:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: backend/.env
         required: false
@@ -82,15 +156,30 @@ services:
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
+      DATABASE_HOST: pgbouncer
+      DATABASE_PORT: "5432"
+      DB_CONN_MAX_AGE: "0"
+      REDIS_CACHE_URL: "${REDIS_CACHE_URL:-redis://:${REDIS_PASSWORD}@redis_cache:6379/0}"
+      HTTP_PROXY: http://forwardproxy:8888
+      HTTPS_PROXY: http://forwardproxy:8888
+      NO_PROXY: localhost,127.0.0.1,api,web,db,pgbouncer,redis,redis_cache,forwardproxy
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+      # The CD workflow runs migrations and collectstatic once before bringing
+      # up replicas; avoid concurrent startup work against shared DB/storage.
+      SKIP_STARTUP_MIGRATIONS: "1"
+      SKIP_STARTUP_COLLECTSTATIC: "1"
     volumes:
       - static_data:/app/staticfiles
       - ./secrets:/app/secrets:ro
     depends_on:
       db:
         condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
       redis:
+        condition: service_healthy
+      redis_cache:
         condition: service_healthy
     expose:
       - "8000"
@@ -100,6 +189,24 @@ services:
       timeout: 5s
       retries: 5
       start_period: 25s
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  forwardproxy:
+    image: ${VOLPEHUB_FORWARDPROXY_IMAGE:-ghcr.io/${GHCR_NAMESPACE:-worexatechnologies-stack}/volpehub-forwardproxy:${IMAGE_TAG:-latest}}
+    build:
+      context: ./forward_proxy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging: *default-logging
+    expose:
+      - "8888"
+    healthcheck:
+      test: ["CMD", "curl", "-I", "-x", "http://127.0.0.1:8888", "http://httpbin.org/get"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -119,6 +226,7 @@ services:
         VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
         VITE_FIREBASE_VAPID_KEY: ${VITE_FIREBASE_VAPID_KEY:-}
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       api:
         condition: service_healthy
@@ -139,6 +247,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: backend/.env
         required: false
@@ -146,14 +255,25 @@ services:
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
+      DATABASE_HOST: pgbouncer
+      DATABASE_PORT: "5432"
+      DB_CONN_MAX_AGE: "0"
+      REDIS_CACHE_URL: "${REDIS_CACHE_URL:-redis://:${REDIS_PASSWORD}@redis_cache:6379/0}"
+      HTTP_PROXY: http://forwardproxy:8888
+      HTTPS_PROXY: http://forwardproxy:8888
+      NO_PROXY: localhost,127.0.0.1,api,web,db,pgbouncer,redis,redis_cache,forwardproxy
       CELERY_WORKER: "1"
-    command: celery -A config worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-4}
+    command: celery -A config worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-4} --queues=default,high_priority,reports
     volumes:
       - ./secrets:/app/secrets:ro
     depends_on:
       db:
         condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
       redis:
+        condition: service_healthy
+      redis_cache:
         condition: service_healthy
     dns:
       - 8.8.8.8
@@ -162,6 +282,7 @@ services:
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: backend/.env
         required: false

@@ -19,7 +19,7 @@ import {
   Check
 } from 'lucide-react';
 import { copyToClipboard } from '../../utils/clipboard';
-import { ACCESS_TOKEN_STORAGE_KEY, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME, decodeJWT } from '../../utils/auth';
+import { getStoredAuthenticatedUser, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME } from '../../utils/auth';
 import { store } from '../../store';
 import { schoolApi } from '../../store/api/schoolApi';
 import { authApi } from '../../store/api/authApi';
@@ -93,7 +93,7 @@ export default function SuperAdminAdmins() {
     schoolId: '',
     status: 'Active' as 'Active' | 'Inactive'
   });
-  const isServerBacked = Boolean(localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
 
   useEffect(() => {
     if (isServerBacked) {
@@ -149,14 +149,8 @@ export default function SuperAdminAdmins() {
   }, [isServerBacked]);
 
   const addAuditLog = (action: string) => {
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    let operatorName = SUPER_ADMIN_NAME;
-    if (token) {
-      try {
-        const decoded = decodeJWT(token);
-        if (decoded) operatorName = decoded.name;
-      } catch (e) {}
-    }
+    const user = getStoredAuthenticatedUser();
+    const operatorName = user?.name || SUPER_ADMIN_NAME;
     const newLog = {
       id: `audit-${Date.now()}`,
       userName: operatorName,

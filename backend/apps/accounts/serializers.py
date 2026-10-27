@@ -4,10 +4,10 @@ from .models import User
 
 ROLE_MODULES = {
     'super_admin': ['super-admin-dashboard', 'super-admin-schools', 'super-admin-admins', 'super-admin-sys-settings', 'academic'],
-    'school_admin': ['dashboard', 'student', 'teachers', 'passwords', 'academic', 'attendance', 'fees', 'exams', 'promotion', 'communication', 'library', 'transport', 'developer'],
-    'teacher': ['dashboard', 'student', 'academic', 'attendance', 'learning', 'exams', 'communication'],
-    'parent': ['dashboard', 'academic', 'attendance', 'learning', 'fees', 'exams', 'communication', 'transport'],
-    'student': ['dashboard', 'academic', 'learning', 'exams', 'communication', 'transport'],
+    'school_admin': ['dashboard', 'student', 'teachers', 'passwords', 'academic', 'attendance', 'fees', 'exams', 'promotion', 'communication', 'library', 'transport', 'store', 'developer'],
+    'teacher': ['dashboard', 'student', 'academic', 'attendance', 'learning', 'exams', 'communication', 'store'],
+    'parent': ['dashboard', 'academic', 'attendance', 'learning', 'fees', 'exams', 'communication', 'transport', 'store'],
+    'student': ['dashboard', 'academic', 'learning', 'exams', 'communication', 'transport', 'store'],
     'public_learner': ['public-learning'],
 }
 
@@ -19,10 +19,12 @@ class UserSerializer(serializers.ModelSerializer):
     mustChangePassword = serializers.BooleanField(source='must_change_password', read_only=True)
     studentId = serializers.SerializerMethodField()
     parentStudentIds = serializers.SerializerMethodField()
+    teacherId = serializers.SerializerMethodField()
+    managedClasses = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ['id', 'email', 'name', 'role', 'schoolId', 'schoolName', 'isActive', 'mustChangePassword', 'studentId', 'parentStudentIds', 'permissions']
+        fields = ['id', 'email', 'name', 'role', 'schoolId', 'schoolName', 'isActive', 'mustChangePassword', 'studentId', 'parentStudentIds', 'teacherId', 'managedClasses', 'permissions']
     def get_name(self, obj) -> str:
         return obj.get_full_name() or obj.username
     def get_permissions(self, obj) -> List[str]:
@@ -38,6 +40,24 @@ class UserSerializer(serializers.ModelSerializer):
             return []
         profile = getattr(obj, 'parent_profile', None)
         return [str(student_id) for student_id in profile.students.values_list('id', flat=True)] if profile else []
+
+    def get_teacherId(self, obj) -> Optional[int]:
+        if obj.role != User.Role.TEACHER:
+            return None
+        prof = getattr(obj, 'teacher_profile', None)
+        return prof.id if prof else None
+
+    def get_managedClasses(self, obj) -> List[dict]:
+        if obj.role != User.Role.TEACHER:
+            return []
+        prof = getattr(obj, 'teacher_profile', None)
+        if not prof:
+            return []
+        classes = list(prof.managed_classes.values('id', 'name', 'code'))
+        for sec in prof.managed_sections.select_related('class_room').all():
+            if not any(c['id'] == sec.class_room_id for c in classes):
+                classes.append({'id': sec.class_room_id, 'name': f"{sec.class_room.name} ({sec.name})", 'code': sec.class_room.code})
+        return classes
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -58,13 +78,25 @@ class CredentialVaultSerializer(serializers.ModelSerializer):
     schoolName = serializers.CharField(source='school.name', read_only=True)
     userId = serializers.IntegerField(source='user_id', read_only=True)
     loginId = serializers.CharField(source='login_id')
-    password = serializers.CharField(source='plaintext_password')
+    password = serializers.CharField(source='plaintext_password', required=False)
     className = serializers.CharField(source='class_name', allow_blank=True, required=False)
     academicYear = serializers.CharField(source='academic_year', allow_blank=True, required=False)
     linkedStudentName = serializers.CharField(source='linked_student_name', allow_blank=True, required=False)
     mustChangePassword = serializers.BooleanField(source='must_change_password', read_only=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
     updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        # Protect user privacy: Never leak user-set passwords in plaintext.
+        # Once a user updates their password or it is user-managed, mask it.
+        if (
+            not instance.must_change_password
+            or instance.source == 'user_password_change'
+            or instance.plaintext_password == '[User Managed]'
+        ):
+            ret['password'] = '[User Managed]'
+        return ret
 
     class Meta:
         from .models import CredentialVaultRecord

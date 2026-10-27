@@ -1009,50 +1009,57 @@ export default function PasswordManager({
 
                       {/* Password */}
                       <td className="py-3 px-4">
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => toggleReveal(item.id)}
-                            className={`font-mono text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer text-left ${
-                              isRevealed
-                                ? 'bg-amber-50/80 border-amber-200 text-amber-900 font-bold select-all'
-                                : 'bg-slate-100 border-slate-200 text-slate-500 select-none tracking-widest hover:border-slate-300'
-                            }`}
-                            title="Click to toggle reveal"
-                          >
-                            {isRevealed ? item.password : '••••••••••••'}
-                          </button>
+                        {item.password === '[User Managed]' || !item.mustChangePassword || item.source === 'user_password_change' ? (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold" title="Protected: User has set their personal password (hashed via Argon2id)">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>User Set • Protected</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => toggleReveal(item.id)}
+                              className={`font-mono text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer text-left ${
+                                isRevealed
+                                  ? 'bg-amber-50/80 border-amber-200 text-amber-900 font-bold select-all'
+                                  : 'bg-slate-100 border-slate-200 text-slate-500 select-none tracking-widest hover:border-slate-300'
+                              }`}
+                              title="Click to toggle reveal"
+                            >
+                              {isRevealed ? item.password : '••••••••••••'}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => toggleReveal(item.id)}
-                            className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
-                            title={isRevealed ? 'Hide Password' : 'Show Password'}
-                          >
-                            {isRevealed ? (
-                              <EyeOff className="w-3.5 h-3.5 text-amber-600" />
-                            ) : (
-                              <Eye className="w-3.5 h-3.5" />
-                            )}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleReveal(item.id)}
+                              className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                              title={isRevealed ? 'Hide Password' : 'Show Password'}
+                            >
+                              {isRevealed ? (
+                                <EyeOff className="w-3.5 h-3.5 text-amber-600" />
+                              ) : (
+                                <Eye className="w-3.5 h-3.5" />
+                              )}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={(e) => handleCopy(e, item.password, `pass-${item.id}`, `${item.name}'s Password`)}
-                            className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
-                              isPassCopied
-                                ? 'bg-emerald-50 border-emerald-300 text-emerald-600 shadow-xs scale-105'
-                                : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 hover:border-slate-300'
-                            }`}
-                            title={isPassCopied ? 'Copied Password!' : 'Copy Password'}
-                          >
-                            {isPassCopied ? (
-                              <Check className="w-3.5 h-3.5 text-emerald-600" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
+                            <button
+                              type="button"
+                              onClick={(e) => handleCopy(e, item.password, `pass-${item.id}`, `${item.name}'s Password`)}
+                              className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
+                                isPassCopied
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-600 shadow-xs scale-105'
+                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 hover:border-slate-300'
+                              }`}
+                              title={isPassCopied ? 'Copied Password!' : 'Copy Password'}
+                            >
+                              {isPassCopied ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        )}
                       </td>
 
                       {/* Clearance Actions */}
@@ -1198,50 +1205,57 @@ export default function PasswordManager({
                       </td>
 
                       <td className="py-3 px-4">
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => toggleReveal(item.id)}
-                            className={`font-mono text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer text-left ${
-                              isRevealed
-                                ? 'bg-amber-50/80 border-amber-200 text-amber-900 font-bold select-all'
-                                : 'bg-slate-100 border-slate-200 text-slate-500 select-none tracking-widest hover:border-slate-300'
-                            }`}
-                            title="Click to toggle reveal"
-                          >
-                            {isRevealed ? item.password : '••••••••••••'}
-                          </button>
+                        {item.password === '[User Managed]' || !item.mustChangePassword || item.source === 'user_password_change' ? (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold" title="Protected: User has set their personal password (hashed via Argon2id)">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>User Set • Protected</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => toggleReveal(item.id)}
+                              className={`font-mono text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer text-left ${
+                                isRevealed
+                                  ? 'bg-amber-50/80 border-amber-200 text-amber-900 font-bold select-all'
+                                  : 'bg-slate-100 border-slate-200 text-slate-500 select-none tracking-widest hover:border-slate-300'
+                              }`}
+                              title="Click to toggle reveal"
+                            >
+                              {isRevealed ? item.password : '••••••••••••'}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => toggleReveal(item.id)}
-                            className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
-                            title={isRevealed ? 'Hide Password' : 'Show Password'}
-                          >
-                            {isRevealed ? (
-                              <EyeOff className="w-3.5 h-3.5 text-amber-600" />
-                            ) : (
-                              <Eye className="w-3.5 h-3.5" />
-                            )}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleReveal(item.id)}
+                              className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                              title={isRevealed ? 'Hide Password' : 'Show Password'}
+                            >
+                              {isRevealed ? (
+                                <EyeOff className="w-3.5 h-3.5 text-amber-600" />
+                              ) : (
+                                <Eye className="w-3.5 h-3.5" />
+                              )}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={(e) => handleCopy(e, item.password, `pass-${item.id}`, `${item.name}'s Password`)}
-                            className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
-                              isPassCopied
-                                ? 'bg-emerald-50 border-emerald-300 text-emerald-600 shadow-xs scale-105'
-                                : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 hover:border-slate-300'
-                            }`}
-                            title={isPassCopied ? 'Copied Password!' : 'Copy Password'}
-                          >
-                            {isPassCopied ? (
-                              <Check className="w-3.5 h-3.5 text-emerald-600" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
+                            <button
+                              type="button"
+                              onClick={(e) => handleCopy(e, item.password, `pass-${item.id}`, `${item.name}'s Password`)}
+                              className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
+                                isPassCopied
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-600 shadow-xs scale-105'
+                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 hover:border-slate-300'
+                              }`}
+                              title={isPassCopied ? 'Copied Password!' : 'Copy Password'}
+                            >
+                              {isPassCopied ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        )}
                       </td>
 
                       <td className="py-3 px-4">

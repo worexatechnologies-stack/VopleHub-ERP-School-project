@@ -32,6 +32,7 @@ import {
   usePublishReportCardsMutation,
 } from '../store/api/examApi';
 import { emitNotification } from '../services/notificationBus';
+import { printElement } from '../utils/printElement';
 
 export default function ParentExamResults({
   user,
@@ -152,40 +153,7 @@ export default function ParentExamResults({
     }
   };
 
-  const handlePrint = (elementId: string) => {
-    const printContent = document.getElementById(elementId);
-    if (!printContent) {
-      window.print();
-      return;
-    }
-    const win = window.open('', '_blank');
-    if (win) {
-      win.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Official Terminal Report Card</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <style>
-              @media print {
-                body { -webkit-print-color-adjust: exact; print-color-adjust: exact; padding: 20px; }
-                .no-print { display: none !important; }
-              }
-            </style>
-          </head>
-          <body class="bg-white p-6">
-            ${printContent.innerHTML}
-            <script>
-              setTimeout(() => { window.print(); window.close(); }, 500);
-            </script>
-          </body>
-        </html>
-      `);
-      win.document.close();
-    } else {
-      window.print();
-    }
-  };
+  const handlePrint = (elementId: string) => printElement(elementId, 'Official Terminal Report Card');
 
   const rawCards = useMemo(() => {
     return (reportCardsData?.report_cards || []) as OfficialReportCardRecord[];

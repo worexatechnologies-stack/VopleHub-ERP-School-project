@@ -25,6 +25,7 @@ class ExportJobViewSet(TenantScopedViewSet):
     """
     serializer_class = ExportJobSerializer
     permission_classes = [CanManageExports]
+    throttle_scope = 'exports'
     queryset = ExportJob.objects.select_related('school', 'created_by').order_by('-created_at')
 
     def create(self, request, *args, **kwargs):

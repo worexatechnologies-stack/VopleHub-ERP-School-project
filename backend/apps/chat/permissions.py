@@ -81,22 +81,10 @@ def can_initiate_conversation(user: User, target_user: User, student: Student = 
     if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
         if target_user.role in [User.Role.TEACHER, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return True, '', None
-        if target_user.role == User.Role.PARENT:
-            parent_profile = getattr(target_user, 'parent_profile', None)
-            matched_student = None
-            if parent_profile:
-                target_school_id = user.school_id or target_user.school_id
-                linked_students = list(parent_profile.students.filter(school_id=target_school_id, status='Active'))
-                if student and student in linked_students:
-                    matched_student = student
-                elif linked_students:
-                    matched_student = linked_students[0]
-            return True, '', matched_student
-        if target_user.role == User.Role.STUDENT:
-            student_profile = getattr(target_user, 'student_profile', None)
-            matched_student = getattr(student_profile, 'student', None) if student_profile else None
-            return True, '', matched_student
-        return False, 'Admins can direct chat with teachers, parents, students, and administrative staff.', None
+        # Administrators may use the office channel with staff, but cannot
+        # initiate private parent/student conversations. This prevents an
+        # administrative account from bypassing teacher/parent boundaries.
+        return False, 'School Admins can only direct chat with teachers and administrative staff.', None
 
     # 2. Teacher
     if user.role == User.Role.TEACHER:

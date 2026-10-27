@@ -3,6 +3,7 @@ from drf_spectacular.utils import extend_schema_field
 
 from .models import AcademicYear, Class, Section, Subject, Homework
 from apps.schools.models import School
+from apps.staff.models import Teacher
 
 
 class TenantCreateSerializer(serializers.ModelSerializer):
@@ -19,9 +20,14 @@ class TenantCreateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         request = self.context.get('request')
-        user_school_id = getattr(getattr(request, 'user', None), 'school_id', None)
+        user = getattr(request, 'user', None)
+        user_school_id = getattr(user, 'school_id', None)
         submitted_school = attrs.get('school')
-        if submitted_school is not None and submitted_school.pk != user_school_id:
+        if (
+            submitted_school is not None
+            and getattr(user, 'role', None) != 'super_admin'
+            and submitted_school.pk != user_school_id
+        ):
             raise serializers.ValidationError({'schoolId': 'School is outside your tenant.'})
         return super().validate(attrs)
 
@@ -65,10 +71,18 @@ class ClassSerializer(TenantCreateSerializer):
     subjectIds = serializers.PrimaryKeyRelatedField(
         source='subjects', queryset=Subject.objects.all(), many=True, required=False,
     )
+    classTeacherId = serializers.PrimaryKeyRelatedField(
+        source='class_teacher', queryset=Teacher.objects.all(), required=False, allow_null=True
+    )
+    classTeacherName = serializers.SerializerMethodField(read_only=True)
+    classTeacherEmail = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Class
-        fields = ['id', 'name', 'code', 'sortOrder', 'subjectIds', 'schoolId']
+        fields = [
+            'id', 'name', 'code', 'sortOrder', 'subjectIds',
+            'classTeacherId', 'classTeacherName', 'classTeacherEmail', 'schoolId'
+        ]
         validators = []
 
     def get_fields(self):
@@ -78,7 +92,23 @@ class ClassSerializer(TenantCreateSerializer):
         fields['subjectIds'].child_relation.queryset = (
             Subject.objects.filter(school_id=school_id) if school_id else Subject.objects.none()
         )
+        if 'classTeacherId' in fields:
+            fields['classTeacherId'].queryset = (
+                Teacher.objects.filter(school_id=school_id) if school_id else Teacher.objects.none()
+            )
         return fields
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_classTeacherName(self, obj):
+        if obj.class_teacher and getattr(obj.class_teacher, 'user', None):
+            return obj.class_teacher.user.get_full_name() or obj.class_teacher.user.username or f"Teacher #{obj.class_teacher.id}"
+        return None
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_classTeacherEmail(self, obj):
+        if obj.class_teacher and getattr(obj.class_teacher, 'user', None):
+            return obj.class_teacher.user.email
+        return None
 
     def validate_name(self, value):
         value = value.strip()
@@ -111,10 +141,15 @@ class ClassSerializer(TenantCreateSerializer):
 class SectionSerializer(TenantCreateSerializer):
     name = serializers.CharField(max_length=20)
     classId = serializers.PrimaryKeyRelatedField(source='class_room', queryset=Class.objects.all())
+    classTeacherId = serializers.PrimaryKeyRelatedField(
+        source='class_teacher', queryset=Teacher.objects.all(), required=False, allow_null=True
+    )
+    classTeacherName = serializers.SerializerMethodField(read_only=True)
+    classTeacherEmail = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Section
-        fields = ['id', 'classId', 'name', 'schoolId']
+        fields = ['id', 'classId', 'name', 'classTeacherId', 'classTeacherName', 'classTeacherEmail', 'schoolId']
         validators = []
 
     def get_fields(self):
@@ -122,7 +157,25 @@ class SectionSerializer(TenantCreateSerializer):
         request = self.context.get('request')
         school_id = getattr(getattr(request, 'user', None), 'school_id', None)
         fields['classId'].queryset = Class.objects.filter(school_id=school_id) if school_id else Class.objects.none()
+        if 'classTeacherId' in fields:
+            fields['classTeacherId'].queryset = (
+                Teacher.objects.filter(school_id=school_id) if school_id else Teacher.objects.none()
+            )
         return fields
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_classTeacherName(self, obj):
+        teacher = obj.class_teacher or getattr(obj.class_room, 'class_teacher', None)
+        if teacher and getattr(teacher, 'user', None):
+            return teacher.user.get_full_name() or teacher.user.username or f"Teacher #{teacher.id}"
+        return None
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_classTeacherEmail(self, obj):
+        teacher = obj.class_teacher or getattr(obj.class_room, 'class_teacher', None)
+        if teacher and getattr(teacher, 'user', None):
+            return teacher.user.email
+        return None
 
     def validate_name(self, value):
         value = value.strip()
@@ -185,7 +238,10 @@ class HomeworkSerializer(TenantCreateSerializer):
     teacherName = serializers.CharField(source='teacher_name', required=False, allow_blank=True, default='')
     attachmentName = serializers.CharField(source='attachment_name', required=False, allow_blank=True, default='')
     attachmentUrl = serializers.CharField(source='attachment_url', required=False, allow_blank=True, default='')
-    schoolId = serializers.IntegerField(source='school_id', read_only=True)
+    attachments = serializers.JSONField(required=False, default=list)
+    schoolId = serializers.PrimaryKeyRelatedField(
+        source='school', queryset=School.objects.all(), required=False,
+    )
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_assignedDate(self, obj):
@@ -194,28 +250,121 @@ class HomeworkSerializer(TenantCreateSerializer):
             return obj.created_at.date().isoformat()
         return None
 
+    teacherId = serializers.PrimaryKeyRelatedField(
+        source='teacher', queryset=Teacher.objects.all(), required=False, allow_null=True
+    )
+
+    def get_fields(self):
+        fields = super().get_fields()
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            school_id = None
+        elif getattr(user, 'role', None) == 'super_admin':
+            school_id = None
+            fields['schoolId'].queryset = School.objects.all()
+        else:
+            school_id = user.school_id
+            fields['schoolId'].queryset = School.objects.filter(pk=school_id) if school_id else School.objects.none()
+
+        if school_id:
+            fields['classId'].queryset = Class.objects.filter(school_id=school_id)
+            fields['sectionId'].queryset = Section.objects.filter(school_id=school_id)
+            fields['subjectId'].queryset = Subject.objects.filter(school_id=school_id)
+            fields['teacherId'].queryset = Teacher.objects.filter(school_id=school_id)
+        elif not user or getattr(user, 'role', None) != 'super_admin':
+            fields['classId'].queryset = Class.objects.none()
+            fields['sectionId'].queryset = Section.objects.none()
+            fields['subjectId'].queryset = Subject.objects.none()
+            fields['teacherId'].queryset = Teacher.objects.none()
+        return fields
+
     class Meta:
         model = Homework
         fields = [
             'id', 'schoolId', 'title', 'description', 'status',
             'className', 'sectionName', 'subjectName',
-            'classId', 'sectionId', 'subjectId',
+            'classId', 'sectionId', 'subjectId', 'teacherId',
             'dueDate', 'assignedDate', 'maxMarks',
-            'teacherName', 'attachmentName', 'attachmentUrl',
+            'teacherName', 'attachmentName', 'attachmentUrl', 'attachments',
             'submissions', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'schoolId', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if self.instance:
+            school_id = self.instance.school_id
+            submitted_school = attrs.get('school')
+            if submitted_school and submitted_school.pk != school_id:
+                raise serializers.ValidationError({'schoolId': 'Homework cannot be moved to another school.'})
+        elif getattr(user, 'role', None) == 'super_admin':
+            school_id = getattr(attrs.get('school'), 'pk', None)
+        else:
+            school_id = getattr(user, 'school_id', None)
+        if not school_id:
+            raise serializers.ValidationError({'schoolId': 'A school is required for homework.'})
+
         classroom = attrs.get('class_room')
+        section = attrs.get('section')
+        subject = attrs.get('subject')
+        teacher = attrs.get('teacher')
+        for field_name, related in (
+            ('classId', classroom), ('sectionId', section),
+            ('subjectId', subject), ('teacherId', teacher),
+        ):
+            if related is not None and related.school_id != school_id:
+                raise serializers.ValidationError({field_name: 'Related record is outside this school.'})
+        if section and classroom and section.class_room_id != classroom.pk:
+            raise serializers.ValidationError({'sectionId': 'Section must belong to the selected class.'})
+        if section and classroom is None:
+            classroom = section.class_room
+            attrs['class_room'] = classroom
         if classroom and not attrs.get('class_name'):
             attrs['class_name'] = classroom.name
-        section = attrs.get('section')
         if section and not attrs.get('section_name'):
             attrs['section_name'] = section.name
-        subject = attrs.get('subject')
         if subject and not attrs.get('subject_name'):
             attrs['subject_name'] = subject.name
+        attachments = attrs.get('attachments')
+        if attachments and isinstance(attachments, list) and len(attachments) > 0:
+            first_att = attachments[0]
+            if isinstance(first_att, dict):
+                if not attrs.get('attachment_name') and first_att.get('name'):
+                    attrs['attachment_name'] = str(first_att.get('name'))[:255]
+                if not attrs.get('attachment_url') and first_att.get('url'):
+                    url_str = str(first_att.get('url'))
+                    if len(url_str) < 500:
+                        attrs['attachment_url'] = url_str
         return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or user.role not in ['student', 'parent']:
+            return data
+
+        if user.role == 'student':
+            from apps.sis.models import Student
+            profile = getattr(user, 'student_profile', None)
+            allowed_student_ids = set(
+                str(student_id)
+                for student_id in Student.objects.filter(
+                    pk=profile.student_id, school_id=instance.school_id,
+                ).values_list('pk', flat=True)
+            ) if profile and profile.student_id else set()
+        else:
+            profile = getattr(user, 'parent_profile', None)
+            allowed_student_ids = {
+                str(student_id)
+                for student_id in profile.students.filter(school_id=instance.school_id).values_list('pk', flat=True)
+            } if profile else set()
+        data['submissions'] = [
+            submission for submission in data.get('submissions', [])
+            if isinstance(submission, dict) and str(submission.get('student_id')) in allowed_student_ids
+        ]
+        return data
 

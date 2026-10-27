@@ -15,6 +15,7 @@ from apps.staff.models import Teacher
 
 from .fcm import FCMNotificationService
 from .models import DeviceToken, Notification
+from .tasks import fanout_notification_task
 
 
 class ParentNotificationAccessTests(TestCase):
@@ -325,3 +326,46 @@ class RoleNotificationIsolationTests(TestCase):
         # Admin must NEVER receive parent-teacher notice or parent-teacher chat
         self.assertNotIn(self.teacher_to_parent_notif.id, received_ids)
         self.assertNotIn(self.chat_notif.id, received_ids)
+
+
+class QueuedFanoutTests(TestCase):
+    def test_fanout_targets_active_users_in_one_school_and_records_sender(self):
+        school = School.objects.create(name='Queue School', code='queue-school')
+        sender = User.objects.create_user(
+            username='queue-admin', email='queue-admin@test.com', password='StrongPass123!',
+            role=User.Role.SCHOOL_ADMIN, school=school,
+        )
+        student = User.objects.create_user(
+            username='queue-student', email='queue-student@test.com', password='StrongPass123!',
+            role=User.Role.STUDENT, school=school,
+        )
+        parent = User.objects.create_user(
+            username='queue-parent', email='queue-parent@test.com', password='StrongPass123!',
+            role=User.Role.PARENT, school=school,
+        )
+        inactive = User.objects.create_user(
+            username='queue-inactive', email='queue-inactive@test.com', password='StrongPass123!',
+            role=User.Role.TEACHER, school=school, is_active=False,
+        )
+        other_school = School.objects.create(name='Other Queue School', code='other-queue-school')
+        other_user = User.objects.create_user(
+            username='other-queue-user', email='other-queue@test.com', password='StrongPass123!',
+            role=User.Role.STUDENT, school=other_school,
+        )
+
+        with patch('apps.notifications.services.enqueue_fcm_notification'), patch('apps.notifications.services._dispatch_ws_notification'):
+            result = fanout_notification_task.apply(kwargs={
+                'school_id': school.id,
+                'sender_id': sender.id,
+                'title': 'School announcement',
+                'body': 'Important update',
+                'category': 'Notice',
+                'channel': 'community',
+            })
+
+        self.assertEqual(result.get(), 2)
+        recipients = set(Notification.objects.values_list('recipient_id', flat=True))
+        self.assertEqual(recipients, {student.id, parent.id})
+        self.assertFalse(Notification.objects.filter(recipient=inactive).exists())
+        self.assertFalse(Notification.objects.filter(recipient=other_user).exists())
+        self.assertTrue(Notification.objects.filter(sender=sender, channel='community').exists())

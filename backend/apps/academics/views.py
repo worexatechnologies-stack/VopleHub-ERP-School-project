@@ -33,7 +33,12 @@ def _delete_reference(code, label, count, *, examples=(), policy='blocked', mess
 
 class AcademicAdminWritePermission(permissions.BasePermission):
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        if not (request.user and request.user.is_authenticated):
+            return False
+        # Academic structures are school-operational data. Platform Super
+        # Admins manage schools and must not read or mutate a school's
+        # curriculum through this API.
+        if request.user.role == User.Role.SUPER_ADMIN:
             return False
         if request.method in permissions.SAFE_METHODS:
             return request.user.role in [
@@ -41,6 +46,18 @@ class AcademicAdminWritePermission(permissions.BasePermission):
                 User.Role.PARENT, User.Role.STUDENT,
             ]
         return request.user.role == User.Role.SCHOOL_ADMIN
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if user.role == User.Role.SUPER_ADMIN:
+            return False
+        if str(obj.school_id or '') != str(user.school_id or ''):
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return user.role == User.Role.SCHOOL_ADMIN
 
 
 def _active_teacher_profile(user):
@@ -371,7 +388,7 @@ class ClassViewSet(AcademicMasterViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        if user.role == User.Role.SCHOOL_ADMIN:
+        if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return qs
         if user.role == User.Role.TEACHER:
             profile = _active_teacher_profile(user)
@@ -612,7 +629,7 @@ class SectionViewSet(AcademicMasterViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        if user.role == User.Role.SCHOOL_ADMIN:
+        if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return qs
         if user.role == User.Role.TEACHER:
             profile = _active_teacher_profile(user)
@@ -742,7 +759,7 @@ class SubjectViewSet(AcademicMasterViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        if user.role == User.Role.SCHOOL_ADMIN:
+        if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return qs
         if user.role == User.Role.TEACHER:
             profile = _active_teacher_profile(user)
@@ -956,16 +973,59 @@ class SubjectViewSet(AcademicMasterViewSet):
         return references
 
 
+def _normalize_class_clean_str(val):
+    if not val:
+        return ''
+    import re
+    return re.sub(r'(?i)^(class|grade|standard|std)\s*', '', str(val)).strip(' -_')
+
+def _match_class_identifiers(a, b):
+    if not a or not b:
+        return False
+    sa = str(a).strip().lower()
+    sb = str(b).strip().lower()
+    if sa == sb:
+        return True
+    na = _normalize_class_clean_str(a).lower()
+    nb = _normalize_class_clean_str(b).lower()
+    if '-' in na:
+        na = na.split('-')[0].strip()
+    if '-' in nb:
+        nb = nb.split('-')[0].strip()
+    return bool(na and nb and na == nb)
+
+def _match_section_identifiers(a, b):
+    if not a or not b:
+        return True
+    sa = str(a).strip().lower()
+    sb = str(b).strip().lower()
+    if sa in ['all', ''] or sb in ['all', '']:
+        return True
+    import re
+    na = re.sub(r'(?i)^(section|sec)\s*', '', sa).strip(' -_')
+    nb = re.sub(r'(?i)^(section|sec)\s*', '', sb).strip(' -_')
+    return na == nb
+
+def _match_subject_identifiers(a, b):
+    if not a or not b:
+        return True
+    return str(a).strip().lower() == str(b).strip().lower()
+
 def _normalize_class_q(raw_class_name):
     if not raw_class_name:
         return Q()
-    clean = str(raw_class_name).replace('Class', '').strip(' -_')
-    candidates = {str(raw_class_name).strip(), clean, f"Class {clean}"}
+    raw_str = str(raw_class_name).strip()
+    clean = _normalize_class_clean_str(raw_str)
     if '-' in clean:
-        parts = clean.split('-')
-        base = parts[0].strip()
-        candidates.add(base)
-        candidates.add(f"Class {base}")
+        clean = clean.split('-')[0].strip()
+    candidates = {
+        raw_str,
+        clean,
+        f"Class {clean}",
+        f"class {clean}",
+        f"Class-{clean}",
+        f"class-{clean}",
+    }
     q_obj = Q()
     for c in candidates:
         if c:
@@ -973,17 +1033,70 @@ def _normalize_class_q(raw_class_name):
     return q_obj
 
 
+def _homework_targets_student(homework, student):
+    if not student or student.school_id != homework.school_id:
+        return False
+    if homework.class_room_id and student.section_record_id:
+        if student.section_record.class_room_id != homework.class_room_id:
+            return False
+    elif (homework.class_name or '').strip().lower() not in {'all', 'all classes', 'all-classes'}:
+        if not _match_class_identifiers(student.class_name, homework.class_name):
+            return False
+    if homework.section_id and student.section_record_id != homework.section_id:
+        return False
+    if not homework.section_id and homework.section_name and homework.section_name.strip().lower() not in {'all', 'all sections'}:
+        if not _match_section_identifiers(student.section, homework.section_name):
+            return False
+    return True
+
+
+class HomeworkPermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        action = getattr(view, 'action', None)
+        if action == 'submit_homework':
+            return request.user.role in [User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+        if action == 'grade_submission':
+            return request.user.role in [User.Role.TEACHER, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return request.user.role in [User.Role.TEACHER, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if user.role == User.Role.SUPER_ADMIN:
+            return True
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return str(obj.school_id or '') == str(user.school_id or '')
+        if user.role == User.Role.TEACHER:
+            if request.method in permissions.SAFE_METHODS:
+                return str(obj.school_id or '') == str(user.school_id or '')
+            teacher = _active_teacher_profile(user)
+            return bool(teacher and obj.teacher_id == teacher.id)
+        if user.role in [User.Role.STUDENT, User.Role.PARENT]:
+            if getattr(view, 'action', None) == 'submit_homework':
+                return str(obj.school_id or '') == str(user.school_id or '')
+            return request.method in permissions.SAFE_METHODS and str(obj.school_id or '') == str(user.school_id or '')
+        return False
+
+
 class HomeworkViewSet(TenantScopedViewSet):
     queryset = Homework.objects.select_related('teacher', 'teacher__user', 'class_room', 'section', 'subject').order_by('-due_date', '-created_at')
     serializer_class = HomeworkSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [HomeworkPermission]
 
     def get_queryset(self):
         user = self.request.user
         if not user.is_authenticated:
             return Homework.objects.none()
 
-        qs = Homework.objects.filter(school_id=user.school_id).select_related('teacher', 'teacher__user', 'class_room', 'section', 'subject').order_by('-due_date', '-created_at')
+        # Keep queryset tenancy behavior aligned with HomeworkPermission:
+        # super-admins are permitted across tenants; other users remain scoped
+        # to their assigned school (or receive no rows when unassigned).
+        qs = self.get_tenant_queryset().select_related(
+            'teacher', 'teacher__user', 'class_room', 'section', 'subject'
+        ).order_by('-due_date', '-created_at')
 
         # Filter by role
         if user.role == User.Role.STUDENT:
@@ -1009,6 +1122,8 @@ class HomeworkViewSet(TenantScopedViewSet):
                     or Student.objects.filter(school_id=user.school_id, admission_no__iexact=prefix).first()
                     or Student.objects.filter(school_id=user.school_id, name__istartswith=prefix).first()
                 )
+            if student and student.school_id != user.school_id:
+                student = None
             if student and student.class_name:
                 q = (
                     _normalize_class_q(student.class_name)
@@ -1031,7 +1146,7 @@ class HomeworkViewSet(TenantScopedViewSet):
             from apps.sis.models import Student
             from apps.accounts.models import ParentProfile
             parent_prof = getattr(user, 'parent_profile', None) or ParentProfile.objects.filter(user=user).first()
-            linked_students = parent_prof.students.all() if parent_prof else Student.objects.filter(parent_email__iexact=user.email)
+            linked_students = parent_prof.students.filter(school_id=user.school_id) if parent_prof else Student.objects.filter(parent_email__iexact=user.email, school_id=user.school_id)
             if linked_students.exists():
                 pq = Q()
                 for st in linked_students:
@@ -1056,27 +1171,21 @@ class HomeworkViewSet(TenantScopedViewSet):
         elif user.role == User.Role.TEACHER:
             teacher = _active_teacher_profile(user)
             if teacher:
-                # Teachers can view homework they created OR homework for classes they are assigned to teach OR school-wide
-                tq = (
-                    Q(teacher=teacher)
-                    | Q(class_name__iexact='all')
-                    | Q(class_name__iexact='all classes')
-                    | Q(class_name__iexact='all-classes')
-                )
-                canonical_secs = teacher.sections.select_related('class_room').all()
-                for sec in canonical_secs:
-                    tq |= _normalize_class_q(sec.class_room.name) & (Q(section_name__iexact=sec.name) | Q(section_name='') | Q(section_name__isnull=True) | Q(section_name__iexact='all'))
-                for as_label in (teacher.assigned_sections or []):
-                    as_clean = str(as_label).replace('Class', '').strip()
-                    parts = as_clean.split('-')
-                    if len(parts) >= 2:
-                        p_cls, p_sec = parts[0].strip(), parts[1].strip()
-                        tq |= _normalize_class_q(p_cls) & (Q(section_name__iexact=p_sec) | Q(section_name='') | Q(section_name__isnull=True) | Q(section_name__iexact='all'))
-                    else:
-                        tq |= _normalize_class_q(as_clean)
-                for ta in teacher.teaching_assignments.select_related('section', 'section__class_room', 'subject').all():
-                    tq |= _normalize_class_q(ta.section.class_room.name) & (Q(section_name__iexact=ta.section.name) | Q(section_name='') | Q(section_name__isnull=True) | Q(section_name__iexact='all'))
-                qs = qs.filter(tq)
+                # RBAC Rule 2 (Subject Teacher): View and manage ONLY their own assigned homework
+                tq = Q(teacher=teacher)
+
+                # RBAC Rule 3 (Class Teacher): View ALL subjects' homework for their assigned class
+                managed_classes = Class.objects.filter(school_id=user.school_id, class_teacher=teacher)
+                managed_sections = Section.objects.filter(school_id=user.school_id, class_teacher=teacher)
+
+                class_teacher_q = Q()
+                for c in managed_classes:
+                    class_teacher_q |= Q(class_room=c) | _normalize_class_q(c.name)
+
+                for s in managed_sections:
+                    class_teacher_q |= Q(section=s) | (_normalize_class_q(s.class_room.name) & Q(section_name__iexact=s.name))
+
+                qs = qs.filter(tq | class_teacher_q)
             else:
                 qs = qs.none()
 
@@ -1118,10 +1227,27 @@ class HomeworkViewSet(TenantScopedViewSet):
 
         user = self.request.user
         teacher = _active_teacher_profile(user)
-        teacher_name = (teacher.user.get_full_name() or teacher.user.username) if (teacher and getattr(teacher, 'user', None)) else (user.get_full_name() or user.username or 'Teacher')
+        assigned_teacher = serializer.validated_data.get('teacher')
+        teacher_name = serializer.validated_data.get('teacher_name', '').strip()
 
-        # RBAC Check: Only specific class-taking teachers can assign homework
-        if user.role == User.Role.TEACHER:
+        # RBAC Check
+        if user.role in [User.Role.SUPER_ADMIN, User.Role.SCHOOL_ADMIN]:
+            # Administrators can create, assign, and manage homework across all classes and subjects
+            target_school = user.school if user.role == User.Role.SCHOOL_ADMIN else serializer.validated_data.get('school')
+            if not target_school:
+                raise PermissionDenied('Select a school before creating homework.')
+            final_teacher = assigned_teacher or None
+            if final_teacher and not teacher_name and getattr(final_teacher, 'user', None):
+                teacher_name = final_teacher.user.get_full_name() or final_teacher.user.username
+            elif not teacher_name:
+                teacher_name = f"Admin ({user.get_full_name() or user.username})"
+
+            instance = serializer.save(
+                school=target_school,
+                teacher=final_teacher,
+                teacher_name=teacher_name,
+            )
+        elif user.role == User.Role.TEACHER:
             if not teacher:
                 raise PermissionDenied("An active teacher profile is required to assign homework.")
 
@@ -1129,50 +1255,44 @@ class HomeworkViewSet(TenantScopedViewSet):
             target_sec = (serializer.validated_data.get('section_name') or (serializer.validated_data.get('section').name if serializer.validated_data.get('section') else '')).strip()
             target_subj = (serializer.validated_data.get('subject_name') or (serializer.validated_data.get('subject').name if serializer.validated_data.get('subject') else '')).strip()
 
-            clean_tgt_cls = target_class.replace('Class', '').strip(' -_')
             is_authorized = False
 
-            # 1. Check structured teaching assignments (class, section, subject)
+            # Check 1: Explicit teaching assignments (Class + Section + Subject)
             ta_qs = teacher.teaching_assignments.select_related('section', 'section__class_room', 'subject')
             for ta in ta_qs:
-                ta_cls = ta.section.class_room.name.replace('Class', '').strip(' -_')
-                ta_sec = ta.section.name.strip()
-                ta_sub = ta.subject.name.strip().lower()
-
-                cls_match = (ta_cls.lower() == clean_tgt_cls.lower())
-                sec_match = (not target_sec or target_sec.lower() == 'all' or ta_sec.lower() == target_sec.lower())
-                sub_match = (not target_subj or ta_sub == target_subj.lower())
-
+                cls_match = _match_class_identifiers(ta.section.class_room.name, target_class)
+                sec_match = _match_section_identifiers(ta.section.name, target_sec)
+                sub_match = _match_subject_identifiers(ta.subject.name, target_subj)
                 if cls_match and sec_match and sub_match:
                     is_authorized = True
                     break
 
-            # 2. Check canonical sections (teacher.sections)
+            # Check 2: Canonical sections and teacher assigned subjects
             if not is_authorized:
                 canonical_secs = teacher.sections.select_related('class_room')
+                teacher_subjects = [s.lower() for s in (teacher.subjects or [])] + [s.name.lower() for s in teacher.subject_records.all()]
+                sub_match = not target_subj or not teacher_subjects or any(_match_subject_identifiers(ts, target_subj) for ts in teacher_subjects)
                 for cs in canonical_secs:
-                    cs_cls = cs.class_room.name.replace('Class', '').strip(' -_')
-                    cs_sec = cs.name.strip()
-                    cls_match = (cs_cls.lower() == clean_tgt_cls.lower())
-                    sec_match = (not target_sec or target_sec.lower() == 'all' or cs_sec.lower() == target_sec.lower())
-                    if cls_match and sec_match:
-                        teacher_subjects = [s.lower() for s in (teacher.subjects or [])] + [s.name.lower() for s in teacher.subject_records.all()]
-                        if not target_subj or not teacher_subjects or target_subj.lower() in teacher_subjects:
-                            is_authorized = True
-                            break
+                    cls_match = _match_class_identifiers(cs.class_room.name, target_class)
+                    sec_match = _match_section_identifiers(cs.name, target_sec)
+                    if cls_match and sec_match and sub_match:
+                        is_authorized = True
+                        break
 
-            # 3. Check legacy/text assigned sections
+            # Check 3: teacher.assigned_sections strings (e.g. "class 1-A", "Class 1 - A", "1-A")
             if not is_authorized and teacher.assigned_sections:
+                teacher_subjects = [s.lower() for s in (teacher.subjects or [])] + [s.name.lower() for s in teacher.subject_records.all()]
+                sub_match = not target_subj or not teacher_subjects or any(_match_subject_identifiers(ts, target_subj) for ts in teacher_subjects)
                 for as_label in teacher.assigned_sections:
-                    as_clean = str(as_label).replace('Class', '').strip()
-                    parts = as_clean.split('-')
+                    as_str = str(as_label).strip()
+                    parts = as_str.split('-')
                     if len(parts) >= 2:
                         p_cls = parts[0].strip()
                         p_sec = parts[1].strip()
-                        if p_cls.lower() == clean_tgt_cls.lower() and (not target_sec or target_sec.lower() == 'all' or p_sec.lower() == target_sec.lower()):
+                        if _match_class_identifiers(p_cls, target_class) and _match_section_identifiers(p_sec, target_sec) and sub_match:
                             is_authorized = True
                             break
-                    elif as_clean.lower() == clean_tgt_cls.lower():
+                    elif _match_class_identifiers(as_str, target_class) and sub_match:
                         is_authorized = True
                         break
 
@@ -1183,11 +1303,57 @@ class HomeworkViewSet(TenantScopedViewSet):
                     f"Access Denied: Only specific class-taking teachers can assign homework. You are not assigned to teach Class {target_class}{section_str}{subj_str}."
                 )
 
-        instance = serializer.save(
-            school_id=user.school_id,
-            teacher=teacher,
-            teacher_name=teacher_name,
-        )
+            # Auto-resolve classroom, section, subject foreign keys
+            school_id = user.school_id
+            resolved_classroom = None
+            resolved_section = None
+            resolved_subject = None
+
+            for c in Class.objects.filter(school_id=school_id):
+                if _match_class_identifiers(c.name, target_class):
+                    resolved_classroom = c
+                    break
+
+            if resolved_classroom:
+                for s in resolved_classroom.sections.all():
+                    if _match_section_identifiers(s.name, target_sec):
+                        resolved_section = s
+                        break
+
+            for sub in Subject.objects.filter(school_id=school_id):
+                if _match_subject_identifiers(sub.name, target_subj):
+                    resolved_subject = sub
+                    break
+
+            real_teacher_name = (teacher.user.get_full_name() or teacher.user.username) if getattr(teacher, 'user', None) else (user.get_full_name() or user.username or 'Teacher')
+            instance = serializer.save(
+                school_id=school_id,
+                teacher=teacher,
+                teacher_name=real_teacher_name,
+                class_room=resolved_classroom or serializer.validated_data.get('class_room'),
+                section=resolved_section or serializer.validated_data.get('section'),
+                subject=resolved_subject or serializer.validated_data.get('subject'),
+            )
+
+        # Real-time WebSocket Broadcast across the entire school via Redis Channels
+        try:
+            from apps.common.realtime import broadcast_sync_event
+            broadcast_sync_event(
+                school_id=instance.school_id,
+                entity='homework',
+                action='created',
+                entity_id=instance.id,
+                data={
+                    'title': instance.title,
+                    'className': instance.class_name,
+                    'sectionName': instance.section_name or '',
+                    'subjectName': instance.subject_name,
+                    'teacherName': instance.teacher_name,
+                    'dueDate': str(instance.due_date),
+                }
+            )
+        except Exception:
+            pass
 
         # Notify Students & Parents
         try:
@@ -1204,7 +1370,6 @@ class HomeworkViewSet(TenantScopedViewSet):
 
             students = list(student_qs)
             if students:
-                # 1. Notify Students
                 student_user_ids = list(StudentProfile.objects.filter(student__in=students).values_list('user_id', flat=True))
                 student_users = list(User.objects.filter(id__in=student_user_ids, is_active=True))
 
@@ -1228,7 +1393,6 @@ class HomeworkViewSet(TenantScopedViewSet):
                         }
                     )
 
-                # 2. Notify Parents
                 parent_profiles = ParentProfile.objects.filter(students__in=students).select_related('user').distinct()
                 parent_users = [pp.user for pp in parent_profiles if pp.user and pp.user.is_active]
 
@@ -1255,6 +1419,81 @@ class HomeworkViewSet(TenantScopedViewSet):
             import logging
             logging.getLogger(__name__).warning("Failed to auto-send homework notifications: %s", e)
 
+    def perform_update(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+        user = self.request.user
+        instance = self.get_object()
+
+        # Admin: Full management across all classes
+        if user.role in [User.Role.SUPER_ADMIN, User.Role.SCHOOL_ADMIN]:
+            saved_instance = serializer.save()
+            try:
+                from apps.common.realtime import broadcast_sync_event
+                broadcast_sync_event(
+                    school_id=saved_instance.school_id,
+                    entity='homework',
+                    action='updated',
+                    entity_id=saved_instance.id,
+                    data={'title': saved_instance.title, 'className': saved_instance.class_name, 'subjectName': saved_instance.subject_name}
+                )
+            except Exception:
+                pass
+            return
+
+        # Subject Teacher: Only edit homework they personally assigned
+        if user.role == User.Role.TEACHER:
+            teacher = _active_teacher_profile(user)
+            if teacher and instance.teacher_id == teacher.id:
+                saved_instance = serializer.save()
+                try:
+                    from apps.common.realtime import broadcast_sync_event
+                    broadcast_sync_event(
+                        school_id=saved_instance.school_id,
+                        entity='homework',
+                        action='updated',
+                        entity_id=saved_instance.id,
+                        data={'title': saved_instance.title, 'className': saved_instance.class_name, 'subjectName': saved_instance.subject_name}
+                    )
+                except Exception:
+                    pass
+                return
+            raise PermissionDenied("You are only authorized to edit homework that you personally assigned.")
+
+        raise PermissionDenied("You do not have permission to edit homework.")
+
+    def perform_destroy(self, instance):
+        from rest_framework.exceptions import PermissionDenied
+        user = self.request.user
+        school_id = instance.school_id
+        homework_id = instance.id
+
+        # Admin: Can remove homework across all classes
+        if user.role in [User.Role.SUPER_ADMIN, User.Role.SCHOOL_ADMIN]:
+            instance.delete()
+            try:
+                from apps.common.realtime import broadcast_sync_event
+                broadcast_sync_event(school_id=school_id, entity='homework', action='deleted', entity_id=homework_id)
+            except Exception:
+                pass
+            return
+
+        # Subject Teacher: Only remove homework they personally assigned
+        if user.role == User.Role.TEACHER:
+            teacher = _active_teacher_profile(user)
+            if teacher and instance.teacher_id == teacher.id:
+                instance.delete()
+                try:
+                    from apps.common.realtime import broadcast_sync_event
+                    broadcast_sync_event(school_id=school_id, entity='homework', action='deleted', entity_id=homework_id)
+                except Exception:
+                    pass
+                return
+            raise PermissionDenied(
+                "You are only authorized to remove homework that you personally assigned. Contact your school administrator to remove homework assigned by other teachers."
+            )
+
+        raise PermissionDenied("You do not have permission to remove homework.")
+
     @action(detail=True, methods=['post'], url_path='submit')
     def submit_homework(self, request, pk=None):
         instance = self.get_object()
@@ -1266,16 +1505,61 @@ class HomeworkViewSet(TenantScopedViewSet):
         student_name = request.data.get('student_name')
         admission_no = request.data.get('admission_no', '')
         submission_text = request.data.get('submission_text', 'Marked as completed')
+        attachments = request.data.get('attachments', [])
 
-        if not student_id and user.role == User.Role.STUDENT:
+        submitted_by = ''
+        if user.role == User.Role.PARENT:
+            from apps.accounts.models import ParentProfile
+            parent_prof = getattr(user, 'parent_profile', None) or ParentProfile.objects.filter(user=user).first()
+            if not parent_prof:
+                return Response({'error': 'Parent profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            if not student_id:
+                child = parent_prof.students.filter(school_id=instance.school_id).first()
+                if not child:
+                    return Response({'error': 'No linked children found.'}, status=status.HTTP_403_FORBIDDEN)
+            else:
+                child = parent_prof.students.filter(school_id=instance.school_id).filter(
+                    Q(id=student_id if str(student_id).isdigit() else None) | Q(admission_no=str(student_id))
+                ).first()
+                if not child:
+                    return Response({'error': 'Permission denied. You can only submit homework for your own children.'}, status=status.HTTP_403_FORBIDDEN)
+            student_id = str(child.id)
+            student_name = child.name
+            admission_no = child.admission_no
+            parent_display = user.get_full_name() or user.username or 'Parent'
+            submitted_by = f"Parent ({parent_display})"
+        elif user.role == User.Role.STUDENT:
             student_profile = getattr(user, 'student_profile', None)
             student = getattr(student_profile, 'student', None) if student_profile else None
             if not student:
-                student = Student.objects.filter(login_profile__user=user).first()
-            if student:
-                student_id = str(student.id)
-                student_name = student.name
-                admission_no = student.admission_no
+                student = Student.objects.filter(login_profile__user=user, school_id=instance.school_id).first()
+            if not student:
+                student = Student.objects.filter(school_id=user.school_id, name__iexact=user.get_full_name()).first()
+            if not student or student.school_id != instance.school_id:
+                return Response({'error': 'Student profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            student_id = str(student.id)
+            student_name = student.name
+            admission_no = student.admission_no
+            submitted_by = f"Student ({student_name})"
+        elif user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            submitted_by = f"{user.get_full_name() or user.username} ({user.role})"
+            candidate_id = str(student_id or '').strip()
+            if not candidate_id:
+                return Response({'error': 'student_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            candidate_qs = Student.objects.filter(school_id=instance.school_id)
+            student = candidate_qs.filter(pk=candidate_id).first() if candidate_id.isdigit() else candidate_qs.filter(admission_no=candidate_id).first()
+            if not _homework_targets_student(instance, student):
+                return Response({'error': 'Student is not assigned to this homework.'}, status=status.HTTP_404_NOT_FOUND)
+            student_id = str(student.pk)
+            student_name = student.name
+            admission_no = student.admission_no
+        else:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if user.role in [User.Role.STUDENT, User.Role.PARENT]:
+            student_obj = Student.objects.filter(pk=student_id, school_id=instance.school_id).first()
+            if not _homework_targets_student(instance, student_obj):
+                return Response({'error': 'Student is not assigned to this homework.'}, status=status.HTTP_404_NOT_FOUND)
 
         if not student_id:
             student_id = str(user.id)
@@ -1289,14 +1573,19 @@ class HomeworkViewSet(TenantScopedViewSet):
             existing['status'] = 'Submitted'
             existing['submitted_at'] = today_iso
             existing['submission_text'] = submission_text
+            existing['submitted_by'] = submitted_by
+            if attachments is not None:
+                existing['attachments'] = attachments
         else:
             submissions.append({
                 'student_id': str(student_id),
                 'student_name': student_name or f"Student {student_id}",
                 'admission_no': admission_no,
+                'submitted_by': submitted_by,
                 'status': 'Submitted',
                 'submitted_at': today_iso,
                 'submission_text': submission_text,
+                'attachments': attachments or [],
                 'marks_obtained': None,
                 'teacher_feedback': '',
             })
@@ -1304,15 +1593,28 @@ class HomeworkViewSet(TenantScopedViewSet):
         instance.submissions = submissions
         instance.save(update_fields=['submissions', 'updated_at'])
 
-        # Notify teacher that a student submitted homework
+        try:
+            from apps.common.realtime import broadcast_sync_event
+            broadcast_sync_event(
+                school_id=instance.school_id,
+                entity='homework',
+                action='submitted',
+                entity_id=instance.id,
+                data={'studentId': student_id, 'studentName': student_name, 'status': 'Submitted'}
+            )
+        except Exception:
+            pass
+
+        # Notify teacher that a student/parent submitted homework
         try:
             if instance.teacher and getattr(instance.teacher, 'user', None):
                 from apps.notifications.services import create_notification
+                submitter_label = f"{student_name} ({submitted_by})" if submitted_by else student_name
                 create_notification(
                     school=instance.school,
                     recipient=instance.teacher.user,
                     title=f"Homework Submitted: {instance.subject_name}",
-                    body=f"{student_name} submitted homework '{instance.title}' for Class {instance.class_name}.",
+                    body=f"{submitter_label} submitted homework '{instance.title}' for Class {instance.class_name}.",
                     category="Homework",
                     channel="school-to-teachers",
                     sender=user,
@@ -1323,12 +1625,28 @@ class HomeworkViewSet(TenantScopedViewSet):
 
         return Response({
             'message': 'Homework submitted successfully',
-            'homework': HomeworkSerializer(instance).data
+            'homework': HomeworkSerializer(instance, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='grade')
     def grade_submission(self, request, pk=None):
         instance = self.get_object()
+        user = request.user
+        if user.role not in [User.Role.TEACHER, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'error': 'Permission denied. Only teachers and school administrators can grade submissions.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if user.role == User.Role.TEACHER:
+            teacher = _active_teacher_profile(user)
+            if not teacher:
+                return Response({'error': 'Teacher profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            is_assigned = (instance.teacher_id == teacher.id)
+            is_class_teacher = (
+                (instance.class_room and instance.class_room.class_teacher_id == teacher.id) or
+                (instance.section and instance.section.class_teacher_id == teacher.id)
+            )
+            if not is_assigned and not is_class_teacher:
+                return Response({'error': 'Permission denied. You are not authorized to grade submissions for this homework.'}, status=status.HTTP_403_FORBIDDEN)
+
         student_id = request.data.get('student_id')
         marks = request.data.get('marks_obtained')
         feedback = request.data.get('teacher_feedback', '')
@@ -1340,6 +1658,11 @@ class HomeworkViewSet(TenantScopedViewSet):
         existing = next((s for s in submissions if str(s.get('student_id')) == str(student_id)), None)
         if not existing:
             return Response({'error': 'Student submission not found'}, status=status.HTTP_404_NOT_FOUND)
+        from apps.sis.models import Student
+        target_student_qs = Student.objects.filter(school_id=instance.school_id)
+        target_student = target_student_qs.filter(pk=student_id).first() if str(student_id).isdigit() else target_student_qs.filter(admission_no=str(student_id)).first()
+        if not _homework_targets_student(instance, target_student):
+            return Response({'error': 'Student is not assigned to this homework.'}, status=status.HTTP_404_NOT_FOUND)
 
         existing['status'] = 'Graded'
         existing['marks_obtained'] = marks
@@ -1350,12 +1673,7 @@ class HomeworkViewSet(TenantScopedViewSet):
 
         # Notify student and parents that homework was graded
         try:
-            from apps.sis.models import Student
             from apps.notifications.services import notify_student_and_parents
-            from django.db.models import Q
-            target_student = Student.objects.filter(school=instance.school).filter(
-                Q(id=int(student_id) if str(student_id).isdigit() else -1) | Q(admission_no=str(student_id))
-            ).first()
             if target_student:
                 notify_student_and_parents(
                     target_student,
@@ -1371,6 +1689,6 @@ class HomeworkViewSet(TenantScopedViewSet):
 
         return Response({
             'message': 'Submission graded successfully',
-            'homework': HomeworkSerializer(instance).data
+            'homework': HomeworkSerializer(instance, context={'request': request}).data
         }, status=status.HTTP_200_OK)
 

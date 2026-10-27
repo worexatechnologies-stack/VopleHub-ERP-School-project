@@ -1,4 +1,5 @@
 import { baseApi } from './baseApi';
+import { waitForImportBatch } from './importQueue';
 
 export interface TeacherApiDocument {
   id: number;
@@ -34,6 +35,9 @@ export interface TeacherRecord {
   subjectIds?: number[];
   assignedSections: string[];
   assignedSectionIds?: number[];
+  managedClasses?: Array<{ id: number; name: string; code?: string }>;
+  managedClassIds?: number[];
+  managedSectionIds?: number[];
   qualification: string;
   salary?: string | number | null;
   joiningDate: string;
@@ -101,15 +105,15 @@ export const teacherApi = baseApi.injectEndpoints({
     }),
     createTeacher: build.mutation<TeacherCreationResponse, FormData>({
       query: (body) => ({ url: '/teachers/', method: 'POST', body }),
-      invalidatesTags: ['Teacher', 'Auth', 'CredentialVault'],
+      invalidatesTags: ['Teacher', 'Class', 'Section', 'Auth', 'CredentialVault'],
     }),
     updateTeacher: build.mutation<TeacherRecord, { id: number; body: FormData | Partial<TeacherRecord> }>({
       query: ({ id, body }) => ({ url: `/teachers/${id}/`, method: 'PATCH', body }),
-      invalidatesTags: ['Teacher', 'Auth', 'CredentialVault'],
+      invalidatesTags: ['Teacher', 'Class', 'Section', 'Auth', 'CredentialVault'],
     }),
     deleteTeacher: build.mutation<void, number>({
       query: (id) => ({ url: `/teachers/${id}/`, method: 'DELETE' }),
-      invalidatesTags: ['Teacher', 'Auth', 'CredentialVault'],
+      invalidatesTags: ['Teacher', 'Class', 'Section', 'Auth', 'CredentialVault'],
     }),
     addTeachingAssignment: build.mutation<TeacherRecord, { teacherId: number; sectionId: number; subjectId: number }>({
       query: ({ teacherId, sectionId, subjectId }) => ({
@@ -165,9 +169,9 @@ export const teacherApi = baseApi.injectEndpoints({
         batchSize?: number;
       } | FormData
     >({
-      query: (arg) => {
+      queryFn: async (arg, api, _extraOptions, baseQuery) => {
         if (arg instanceof FormData) {
-          return { url: '/teachers/bulk-import/', method: 'POST', body: arg };
+          return baseQuery({ url: '/teachers/bulk-import/', method: 'POST', body: arg }) as any;
         }
         if (arg.file) {
           const fd = new FormData();
@@ -177,9 +181,9 @@ export const teacherApi = baseApi.injectEndpoints({
           if (arg.batchNumber != null) fd.append('batchNumber', String(arg.batchNumber));
           if (arg.totalBatches != null) fd.append('totalBatches', String(arg.totalBatches));
           if (arg.batchSize != null) fd.append('batchSize', String(arg.batchSize));
-          return { url: '/teachers/bulk-import/', method: 'POST', body: fd };
+          return baseQuery({ url: '/teachers/bulk-import/', method: 'POST', body: fd }) as any;
         }
-        return {
+        const submitted = await baseQuery({
           url: '/teachers/bulk-import/',
           method: 'POST',
           body: {
@@ -188,10 +192,20 @@ export const teacherApi = baseApi.injectEndpoints({
             batchNumber: arg.batchNumber,
             totalBatches: arg.totalBatches,
             batchSize: arg.batchSize,
+            async_import: true,
           },
-        };
+        });
+        if (submitted.error) return { error: submitted.error };
+        const accepted = submitted.data as { queued?: boolean; jobId?: string; batchNumber?: number };
+        if (!accepted.queued || !accepted.jobId || !accepted.batchNumber) return { data: submitted.data };
+        return waitForImportBatch(
+          baseQuery,
+          `/teachers/bulk-import/status/?jobId=${encodeURIComponent(accepted.jobId)}&batchNumber=${accepted.batchNumber}`,
+          accepted,
+          api.signal,
+        );
       },
-      invalidatesTags: ['Teacher', 'Auth', 'CredentialVault'],
+      invalidatesTags: ['Teacher', 'Class', 'Section', 'Auth', 'CredentialVault'],
     }),
   }),
 });

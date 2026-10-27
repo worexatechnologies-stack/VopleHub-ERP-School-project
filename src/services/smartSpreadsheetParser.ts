@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { styleWorksheet, downloadStyledWorkbook } from '../utils/excelStyler';
 
 export interface ColumnDefinition {
   key: string;
@@ -720,8 +721,9 @@ export function downloadSampleExcelTemplate(entityType: 'students' | 'teachers')
 
     const ws = XLSX.utils.aoa_to_sheet([sampleHeaders, ...sampleData]);
     ws['!cols'] = sampleHeaders.map(() => ({ wch: 18 }));
+    styleWorksheet(ws, { theme: 'navy', hasTotalRow: false });
     XLSX.utils.book_append_sheet(wb, ws, 'Students_Template');
-    XLSX.writeFile(wb, 'student_enrollment_template.xlsx');
+    downloadStyledWorkbook(wb, 'student_enrollment_template.xlsx');
   } else {
     const sampleHeaders = [
       'Teacher Name',
@@ -742,7 +744,7 @@ export function downloadSampleExcelTemplate(entityType: 'students' | 'teachers')
         'M.Sc, B.Ed',
         'Mathematics, Physics',
         '2024-06-01',
-        '45000',
+        45000,
       ],
       [
         'Ramesh Kumar',
@@ -752,13 +754,14 @@ export function downloadSampleExcelTemplate(entityType: 'students' | 'teachers')
         'M.A, B.Ed',
         'English Literature',
         '2023-08-15',
-        '42000',
+        42000,
       ],
     ];
 
     const ws = XLSX.utils.aoa_to_sheet([sampleHeaders, ...sampleData]);
     ws['!cols'] = sampleHeaders.map(() => ({ wch: 20 }));
+    styleWorksheet(ws, { theme: 'indigo', hasTotalRow: false });
     XLSX.utils.book_append_sheet(wb, ws, 'Teachers_Template');
-    XLSX.writeFile(wb, 'teacher_directory_template.xlsx');
+    downloadStyledWorkbook(wb, 'teacher_directory_template.xlsx');
   }
 }

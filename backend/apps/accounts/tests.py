@@ -20,6 +20,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from io import BytesIO
 from PIL import Image
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+from .auth_utils import issue_token_pair
 
 
 @override_settings(SECURE_SSL_REDIRECT=False)
@@ -436,24 +437,43 @@ class TemporaryPasswordMiddlewareTests(TestCase):
 
 @override_settings(SECURE_SSL_REDIRECT=False)
 class LogoutTests(TestCase):
-    def test_logout_blacklists_the_refresh_token(self):
+    def test_logout_revokes_the_opaque_refresh_token(self):
         user = User.objects.create_user(
             username='logout-user', email='logout@example.com', password='StrongPass123!',
             role=User.Role.SCHOOL_ADMIN,
         )
-        refresh = RefreshToken.for_user(user)
+        tokens = issue_token_pair(user, type('Request', (), {'META': {}})())
         client = APIClient()
-        client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
 
-        response = client.post('/api/v1/auth/logout/', {'refresh': str(refresh)}, format='json')
+        response = client.post('/api/v1/auth/logout/', {'refresh': tokens['refresh']}, format='json')
 
         self.assertEqual(response.status_code, 204)
-        self.assertTrue(BlacklistedToken.objects.filter(token__user=user).exists())
+        tokens['record'].refresh_from_db()
+        self.assertIsNotNone(tokens['record'].revoked_at)
         client.credentials()
         self.assertEqual(
-            client.post('/api/v1/auth/refresh/', {'refresh': str(refresh)}, format='json').status_code,
+            client.post('/api/v1/auth/refresh/', {'refresh': tokens['refresh']}, format='json').status_code,
             401,
         )
+
+    @override_settings(REFRESH_COOKIE_PATH='/custom/api/auth/')
+    def test_logout_expires_refresh_cookie_at_its_configured_path(self):
+        user = User.objects.create_user(
+            username='logout-cookie-user', email='logout-cookie@example.com',
+            password='StrongPass123!', role=User.Role.SCHOOL_ADMIN,
+        )
+        client = APIClient()
+        client.force_authenticate(user)
+        client.cookies['refresh_token_cookie'] = 'opaque-refresh-token'
+        client.cookies['access_token_cookie'] = 'access-token'
+
+        response = client.post('/api/v1/auth/logout/', {}, format='json')
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.cookies['refresh_token_cookie']['path'], '/custom/api/auth/')
+        self.assertEqual(int(response.cookies['refresh_token_cookie']['max-age']), 0)
+        self.assertEqual(response.cookies['access_token_cookie']['path'], '/')
 
 
 class SuperAdminOperationalAccessTests(TestCase):

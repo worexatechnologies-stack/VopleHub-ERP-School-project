@@ -62,6 +62,12 @@ def create_rows(sender, recipients, channel, category, title, body, related=None
             category=category,
             data=related or {},
         ))
+    try:
+        from .services import _dispatch_ws_notification
+        for row in rows:
+            _dispatch_ws_notification(row.recipient_id, row)
+    except Exception:
+        pass
     return len(rows)
 
 
@@ -93,7 +99,7 @@ class DeviceTokenView(APIView):
             else:
                 platform = DeviceToken.Platform.WEB
 
-        device, _ = DeviceToken.objects.update_or_create(
+        device, created = DeviceToken.objects.get_or_create(
             token=token,
             defaults={
                 'user': request.user,
@@ -106,6 +112,23 @@ class DeviceTokenView(APIView):
                 'last_failure_at': None,
             },
         )
+        if not created and device.user_id != request.user.pk:
+            return Response(
+                {'detail': 'This device token is already registered to another account.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not created:
+            device.platform = platform
+            device.device_name = serializer.validated_data.get('deviceName', '')
+            device.user_agent = request.META.get('HTTP_USER_AGENT', '')[:512]
+            device.is_active = True
+            device.failure_count = 0
+            device.last_error = ''
+            device.last_failure_at = None
+            device.save(update_fields=[
+                'platform', 'device_name', 'user_agent', 'is_active',
+                'failure_count', 'last_error', 'last_failure_at', 'last_seen_at',
+            ])
         return Response(DeviceTokenSerializer(device).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(request=DeviceTokenRegistrationSerializer, responses={204: None})
@@ -326,9 +349,21 @@ class NotificationReadView(APIView):
     @extend_schema(request=None, responses={200: NotificationSerializer, 404: OpenApiResponse(description='Not found')})
     def patch(self, request, notification_id):
         qs = Notification.objects.filter(pk=notification_id)
-        if request.user.role != User.Role.SUPER_ADMIN:
-            qs = qs.filter(Q(recipient=request.user) | Q(school_id=request.user.school_id))
-        notification = qs.first()
+        if request.user.role == User.Role.SUPER_ADMIN:
+            notification = qs.first()
+        elif request.user.role == User.Role.SCHOOL_ADMIN:
+            allowed = Q(recipient=request.user)
+            if request.user.school_id:
+                allowed |= (
+                    Q(school_id=request.user.school_id, recipient__isnull=True) |
+                    Q(school_id=request.user.school_id, channel='teacher-to-admin')
+                )
+            notification = qs.filter(allowed).first()
+        else:
+            allowed = Q(recipient=request.user)
+            if request.user.school_id:
+                allowed |= Q(school_id=request.user.school_id, recipient__isnull=True)
+            notification = qs.filter(allowed).first()
         if not notification:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if notification.read_at is None:
@@ -358,8 +393,14 @@ class NotificationDecisionView(APIView):
         if request.user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             return Response({'detail': 'Only school administrators can resolve leave requests.'}, status=status.HTTP_403_FORBIDDEN)
 
-        qs = Notification.objects.filter(pk=notification_id)
-        if request.user.school_id:
+        qs = Notification.objects.filter(
+            pk=notification_id,
+            channel='teacher-to-admin',
+            category='Leave Request',
+        )
+        if request.user.role == User.Role.SCHOOL_ADMIN:
+            if not request.user.school_id:
+                return Response({'detail': 'A school context is required.'}, status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(school_id=request.user.school_id)
         notification = qs.first()
         if not notification:
@@ -415,9 +456,21 @@ class NotificationAcknowledgeView(APIView):
     @extend_schema(request=None, responses={200: NotificationSerializer})
     def patch(self, request, notification_id):
         qs = Notification.objects.filter(pk=notification_id)
-        if request.user.role != User.Role.SUPER_ADMIN:
-            qs = qs.filter(Q(recipient=request.user) | Q(school_id=request.user.school_id))
-        notification = qs.first()
+        if request.user.role == User.Role.SUPER_ADMIN:
+            notification = qs.first()
+        elif request.user.role == User.Role.SCHOOL_ADMIN:
+            allowed = Q(recipient=request.user)
+            if request.user.school_id:
+                allowed |= (
+                    Q(school_id=request.user.school_id, recipient__isnull=True) |
+                    Q(school_id=request.user.school_id, channel='teacher-to-admin')
+                )
+            notification = qs.filter(allowed).first()
+        else:
+            allowed = Q(recipient=request.user)
+            if request.user.school_id:
+                allowed |= Q(school_id=request.user.school_id, recipient__isnull=True)
+            notification = qs.filter(allowed).first()
         if not notification:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -437,6 +490,8 @@ class NotificationClearAllView(APIView):
         if request.user.role == User.Role.SUPER_ADMIN:
             Notification.objects.all().delete()
         else:
+            if not request.user.school_id:
+                return Response({'detail': 'A school context is required.'}, status=status.HTTP_403_FORBIDDEN)
             Notification.objects.filter(school_id=request.user.school_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

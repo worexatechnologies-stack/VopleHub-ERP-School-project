@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import {
   AlertTriangle,
   Bell,
@@ -45,7 +46,7 @@ interface ParentNotificationsProps {
 export default function ParentNotifications({ onNavigateToTab }: ParentNotificationsProps) {
   const currentUser = useAppSelector((state) => state.auth.user);
   const isParent = currentUser?.role === 'Parent';
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(currentUser || getStoredAuthenticatedUser());
   const { data: wards = [], isLoading: wardsLoading } = useGetStudentsQuery(undefined, {
     skip: !isServerBacked || !isParent,
   });

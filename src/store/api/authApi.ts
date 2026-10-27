@@ -1,14 +1,30 @@
 import { baseApi } from './baseApi';
-import { setAccessToken } from '../slices/authSlice';
-import { ACCESS_TOKEN_STORAGE_KEY } from '../../utils/auth';
 import type { AuthUser } from '../../utils/auth';
 import type { UserRole } from '../../types';
 
 export interface LoginResponse {
-  access: string;
-  // The refresh token is delivered ONLY as an HttpOnly cookie by the server.
-  // It is never returned in the JSON body, so we do not type it here.
-  user: AuthUser & { role: string };
+  access?: string;
+  refresh?: string;
+  sessionId?: string;
+  session_id?: string;
+  user?: AuthUser & { role: string };
+  mfa_required?: boolean;
+  mfa_token?: string;
+  email?: string;
+  masked_email?: string;
+  masked_phone?: string;
+  role?: string;
+  dev_otp?: string;
+  message?: string;
+}
+
+export interface VerifyOtpRequest {
+  mfa_token: string;
+  otp: string;
+}
+
+export interface ResendOtpRequest {
+  mfa_token: string;
 }
 
 export interface LoginRequest {
@@ -23,16 +39,53 @@ export const authApi = baseApi.injectEndpoints({
       query: (credentials) => ({
         url: '/auth/login/',
         method: 'POST',
-        body: credentials,
+        body: {
+          ...credentials,
+          client_type: 'web',
+          auth_mode: 'session',
+        },
       }),
       invalidatesTags: ['Auth'],
       transformResponse: (data: LoginResponse) => ({
         ...data,
-        user: {
-          ...data.user,
-          role: (roleMap[data.user.role] || data.user.role) as UserRole,
+        user: data.user
+          ? {
+              ...data.user,
+              role: (roleMap[data.user.role] || data.user.role) as UserRole,
+            }
+          : undefined,
+      }),
+    }),
+    verifyOtp: build.mutation<LoginResponse, VerifyOtpRequest>({
+      query: (body) => ({
+        url: '/auth/verify-otp/',
+        method: 'POST',
+        body: {
+          ...body,
+          client_type: 'web',
+          auth_mode: 'session',
         },
       }),
+      invalidatesTags: ['Auth'],
+      transformResponse: (data: LoginResponse) => ({
+        ...data,
+        user: data.user
+          ? {
+              ...data.user,
+              role: (roleMap[data.user.role] || data.user.role) as UserRole,
+            }
+          : undefined,
+      }),
+    }),
+    resendOtp: build.mutation<{ success: boolean; dev_otp?: string; message: string; cooldown?: number }, ResendOtpRequest>({
+      query: (body) => ({
+        url: '/auth/resend-otp/',
+        method: 'POST',
+        body,
+      }),
+    }),
+    getCsrfToken: build.query<{ csrfToken: string }, void>({
+      query: () => ({ url: '/auth/csrf/' }),
     }),
     getCurrentUser: build.query<AuthUser, void>({
       query: () => ({ url: '/auth/me/' }),
@@ -59,17 +112,6 @@ export const authApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
-        try {
-          const { data } = await queryFulfilled;
-          if (data?.access) {
-            localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, data.access);
-            dispatch(setAccessToken(data.access));
-          }
-        } catch {
-          // Handled by calling component
-        }
-      },
       invalidatesTags: ['Auth', { type: 'CredentialVault', id: 'LIST' }],
     }),
     logout: build.mutation<void, void>({
@@ -153,6 +195,9 @@ const roleMap: Record<string, string> = {
 
 export const {
   useLoginMutation,
+  useVerifyOtpMutation,
+  useResendOtpMutation,
+  useGetCsrfTokenQuery,
   useGetCurrentUserQuery,
   useChangePasswordMutation,
   useLogoutMutation,

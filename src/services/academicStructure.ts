@@ -7,6 +7,7 @@ export interface AcademicClass {
   code: string;
   sortOrder: number;
   subjectIds?: number[];
+  classTeacherId?: number | null;
 }
 
 export interface AcademicSection {

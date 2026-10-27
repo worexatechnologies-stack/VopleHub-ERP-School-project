@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -13,6 +14,7 @@ import {
   Building,
   Calendar,
   CreditCard,
+  FileSpreadsheet,
   FileText,
   DollarSign,
   AlertCircle,
@@ -26,6 +28,7 @@ import {
   type StaffSalaryPayment,
 } from '../store/api/staffSalaryApi';
 import { emitNotification } from '../services/notificationBus';
+import { exportStaffPayrollToExcel } from '../utils/staffPayrollExport';
 
 interface StaffFeeModuleProps {
   schoolName?: string;
@@ -53,7 +56,7 @@ function saveLocalSalaries(salaries: StaffSalaryPayment[]) {
 }
 
 export default function StaffFeeModule({ schoolName = 'School Management Portal', onAddLog }: StaffFeeModuleProps) {
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const currentDate = new Date();
   const [selectedMonth, setSelectedMonth] = useState<number>(currentDate.getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState<number>(currentDate.getFullYear());
@@ -169,6 +172,35 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
 
     return { totalPayroll, totalPaid, totalPending, paidCount, totalCount };
   }, [teacherPayrollRows]);
+
+  // Export staff payroll to Excel (.xlsx)
+  const handleExportToExcel = () => {
+    try {
+      exportStaffPayrollToExcel({
+        schoolName,
+        month: selectedMonth,
+        year: selectedYear,
+        monthName: MONTHS[selectedMonth - 1],
+        rows: teacherPayrollRows,
+        stats,
+      });
+      emitNotification({
+        title: 'Payroll Exported',
+        message: `${MONTHS[selectedMonth - 1]} ${selectedYear} staff payroll register exported to Excel (.xlsx).`,
+        tone: 'success',
+        source: 'finance',
+      });
+      onAddLog?.(`[Staff Fee] Exported ${MONTHS[selectedMonth - 1]} ${selectedYear} staff payroll register to Excel (.xlsx).`);
+    } catch (error: any) {
+      console.error('Failed to export staff payroll:', error);
+      emitNotification({
+        title: 'Export Failed',
+        message: 'Could not generate the payroll Excel sheet.',
+        tone: 'danger',
+        source: 'finance',
+      });
+    }
+  };
 
   // Open Pay Modal
   const handleOpenPayModal = (row: (typeof teacherPayrollRows)[0]) => {
@@ -356,7 +388,7 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 self-start lg:self-center">
-          <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50/80 px-3 py-2 shadow-2xs">
+          <div className="h-10 flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50/80 px-3 py-2 shadow-2xs">
             <Calendar className="h-4 w-4 text-slate-500" />
             <select
               value={selectedMonth}
@@ -377,6 +409,16 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
               ))}
             </select>
           </div>
+
+          <button
+            type="button"
+            onClick={handleExportToExcel}
+            className="h-10 px-4 inline-flex items-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white font-bold text-xs shadow-sm hover:shadow transition-all cursor-pointer whitespace-nowrap"
+            title="Export monthly staff payroll register & disbursement tally to Excel (.xlsx)"
+          >
+            <FileSpreadsheet className="h-4 w-4 shrink-0 text-white" />
+            <span>Export to Excel (.xlsx)</span>
+          </button>
         </div>
       </header>
 
@@ -440,16 +482,25 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
               className="w-full rounded-xl border border-slate-200 py-2 pl-9 pr-3 text-sm focus:border-indigo-500 focus:outline-none"
             />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as any)}
-              className="rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+              className="h-[38px] rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
             >
               <option value="All">All Statuses</option>
               <option value="Paid">Paid</option>
               <option value="Pending">Pending</option>
             </select>
+            <button
+              type="button"
+              onClick={handleExportToExcel}
+              className="h-[38px] px-3.5 inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold shadow-2xs active:scale-98 transition-all cursor-pointer whitespace-nowrap"
+              title="Export staff payroll to Excel (.xlsx)"
+            >
+              <FileSpreadsheet className="h-4 w-4 text-emerald-700 shrink-0" />
+              <span>Export Payroll</span>
+            </button>
           </div>
         </div>
 

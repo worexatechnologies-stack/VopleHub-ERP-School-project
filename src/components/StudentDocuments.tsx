@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -56,7 +57,7 @@ const DOCUMENT_PRESETS = [
 ];
 
 export default function StudentDocuments({ user, schoolName = 'School Management Portal', students: passedStudents }: StudentDocumentsProps) {
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const { data: serverStudents = [], refetch: refetchStudents } = useGetStudentsQuery(undefined, { skip: !isServerBacked });
 
   // Resolve current logged-in student

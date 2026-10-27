@@ -3,6 +3,7 @@ from django.db import transaction
 from django.db.models import Count, Q, Prefetch
 from rest_framework import permissions, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from apps.sis.models import Student
@@ -25,7 +26,34 @@ class AttendanceRecordPagination(PageNumberPagination):
 
 class AttendanceAccess(permissions.BasePermission):
     def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.role != User.Role.SUPER_ADMIN
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.role in [
+                User.Role.SCHOOL_ADMIN,
+                User.Role.TEACHER,
+                User.Role.PARENT,
+                User.Role.STUDENT,
+            ]
+            and request.user.school_id
+        )
+
+
+class CanViewAttendanceReports(permissions.BasePermission):
+    """Only school staff may view attendance aggregates and reports."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated and user.school_id):
+            return False
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return True
+        return bool(
+            user.role == User.Role.TEACHER
+            and getattr(user, 'teacher_profile', None)
+            and user.teacher_profile.school_id == user.school_id
+            and user.teacher_profile.status == 'Active'
+        )
 
 
 class CanMarkAttendance(permissions.BasePermission):
@@ -123,6 +151,8 @@ class AttendanceViewSet(TenantScopedViewSet):
     def get_permissions(self):
         if self.action in ['mark', 'bulk_mark']:
             return [AttendanceAccess(), CanMarkAttendance()]
+        if self.action in ['report', 'analytics']:
+            return [AttendanceAccess(), CanViewAttendanceReports()]
         return [AttendanceAccess()]
 
     def get_queryset(self):
@@ -168,6 +198,18 @@ class AttendanceViewSet(TenantScopedViewSet):
                 Prefetch('audit_logs', queryset=AttendanceAuditLog.objects.select_related('changed_by', 'student', 'subject'))
             )
         return qs
+
+    # Attendance changes must go through mark/bulk_mark, which enforce
+    # timetable authorization and write audit records. Do not expose the
+    # generic ModelViewSet mutation routes.
+    def create(self, request, *args, **kwargs):
+        raise MethodNotAllowed(request.method)
+
+    def update(self, request, *args, **kwargs):
+        raise MethodNotAllowed(request.method)
+
+    def partial_update(self, request, *args, **kwargs):
+        raise MethodNotAllowed(request.method)
 
     @action(detail=False, methods=['put'], url_path='mark')
     def mark(self, request):
@@ -285,6 +327,23 @@ class AttendanceViewSet(TenantScopedViewSet):
                 )
             except Exception:
                 pass
+
+        try:
+            from apps.common.realtime import broadcast_sync_event
+            broadcast_sync_event(
+                school_id=student.school_id,
+                entity='attendance',
+                action='marked',
+                entity_id=record.id,
+                data={
+                    'studentId': student.id,
+                    'date': str(attendance_date),
+                    'period': period,
+                    'status': attendance_status,
+                },
+            )
+        except Exception:
+            pass
 
         return Response(self.get_serializer(record).data)
 
@@ -417,6 +476,20 @@ class AttendanceViewSet(TenantScopedViewSet):
             except Exception:
                 pass
 
+        try:
+            from apps.common.realtime import broadcast_sync_event
+            broadcast_sync_event(
+                school_id=user.school_id,
+                entity='attendance',
+                action='bulk_marked',
+                data={
+                    'count': updated_count,
+                    'date': str(attendance_date),
+                },
+            )
+        except Exception:
+            pass
+
         return Response({
             'success': True,
             'count': updated_count,
@@ -547,6 +620,14 @@ class AttendanceViewSet(TenantScopedViewSet):
         """
         user = request.user
         qs = AttendanceRecord.objects.filter(school_id=user.school_id)
+
+        if user.role == User.Role.TEACHER:
+            permitted_students = teacher_student_queryset(
+                getattr(user, 'teacher_profile', None),
+                Student.objects.filter(school_id=user.school_id),
+                school_id=user.school_id,
+            )
+            qs = qs.filter(student__in=permitted_students)
 
         if class_name := request.query_params.get('class_name'):
             qs = qs.filter(student__class_name=class_name)

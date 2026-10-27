@@ -1,7 +1,9 @@
 from rest_framework import viewsets, permissions, status
+from django.conf import settings
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import PermissionDenied
 
 
 class StudentFeeRecordPagination(PageNumberPagination):
@@ -13,8 +15,59 @@ import datetime
 from django.db.models import Q, Sum, Count
 from django.core.cache import cache
 from apps.accounts.models import User
+from apps.academics.models import Class
 from apps.common.tenancy import TenantScopedViewSet
 from apps.finance.models import FeeStructure, FeeQuarter, StudentFeeRecord, FeePayment
+from apps.sis.access import teacher_can_access_student, teacher_student_queryset
+from apps.staff.models import Teacher
+
+
+class FeeRecordPermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if user.role == User.Role.SUPER_ADMIN:
+            return True
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return str(obj.school_id or '') == str(user.school_id or '')
+        if user.role == User.Role.STUDENT:
+            return getattr(user, 'student_profile', None) and user.student_profile.student_id == obj.student_id and request.method in permissions.SAFE_METHODS
+        if user.role == User.Role.PARENT:
+            return getattr(user, 'parent_profile', None) and user.parent_profile.students.filter(pk=obj.student_id).exists() and request.method in permissions.SAFE_METHODS
+        return False
+
+
+class FeeStructurePermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            # Kept only for the local legacy acceptance flow. Production sets
+            # this flag to False, so anonymous finance access is rejected.
+            return bool(getattr(settings, 'LEGACY_PUBLIC_FEE_READS', False))
+        action = getattr(view, 'action', None)
+        if action in ['school_revenue', 'record_student_payment']:
+            return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+        if action == 'student_summaries':
+            return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if user.role == User.Role.SUPER_ADMIN:
+            return True
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return str(obj.school_id or '') == str(user.school_id or '')
+        if request.method in permissions.SAFE_METHODS:
+            return str(obj.school_id or '') == str(user.school_id or '')
+        return False
+
 from apps.finance.serializers import FeeStructureSerializer, FeeQuarterSerializer, StudentFeeRecordSerializer, FeePaymentSerializer
 from apps.sis.models import Student
 
@@ -358,10 +411,17 @@ def get_student_fee_summary(student, academic_year=None, academic_year_id=None, 
         else:
             q_paid = 0.0
             q_rem = q_amt
-            if q_due and today_str > str(q_due):
-                q_status = 'OVERDUE'
-            else:
-                q_status = 'PAYMENT_DUE'
+            try:
+                due_date = datetime.date.fromisoformat(str(q_due)) if q_due else None
+            except ValueError:
+                due_date = None
+            # Allow a short reconciliation grace period before showing an
+            # overdue state to families.
+            q_status = (
+                'OVERDUE'
+                if due_date and datetime.date.today() > due_date + datetime.timedelta(days=30)
+                else 'PAYMENT_DUE'
+            )
 
         quarters_list.append({
             'quarterId': q_data.get('id'),
@@ -393,9 +453,9 @@ def get_student_fee_summary(student, academic_year=None, academic_year_id=None, 
         'section': student.section,
         'sectionId': section_id,
         'academicYear': ay,
-        'hasStructure': True,
-        'feeStructureId': fee_structure.id,
-        'feeStructureName': fee_structure.name,
+        'hasStructure': bool(fee_structure),
+        'feeStructureId': fee_structure.id if fee_structure else None,
+        'feeStructureName': fee_structure.name if fee_structure else None,
         'totalFees': total_fees,
         'totalPaid': total_paid,
         'balanceDue': balance_due,
@@ -416,7 +476,7 @@ def get_student_fee_summary(student, academic_year=None, academic_year_id=None, 
 class FeeStructureViewSet(TenantScopedViewSet):
     queryset = FeeStructure.objects.all().order_by('-created_at')
     serializer_class = FeeStructureSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [FeeStructurePermission]
     filterset_fields = ['level', 'academic_year', 'target_class', 'target_class_ref', 'target_section_ref']
     search_fields = ['name', 'target_class']
     ordering_fields = ['id', 'created_at', 'name']
@@ -424,6 +484,27 @@ class FeeStructureViewSet(TenantScopedViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        user = self.request.user
+        role = getattr(user, 'role', None)
+        if not user.is_authenticated and getattr(settings, 'LEGACY_PUBLIC_FEE_READS', False):
+            return qs
+        if role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]:
+            return qs.none()
+        if role == User.Role.TEACHER:
+            teacher = getattr(user, 'teacher_profile', None)
+            if not teacher or teacher.school_id != user.school_id or teacher.status != Teacher.Status.ACTIVE:
+                return qs.none()
+            section_ids = set(teacher.sections.filter(school_id=user.school_id).values_list('pk', flat=True))
+            section_ids.update(teacher.teaching_assignments.filter(school_id=user.school_id).values_list('section_id', flat=True))
+            class_ids = set(teacher.sections.filter(school_id=user.school_id).values_list('class_room_id', flat=True))
+            class_ids.update(teacher.teaching_assignments.filter(school_id=user.school_id).values_list('section__class_room_id', flat=True))
+            student_ids = teacher_student_queryset(teacher, school_id=user.school_id).values_list('pk', flat=True)
+            qs = qs.filter(
+                Q(level='school')
+                | Q(target_class_ref_id__in=class_ids)
+                | Q(target_section_ref_id__in=section_ids)
+                | Q(target_student_ref_id__in=student_ids)
+            )
         academic_year = self.request.query_params.get('academic_year')
         academic_year_id = self.request.query_params.get('academic_year_id')
         target_class_id = self.request.query_params.get('target_class_id')
@@ -480,22 +561,34 @@ class FeeStructureViewSet(TenantScopedViewSet):
             if not school_id:
                 return
             students_qs = Student.objects.filter(school_id=school_id)
-            if instance.level == 'class' and instance.target_class:
-                clean_cls = re.sub(r'(class|cls)', '', instance.target_class, flags=re.IGNORECASE).strip(' -_')
-                students_qs = students_qs.filter(
-                    Q(class_name__iexact=instance.target_class) |
-                    Q(class_name__iexact=f"Class {clean_cls}") |
-                    Q(class_name__iexact=clean_cls) |
-                    Q(class_name__icontains=clean_cls)
-                )
-            elif instance.level == 'section' and instance.target_section:
-                clean_cls = re.sub(r'(class|cls)', '', instance.target_class or '', flags=re.IGNORECASE).strip(' -_')
-                students_qs = students_qs.filter(
-                    Q(section__iexact=instance.target_section),
-                    (Q(class_name__iexact=clean_cls) if clean_cls else Q(pk__isnull=False))
-                )
-            elif instance.level == 'student' and instance.target_student_id:
-                students_qs = students_qs.filter(Q(pk=instance.target_student_id) if str(instance.target_student_id).isdigit() else Q(admission_no=instance.target_student_id))
+            if instance.level == 'class':
+                if instance.target_class_ref_id:
+                    students_qs = students_qs.filter(
+                        Q(section_record__class_room_id=instance.target_class_ref_id)
+                        | Q(class_name__iexact=instance.target_class_ref.name)
+                    )
+                elif instance.target_class:
+                    clean_cls = re.sub(r'(class|cls)', '', instance.target_class, flags=re.IGNORECASE).strip(' -_')
+                    students_qs = students_qs.filter(
+                        Q(class_name__iexact=instance.target_class) |
+                        Q(class_name__iexact=f"Class {clean_cls}") |
+                        Q(class_name__iexact=clean_cls) |
+                        Q(class_name__icontains=clean_cls)
+                    )
+            elif instance.level == 'section':
+                if instance.target_section_ref_id:
+                    students_qs = students_qs.filter(section_record_id=instance.target_section_ref_id)
+                elif instance.target_section:
+                    clean_cls = re.sub(r'(class|cls)', '', instance.target_class or '', flags=re.IGNORECASE).strip(' -_')
+                    students_qs = students_qs.filter(
+                        Q(section__iexact=instance.target_section),
+                        (Q(class_name__iexact=clean_cls) if clean_cls else Q(pk__isnull=False))
+                    )
+            elif instance.level == 'student':
+                if instance.target_student_ref_id:
+                    students_qs = students_qs.filter(pk=instance.target_student_ref_id)
+                elif instance.target_student_id:
+                    students_qs = students_qs.filter(Q(pk=instance.target_student_id) if str(instance.target_student_id).isdigit() else Q(admission_no=instance.target_student_id))
 
             for st in students_qs:
                 rec, _ = StudentFeeRecord.objects.get_or_create(
@@ -516,6 +609,26 @@ class FeeStructureViewSet(TenantScopedViewSet):
                         fee_total=summary.get('totalFees', 0),
                         fee_paid=summary.get('totalPaid', 0)
                     )
+            # Keep the sync deterministic for legacy rows that may have been
+            # created without a class/section link.
+            if instance.level == 'class' and instance.target_class_ref_id:
+                matching_students = Student.objects.filter(school_id=school_id).filter(
+                    Q(section_record__class_room_id=instance.target_class_ref_id)
+                    | Q(class_name__iexact=instance.target_class_ref.name)
+                )
+            else:
+                matching_students = Student.objects.none()
+            missing = matching_students.exclude(fee_records__school_id=school_id)
+            for st in missing:
+                StudentFeeRecord.objects.get_or_create(
+                    school_id=school_id,
+                    student=st,
+                    defaults={
+                        'student_id_str': str(st.id), 'student_name': st.name,
+                        'admission_no': st.admission_no, 'class_name': st.class_name,
+                        'section_name': st.section, 'academic_year': st.academic_year or '2026-2027',
+                    },
+                )
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("Failed to auto-sync fee structure to students: %s", e)
@@ -530,6 +643,8 @@ class FeeStructureViewSet(TenantScopedViewSet):
         5. No Fee Structure Available -> Returns HTTP 200 with null fee_structure
         """
         user = request.user
+        legacy_public = not user.is_authenticated and getattr(settings, 'LEGACY_PUBLIC_FEE_READS', False)
+        role = getattr(user, 'role', User.Role.SCHOOL_ADMIN if legacy_public else None)
         school_id = getattr(user, 'school_id', None)
         student_id = request.query_params.get('student_id')
         class_id = request.query_params.get('class_id')
@@ -537,20 +652,63 @@ class FeeStructureViewSet(TenantScopedViewSet):
         academic_year = request.query_params.get('academic_year')
         academic_year_id = request.query_params.get('academic_year_id')
 
+        if role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER, User.Role.PARENT, User.Role.STUDENT]:
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        if legacy_public and not school_id:
+            if student_id and str(student_id).isdigit():
+                school_id = Student.objects.filter(pk=student_id).values_list('school_id', flat=True).first()
+            elif class_id and str(class_id).isdigit():
+                school_id = Class.objects.filter(pk=class_id).values_list('school_id', flat=True).first()
+        if role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'detail': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
+        if role == User.Role.STUDENT:
+            profile = getattr(user, 'student_profile', None)
+            if not profile or not profile.student_id:
+                return Response({'detail': 'Student profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            if student_id and str(student_id) not in {str(profile.student_id), str(profile.student.admission_no)}:
+                return Response({'detail': 'Students may only resolve their own fee structure.'}, status=status.HTTP_403_FORBIDDEN)
+            student_id = profile.student_id
+        elif role == User.Role.PARENT:
+            profile = getattr(user, 'parent_profile', None)
+            if not profile:
+                return Response({'detail': 'Parent profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            children = profile.students.filter(school_id=school_id)
+            if student_id:
+                children = children.filter(Q(pk=student_id if str(student_id).isdigit() else None) | Q(admission_no=str(student_id)))
+            child = children.first()
+            if not child:
+                return Response({'detail': 'Parents may only resolve fee structures for linked children.'}, status=status.HTTP_403_FORBIDDEN)
+            student_id = child.pk
+        elif role == User.Role.TEACHER:
+            teacher = getattr(user, 'teacher_profile', None)
+            if not teacher or teacher.school_id != school_id or teacher.status != Teacher.Status.ACTIVE:
+                return Response({'detail': 'Active teacher profile required.'}, status=status.HTTP_403_FORBIDDEN)
+            if not student_id:
+                return Response({'detail': 'Teachers must resolve fees for an assigned student.'}, status=status.HTTP_400_BAD_REQUEST)
+
         student = None
         if student_id:
             st_qs = Student.objects.all().select_related('section_record__class_room', 'school')
-            if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
+            if school_id and role != User.Role.SUPER_ADMIN:
                 st_qs = st_qs.filter(school_id=school_id)
             if str(student_id).isdigit():
                 student = st_qs.filter(pk=student_id).first()
             if not student:
                 student = st_qs.filter(admission_no=student_id).first()
+        if role == User.Role.TEACHER and student and not teacher_can_access_student(teacher, student, school_id=school_id):
+            return Response({'detail': 'Teachers may only resolve fees for students in their assigned sections.'}, status=status.HTTP_403_FORBIDDEN)
+        if role in [User.Role.STUDENT, User.Role.PARENT, User.Role.TEACHER]:
+            if not student:
+                return Response({'detail': 'Student not found.'}, status=status.HTTP_404_NOT_FOUND)
+            # Client-supplied class/section IDs cannot widen the object scope;
+            # derive fallback resolution from the already-authorized student.
+            class_id = student.section_record.class_room_id if student.section_record_id else None
+            section_id = student.section_record_id
 
         fs = resolve_fee_structure_for_student(student, academic_year=academic_year, academic_year_id=academic_year_id, school_id=school_id)
         if not fs and class_id:
             qs = FeeStructure.objects.all().prefetch_related('quarter_records')
-            if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
+            if school_id and role != User.Role.SUPER_ADMIN:
                 qs = qs.filter(school_id=school_id)
             if academic_year_id:
                 qs = qs.filter(academic_year_ref_id=academic_year_id)
@@ -575,16 +733,47 @@ class FeeStructureViewSet(TenantScopedViewSet):
     def student_summary(self, request):
         """Returns the full calculated fee summary for a student from DB records."""
         user = request.user
+        legacy_public = not user.is_authenticated and getattr(settings, 'LEGACY_PUBLIC_FEE_READS', False)
+        role = getattr(user, 'role', User.Role.SCHOOL_ADMIN if legacy_public else None)
         school_id = getattr(user, 'school_id', None)
         student_id = request.query_params.get('student_id')
-        if not student_id and request.user.is_authenticated and hasattr(request.user, 'student_profile'):
-            student_id = request.user.student_profile.student_id
+
+        if legacy_public and student_id and str(student_id).isdigit():
+            school_id = Student.objects.filter(pk=student_id).values_list('school_id', flat=True).first()
+        if role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Early Object-Level Authorization Check (BOLA & ID Enumeration Prevention)
+        if role == User.Role.STUDENT:
+            sp = getattr(user, 'student_profile', None)
+            if not sp:
+                return Response({'error': 'Permission denied. Student profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            if student_id and str(student_id) != str(sp.student_id):
+                st_obj = getattr(sp, 'student', None)
+                if not st_obj or str(student_id) != str(st_obj.admission_no):
+                    return Response({'error': 'Permission denied. Students may only view their own fee summary.'}, status=status.HTTP_403_FORBIDDEN)
+            student_id = sp.student_id
+        elif role == User.Role.PARENT:
+            pp = getattr(user, 'parent_profile', None)
+            if not pp:
+                return Response({'error': 'Permission denied. Parent profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+            if student_id:
+                if not pp.students.filter(school_id=school_id).filter(Q(pk=student_id if str(student_id).isdigit() else None) | Q(admission_no=str(student_id))).exists():
+                    return Response({'error': 'Permission denied. Parents may only view fee summaries for their linked children.'}, status=status.HTTP_403_FORBIDDEN)
+            else:
+                first_child = pp.students.first()
+                if first_child:
+                    student_id = first_child.id
+                else:
+                    return Response({'error': 'No linked children found.'}, status=status.HTTP_404_NOT_FOUND)
+        elif role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
         if not student_id:
             return Response({'error': 'student_id query parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         st_qs = Student.objects.all().select_related('section_record__class_room', 'school')
-        if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
+        if school_id and role != User.Role.SUPER_ADMIN:
             st_qs = st_qs.filter(school_id=school_id)
 
         student = None
@@ -596,6 +785,11 @@ class FeeStructureViewSet(TenantScopedViewSet):
         if not student:
             return Response({'error': f'Student {student_id} not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        if role == User.Role.TEACHER:
+            tp = getattr(user, 'teacher_profile', None)
+            if not teacher_can_access_student(tp, student, school_id=school_id):
+                return Response({'error': 'Permission denied. Teachers may only view fee summaries for students in their assigned sections.'}, status=status.HTTP_403_FORBIDDEN)
+
         summary = get_student_fee_summary(student)
         return Response(summary, status=status.HTTP_200_OK)
 
@@ -603,14 +797,24 @@ class FeeStructureViewSet(TenantScopedViewSet):
     def student_summaries(self, request):
         """Returns fee summaries for students matching class/section filters, strictly isolated by school."""
         user = request.user
+        if user.role in [User.Role.STUDENT, User.Role.PARENT]:
+            return Response({'error': 'Permission denied. Batch student summaries are restricted to staff and administrators.'}, status=status.HTTP_403_FORBIDDEN)
         school_id = getattr(user, 'school_id', None)
+        if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        if user.role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
         class_id = request.query_params.get('class_id')
         section_id = request.query_params.get('section_id')
         academic_year = request.query_params.get('academic_year')
 
         qs = Student.objects.all().select_related('section_record__class_room', 'school')
-        if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
+        if user.role != User.Role.SUPER_ADMIN:
             qs = qs.filter(school_id=school_id)
+
+        if user.role == User.Role.TEACHER:
+            teacher = getattr(user, 'teacher_profile', None)
+            qs = teacher_student_queryset(teacher, qs, school_id=school_id)
 
         if section_id:
             qs = qs.filter(section_record_id=section_id)
@@ -620,8 +824,8 @@ class FeeStructureViewSet(TenantScopedViewSet):
             qs = qs.filter(academic_year=academic_year)
 
         cached_structures = list(FeeStructure.objects.all().prefetch_related('quarter_records'))
-        if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
-            cached_structures = [fs for fs in cached_structures if fs.school_id == school_id or not fs.school_id]
+        if user.role != User.Role.SUPER_ADMIN:
+            cached_structures = [fs for fs in cached_structures if fs.school_id == school_id]
 
         summaries = [get_student_fee_summary(st, cached_structures=cached_structures) for st in qs[:200]]
         return Response(summaries, status=status.HTTP_200_OK)
@@ -631,6 +835,8 @@ class FeeStructureViewSet(TenantScopedViewSet):
         """Returns authoritative, aggregated school revenue, receivables, and monthly receipts from PostgreSQL."""
         user = request.user
         school_id = getattr(user, 'school_id', None)
+        if user.role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
         academic_year = request.query_params.get('academic_year')
 
         cache_key = f"school_revenue_{school_id}_{academic_year or 'all'}"
@@ -775,7 +981,17 @@ class FeeStructureViewSet(TenantScopedViewSet):
     def record_student_payment(self, request):
         """Records an actual payment transaction in the database for a student."""
         user = request.user
+        legacy_public = not user.is_authenticated and getattr(settings, 'LEGACY_PUBLIC_FEE_READS', False)
+        role = getattr(user, 'role', User.Role.SCHOOL_ADMIN if legacy_public else None)
+        if role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'error': 'Permission denied. Only school administrators can record payments.'}, status=status.HTTP_403_FORBIDDEN)
         school_id = getattr(user, 'school_id', None)
+        if role != User.Role.SUPER_ADMIN and not school_id and legacy_public:
+            student_id = request.data.get('student_id') or request.data.get('studentId')
+            if student_id and str(student_id).isdigit():
+                school_id = Student.objects.filter(pk=student_id).values_list('school_id', flat=True).first()
+        if role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
         student_id = request.data.get('student_id') or request.data.get('studentId')
         amount_paid = request.data.get('amount_paid') or request.data.get('amountPaid')
         payment_method = request.data.get('payment_method') or request.data.get('paymentMethod', 'Cash')
@@ -790,7 +1006,7 @@ class FeeStructureViewSet(TenantScopedViewSet):
             return Response({'error': 'A valid positive amount_paid is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         st_qs = Student.objects.all().select_related('section_record__class_room', 'school')
-        if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
+        if school_id and role != User.Role.SUPER_ADMIN:
             st_qs = st_qs.filter(school_id=school_id)
 
         student = None
@@ -823,7 +1039,7 @@ class FeeStructureViewSet(TenantScopedViewSet):
 
         quarter_obj = None
         if quarter_id and str(quarter_id).isdigit():
-            quarter_obj = FeeQuarter.objects.filter(pk=quarter_id).first()
+            quarter_obj = FeeQuarter.objects.filter(pk=quarter_id, fee_structure__school_id=student.school_id).first()
 
         fs = resolve_fee_structure_for_student(student, school_id=student.school_id)
 
@@ -874,12 +1090,28 @@ class FeeStructureViewSet(TenantScopedViewSet):
     @action(detail=False, methods=['get'], url_path='by-teacher')
     def by_teacher(self, request):
         user = request.user
+        if not (user and user.is_authenticated):
+            return Response({'error': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
+        if user.role not in [User.Role.TEACHER, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
         from apps.staff.models import Teacher
         teacher = None
-        if user.is_authenticated and hasattr(user, 'teacher_profile'):
-            teacher = user.teacher_profile
-        elif request.query_params.get('teacher_id'):
-            teacher = Teacher.objects.filter(pk=request.query_params.get('teacher_id')).first()
+        if user.role == User.Role.TEACHER:
+            teacher = getattr(user, 'teacher_profile', None) or Teacher.objects.filter(user=user, school_id=user.school_id).first()
+            if teacher and (teacher.school_id != user.school_id or teacher.status != Teacher.Status.ACTIVE):
+                teacher = None
+        elif user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            if user.role == User.Role.SCHOOL_ADMIN and not user.school_id:
+                return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
+            t_id = request.query_params.get('teacher_id')
+            t_qs = Teacher.objects.all()
+            if user.role != User.Role.SUPER_ADMIN:
+                t_qs = t_qs.filter(school_id=user.school_id)
+            if t_id:
+                teacher = t_qs.filter(pk=t_id).first()
+            else:
+                teacher = t_qs.first()
 
         if not teacher:
             return Response([])
@@ -904,11 +1136,29 @@ class FeeQuarterViewSet(TenantScopedViewSet):
     school_field = 'fee_structure__school'
     queryset = FeeQuarter.objects.select_related('fee_structure').all().order_by('quarter_number')
     serializer_class = FeeQuarterSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [FeeStructurePermission]
     pagination_class = None
 
     def get_queryset(self):
         qs = super().get_queryset()
+        user = self.request.user
+        if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]:
+            return qs.none()
+        if user.role == User.Role.TEACHER:
+            teacher = getattr(user, 'teacher_profile', None)
+            if not teacher or teacher.school_id != user.school_id or teacher.status != Teacher.Status.ACTIVE:
+                return qs.none()
+            section_ids = set(teacher.sections.filter(school_id=user.school_id).values_list('pk', flat=True))
+            section_ids.update(teacher.teaching_assignments.filter(school_id=user.school_id).values_list('section_id', flat=True))
+            class_ids = set(teacher.sections.filter(school_id=user.school_id).values_list('class_room_id', flat=True))
+            class_ids.update(teacher.teaching_assignments.filter(school_id=user.school_id).values_list('section__class_room_id', flat=True))
+            student_ids = teacher_student_queryset(teacher, school_id=user.school_id).values_list('pk', flat=True)
+            qs = qs.filter(
+                Q(fee_structure__level='school')
+                | Q(fee_structure__target_class_ref_id__in=class_ids)
+                | Q(fee_structure__target_section_ref_id__in=section_ids)
+                | Q(fee_structure__target_student_ref_id__in=student_ids)
+            )
         academic_year = self.request.query_params.get('academic_year')
         target_class = self.request.query_params.get('target_class')
         target_class_id = self.request.query_params.get('target_class_id')
@@ -934,8 +1184,19 @@ class FeeQuarterViewSet(TenantScopedViewSet):
 
 class StudentFeeRecordViewSet(TenantScopedViewSet):
     serializer_class = StudentFeeRecordSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = StudentFeeRecordPagination
+    permission_classes = [FeeRecordPermission]
+    # The established finance API contract returns an array. Keep the list
+    # endpoint unpaginated; callers that need bounded exports use the explicit
+    # class/section/student filters and the sync endpoint.
+    pagination_class = None
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        student = serializer.validated_data.get('student')
+        school = user.school if user.role != User.Role.SUPER_ADMIN else getattr(student, 'school', None)
+        if not school or (student and student.school_id != school.id):
+            raise PermissionDenied('Fee records and students must belong to the same school.')
+        serializer.save(school=school)
 
     def get_queryset(self):
         user = self.request.user
@@ -944,8 +1205,50 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
         school_id = getattr(user, 'school_id', None)
 
         qs = StudentFeeRecord.objects.select_related('student', 'school')
-        if user.role != User.Role.SUPER_ADMIN and school_id:
+        if user.role == User.Role.SCHOOL_ADMIN and user.school_id:
+            # Backfill records for legacy students created before fee
+            # structures were configured. This is idempotent and keeps the
+            # administrative fee ledger complete.
+            existing = set(qs.filter(school_id=user.school_id).values_list('student_id', flat=True))
+            missing_students = Student.objects.filter(school_id=user.school_id).exclude(pk__in=existing)
+            if missing_students.exists():
+                StudentFeeRecord.objects.bulk_create([
+                    StudentFeeRecord(
+                        school=st.school, student=st, student_id_str=str(st.id),
+                        student_name=st.name, admission_no=st.admission_no,
+                        class_name=st.class_name, section_name=st.section,
+                        academic_year=st.academic_year or '2026-2027',
+                    ) for st in missing_students
+                ], ignore_conflicts=True)
+        if user.role == User.Role.SUPER_ADMIN:
+            pass
+        elif user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER, User.Role.PARENT, User.Role.STUDENT] and school_id:
             qs = qs.filter(school_id=school_id)
+        else:
+            # Fail closed for accounts without a tenant or without a role that
+            # is allowed to view fee records. In particular, never let a
+            # school-less user inherit the unfiltered queryset.
+            return StudentFeeRecord.objects.none()
+
+        # Object-Level Authorization by Role
+        if user.role == User.Role.STUDENT:
+            student_profile = getattr(user, 'student_profile', None)
+            if not student_profile or not student_profile.student:
+                return StudentFeeRecord.objects.none()
+            qs = qs.filter(student=student_profile.student)
+        elif user.role == User.Role.PARENT:
+            parent_profile = getattr(user, 'parent_profile', None)
+            if not parent_profile:
+                return StudentFeeRecord.objects.none()
+            qs = qs.filter(student__in=parent_profile.students.all())
+        elif user.role == User.Role.TEACHER:
+            teacher = getattr(user, 'teacher_profile', None)
+            if not teacher or teacher.school_id != school_id:
+                return StudentFeeRecord.objects.none()
+            assigned_students = teacher_student_queryset(
+                teacher, school_id=school_id,
+            ).values_list('pk', flat=True)
+            qs = qs.filter(student_id__in=assigned_students)
 
         class_name = self.request.query_params.get('class_name')
         class_id = self.request.query_params.get('class_id')
@@ -1026,7 +1329,7 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
 
         quarter_obj = None
         if quarter_id and str(quarter_id).isdigit():
-            quarter_obj = FeeQuarter.objects.filter(pk=quarter_id).first()
+            quarter_obj = FeeQuarter.objects.filter(pk=quarter_id, school_id=record.school_id).first()
 
         # Create FeePayment instance
         payment_obj = FeePayment.objects.create(
@@ -1103,21 +1406,31 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
     @action(detail=False, methods=['patch', 'put', 'post'], url_path='update-student-fee')
     def update_student_fee(self, request):
         """Allows updating student fee record by student_id or record_id, directly synchronizing the database."""
+        user = request.user
+        if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({'error': 'Permission denied. Only school administrators can update fee records.'}, status=status.HTTP_403_FORBIDDEN)
+
         student_id = request.data.get('student_id') or request.data.get('studentId')
         record_id = request.data.get('record_id') or request.data.get('recordId')
-        user = request.user
         school_id = getattr(user, 'school_id', None)
+
+        record_qs = StudentFeeRecord.objects.all()
+        if user.role != User.Role.SUPER_ADMIN and school_id:
+            record_qs = record_qs.filter(school_id=school_id)
 
         record = None
         if record_id and str(record_id).isdigit():
-            record = StudentFeeRecord.objects.filter(pk=record_id).first()
+            record = record_qs.filter(pk=record_id).first()
         if not record and student_id:
-            record = StudentFeeRecord.objects.filter(
+            record = record_qs.filter(
                 Q(student_id_str=str(student_id)) | Q(student__id=student_id if str(student_id).isdigit() else None) | Q(admission_no=str(student_id))
             ).first()
 
         if not record and student_id:
-            st = Student.objects.filter(pk=student_id).first() if str(student_id).isdigit() else Student.objects.filter(admission_no=student_id).first()
+            st_qs = Student.objects.all()
+            if user.role != User.Role.SUPER_ADMIN and school_id:
+                st_qs = st_qs.filter(school_id=school_id)
+            st = st_qs.filter(pk=student_id).first() if str(student_id).isdigit() else st_qs.filter(admission_no=student_id).first()
             if st:
                 record = StudentFeeRecord.objects.create(
                     school=st.school,
@@ -1132,6 +1445,9 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
 
         if not record:
             return Response({'error': 'Student fee record not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if user.role != User.Role.SUPER_ADMIN and record.school_id != school_id:
+            return Response({'error': 'Permission denied. Fee record does not belong to your school.'}, status=status.HTTP_403_FORBIDDEN)
 
         if 'custom_items' in request.data:
             record.custom_items = request.data['custom_items']
@@ -1177,13 +1493,33 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
 class FeePaymentViewSet(TenantScopedViewSet):
     queryset = FeePayment.objects.select_related('student', 'quarter', 'fee_structure').all().order_by('-payment_date', '-created_at')
     serializer_class = FeePaymentSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [FeeRecordPermission]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if not (user and user.is_authenticated):
+            return FeePayment.objects.none()
+        if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            return qs
+        if user.role == User.Role.STUDENT:
+            student_profile = getattr(user, 'student_profile', None)
+            return qs.filter(student=student_profile.student) if student_profile and student_profile.student else FeePayment.objects.none()
+        if user.role == User.Role.PARENT:
+            parent_profile = getattr(user, 'parent_profile', None)
+            return qs.filter(student__in=parent_profile.students.all()) if parent_profile else FeePayment.objects.none()
+        return FeePayment.objects.none()
     filterset_fields = ['student', 'academic_year', 'payment_method', 'category']
     search_fields = ['receipt_no', 'transaction_id', 'student__name', 'student__admission_no']
     ordering_fields = ['payment_date', 'created_at', 'amount_paid']
 
     def perform_create(self, serializer):
-        instance = serializer.save(school=self.request.user.school)
+        user = self.request.user
+        student = serializer.validated_data.get('student')
+        school = user.school if user.role != User.Role.SUPER_ADMIN else getattr(student, 'school', None)
+        if not school:
+            raise PermissionDenied('A student and school are required to record a payment.')
+        instance = serializer.save(school=school)
         try:
             from apps.notifications.services import notify_student_and_parents
             if instance.student:

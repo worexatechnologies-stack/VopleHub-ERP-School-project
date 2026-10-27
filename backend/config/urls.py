@@ -1,7 +1,11 @@
+import logging
+
 from django.contrib import admin
 from django.http import JsonResponse
 from django.db import connection
 from django.urls import include, path
+
+logger = logging.getLogger(__name__)
 
 
 def health_check(request):
@@ -11,8 +15,9 @@ def health_check(request):
             cursor.execute("SELECT 1")
         db_status = "ok"
         status_code = 200
-    except Exception as exc:
-        db_status = f"error: {str(exc)}"
+    except Exception:
+        logger.exception("Database health check failed")
+        db_status = "unavailable"
         status_code = 503
 
     return JsonResponse({
@@ -24,7 +29,10 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
 from rest_framework.routers import DefaultRouter
 from apps.accounts.views import (
+    CsrfTokenView,
     LoginView,
+    VerifyOtpView,
+    ResendOtpView,
     LogoutView,
     MeView,
     PresenceHeartbeatView,
@@ -38,7 +46,7 @@ from apps.accounts.views import (
     ResetCredentialsView,
     CredentialVaultViewSet,
 )
-from apps.schools.views import SchoolViewSet
+from apps.schools.views import HallTicketSettingsView, SchoolViewSet
 from apps.sis.views import (
     StudentViewSet,
     StudentDocumentCollectionView,
@@ -71,7 +79,9 @@ from apps.chat.views import (
     UnreadCountView,
 )
 from apps.community.views import SchoolEventViewSet, EventRegistrationViewSet, CommunityPostViewSet
+from apps.store.views import StoreProductViewSet, StoreOrderViewSet, razorpay_webhook, store_payment_settings
 from apps.common.views import ExportJobViewSet
+from apps.common.contact_views import ContactInquiryView
 
 class PublicAPIRootRouter(DefaultRouter):
     """Expose the discovery endpoint without exposing protected resources."""
@@ -101,6 +111,8 @@ router.register('fee-payments', FeePaymentViewSet, basename='fee-payment')
 router.register('events', SchoolEventViewSet, basename='event')
 router.register('event-registrations', EventRegistrationViewSet, basename='event-registration')
 router.register('community-posts', CommunityPostViewSet, basename='community-post')
+router.register('store/products', StoreProductViewSet, basename='store-product')
+router.register('store/orders', StoreOrderViewSet, basename='store-order')
 router.register('enrollment-links', EnrollmentLinkViewSet, basename='enrollment-link')
 router.register('enrollment-applications', EnrollmentApplicationViewSet, basename='enrollment-application')
 router.register('credential-vault', CredentialVaultViewSet, basename='credential-vault')
@@ -110,10 +122,16 @@ router.register('exports', ExportJobViewSet, basename='export')
 urlpatterns = [
     path('healthz/', health_check, name='healthz'),
     path('api/health/', health_check, name='health-check'),
-    path('admin/', admin.site.urls),
+    path('django-admin/', admin.site.urls),
     path('api/v1/enrollment/verify/', VerifyEnrollmentLinkView.as_view()),
     path('api/v1/enrollment/submit/', SubmitEnrollmentApplicationView.as_view()),
+    path('api/v1/contact/inquiry/', ContactInquiryView.as_view(), name='public-contact-inquiry'),
+    path('api/v1/auth/csrf/', CsrfTokenView.as_view(), name='auth-csrf'),
     path('api/v1/auth/login/', LoginView.as_view()),
+    path('api/v1/auth/verify-otp/', VerifyOtpView.as_view()),
+    path('api/v1/auth/resend-otp/', ResendOtpView.as_view()),
+    path('api/v1/accounts/verify-otp/', VerifyOtpView.as_view()),
+    path('api/v1/accounts/resend-otp/', ResendOtpView.as_view()),
     path('api/v1/auth/presence/heartbeat/', PresenceHeartbeatView.as_view()),
     path('api/v1/auth/school-admins/', SchoolAdminCreateView.as_view()),
     path('api/v1/auth/school-admins/<int:user_id>/delete/', SchoolAdminDeleteView.as_view()),
@@ -125,6 +143,9 @@ urlpatterns = [
     path('api/v1/auth/refresh/', RefreshView.as_view()),
     path('api/v1/auth/logout/', LogoutView.as_view()),
     path('api/v1/auth/me/', MeView.as_view()),
+    path('api/v1/store/payment-settings/', store_payment_settings, name='store-payment-settings'),
+    path('api/v1/schools/hall-ticket-settings/', HallTicketSettingsView.as_view(), name='hall-ticket-settings'),
+    path('api/v1/store/razorpay/webhook/', razorpay_webhook, name='store-razorpay-webhook'),
     path('api/v1/chat/contacts/', ChatContactsListView.as_view()),
     path('api/v1/chat/conversations/', ConversationListView.as_view()),
     path('api/v1/chat/conversations/start/', StartConversationView.as_view()),

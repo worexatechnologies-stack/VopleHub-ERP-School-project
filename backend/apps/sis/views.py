@@ -4,6 +4,7 @@ import secrets
 from io import BytesIO
 
 from django.db import transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 logger = logging.getLogger(__name__)
 from django.db.models import Prefetch, Count, Avg, Sum, Q
@@ -15,11 +16,36 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from apps.accounts.authentication import CachedJWTAuthentication
+from rest_framework.authentication import SessionAuthentication
 from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema
 from apps.accounts.models import ParentProfile, User, StudentProfile
 from apps.accounts.credential_generator import generate_login_id, generate_password
 from apps.common.tenancy import TenantScopedViewSet
 from apps.common.fast_cache import fast_cache_response, bump_cache_version
+from apps.common.import_queue import CanManageSchoolImports, import_status_key, queue_import_batch
+from apps.common.storage import sanitize_filename
+from apps.common.validators import (
+    detected_content_type,
+    optimize_raster_image,
+    validate_enrollment_document,
+    validate_enrollment_photo,
+)
+
+def invalidate_student_dependent_caches(school_id, academic_year: str = ''):
+    """Invalidate all student, academic, financial, and school directory caches dependent on student roster data."""
+    if not school_id:
+        return
+    bump_cache_version('students', school_id)
+    bump_cache_version('academics', school_id)
+    bump_cache_version('schools')
+    try:
+        from django.core.cache import cache
+        cache.delete(f"school_revenue_{school_id}_all")
+        if academic_year:
+            cache.delete(f"school_revenue_{school_id}_{academic_year}")
+    except Exception:
+        pass
 from .access import teacher_can_access_student, teacher_student_queryset
 from .models import AcademicHistory, Student, StudentDocument, EnrollmentLink, EnrollmentApplication
 from .serializers import (
@@ -203,8 +229,9 @@ class StudentViewSet(TenantScopedViewSet):
 
     def perform_destroy(self, instance):
         school_id = instance.school_id
+        ay = getattr(instance, 'academic_year', '')
         super().perform_destroy(instance)
-        bump_cache_version('students', school_id)
+        invalidate_student_dependent_caches(school_id, ay)
 
     def get_serializer_class(self):
         user = getattr(self.request, 'user', None)
@@ -296,7 +323,7 @@ class StudentViewSet(TenantScopedViewSet):
         }
         if admission_number_adjusted:
             data['admissionNumberAdjusted'] = True
-        bump_cache_version('students', school.id)
+        invalidate_student_dependent_caches(school.id, academic_year)
 
         # Notify student, parent, and school admins
         try:
@@ -326,7 +353,7 @@ class StudentViewSet(TenantScopedViewSet):
 
     def perform_update(self, serializer):
         student = serializer.save()
-        bump_cache_version('students', student.school_id)
+        invalidate_student_dependent_caches(student.school_id, getattr(student, 'academic_year', ''))
         if student.status == Student.Status.TC_ISSUED:
             deactivate_login_if_student_left(student)
 
@@ -638,6 +665,33 @@ class StudentViewSet(TenantScopedViewSet):
 
     @action(
         detail=False,
+        methods=['get'],
+        url_path='bulk-import/status',
+        permission_classes=[CanManageSchoolImports],
+    )
+    def bulk_import_status(self, request):
+        from django.core.cache import cache
+
+        job_id = str(request.query_params.get('jobId') or '').strip()
+        try:
+            batch_number = int(request.query_params.get('batchNumber') or 0)
+        except (TypeError, ValueError):
+            batch_number = 0
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job_id) or not 1 <= batch_number <= 10000:
+            return Response({'detail': 'Valid jobId and batchNumber are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        key = import_status_key(
+            entity='students', school_id=request.user.school_id, user_id=request.user.pk,
+            job_id=job_id, batch_number=batch_number,
+        )
+        queued = cache.get(key)
+        if queued is None:
+            return Response({'detail': 'Import batch not found or its status has expired.'}, status=status.HTTP_404_NOT_FOUND)
+        response = Response({'jobId': job_id, 'batchNumber': batch_number, **queued}, status=status.HTTP_200_OK)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+    @action(
+        detail=False,
         methods=['post'],
         url_path='bulk-import',
         parser_classes=[MultiPartParser, FormParser, JSONParser],
@@ -664,6 +718,7 @@ class StudentViewSet(TenantScopedViewSet):
             normalize_phone_number,
             parse_spreadsheet_bytes,
         )
+        from apps.common.validators import validate_spreadsheet_upload
         from apps.sis.services import generate_temporary_password
         from django.contrib.auth.hashers import MD5PasswordHasher
         from django.core.cache import cache
@@ -692,6 +747,10 @@ class StudentViewSet(TenantScopedViewSet):
                 'detail': 'A school tenant is required to import students.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        queued_response = queue_import_batch(request, entity='students', user=user, school=school)
+        if queued_response is not None:
+            return queued_response
+
         job_id = str(request.data.get('jobId') or request.data.get('job_id') or '').strip()
         try:
             batch_number = int(request.data.get('batchNumber') or request.data.get('batch_number') or 1)
@@ -703,7 +762,7 @@ class StudentViewSet(TenantScopedViewSet):
             total_batches = 1
 
         # Check idempotency cache if job_id is provided
-        cache_key = f"bulk_import_student:{school.id}:{job_id}:{batch_number}" if job_id else None
+        cache_key = f"bulk_import_student:{school.id}:{user.id}:{job_id}:{batch_number}" if job_id else None
         if cache_key:
             cached_result = cache.get(cache_key)
             if cached_result:
@@ -715,6 +774,7 @@ class StudentViewSet(TenantScopedViewSet):
 
         if uploaded_file:
             try:
+                validate_spreadsheet_upload(uploaded_file)
                 file_bytes = uploaded_file.read()
                 grid_rows = parse_spreadsheet_bytes(file_bytes, uploaded_file.name)
                 if not grid_rows:
@@ -758,7 +818,7 @@ class StudentViewSet(TenantScopedViewSet):
                     'jobId': job_id,
                     'batchNumber': batch_number,
                     'errorCategory': 'FILE_PARSE_ERROR',
-                    'detail': f'Failed to process spreadsheet file: {str(exc)}',
+                    'detail': 'Could not process the spreadsheet. Check its format and try again.',
                 }, status=status.HTTP_400_BAD_REQUEST)
         else:
             payload = request.data
@@ -1254,7 +1314,7 @@ class StudentViewSet(TenantScopedViewSet):
                     'batchNumber': batch_number,
                     'totalBatches': total_batches,
                     'errorCategory': 'INTERNAL_SERVER_ERROR',
-                    'detail': f"Failed to execute bulk import on server: {str(exc)}",
+                    'detail': 'Student import failed because of an unexpected server error. Please try again or contact support.',
                     'attemptedRows': len(chunk_students),
                     'createdCount': 0,
                     'skippedCount': len(chunk_students),
@@ -1302,9 +1362,9 @@ class StudentViewSet(TenantScopedViewSet):
 
         # Cache response for idempotency
         if cache_key:
-            cache.set(cache_key, response_data, timeout=86400)
+            cache.set(cache_key, response_data, timeout=3600)
         if total_created:
-            bump_cache_version('students', school.id)
+            invalidate_student_dependent_caches(school.id, default_academic_year)
 
         return Response(response_data, status=status.HTTP_201_CREATED if total_created else status.HTTP_400_BAD_REQUEST)
 
@@ -1441,6 +1501,9 @@ class StudentViewSet(TenantScopedViewSet):
             if orphan_parent_user_ids:
                 User.objects.filter(pk__in=orphan_parent_user_ids).delete()
 
+        if school and school.id:
+            invalidate_student_dependent_caches(school.id)
+
         return Response({
             'success': True,
             'deletedCount': deleted_count,
@@ -1451,6 +1514,7 @@ class StudentViewSet(TenantScopedViewSet):
 
 class StudentDocumentDownloadView(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [CachedJWTAuthentication, SessionAuthentication]
 
     def _get_student_id(self, request, student_id):
         if not student_id or str(student_id).lower() == 'me' or (request.user.role == User.Role.STUDENT and str(student_id) == '0'):
@@ -1478,7 +1542,10 @@ class StudentDocumentDownloadView(viewsets.ViewSet):
             return Response({'detail': 'Super Admins cannot access student documents.'}, status=status.HTTP_403_FORBIDDEN)
         if str(user.school_id or '') != str(student.school_id or ''):
             raise Http404
-        allowed = user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]
+        allowed = user.role == User.Role.SCHOOL_ADMIN
+        # Staff documents contain identity/banking material and are not part of
+        # the teacher classroom read scope. Only the school admin, linked
+        # parent, or the student themself may download them.
         if user.role == User.Role.PARENT:
             allowed = hasattr(user, 'parent_profile') and user.parent_profile.students.filter(pk=student.pk).exists()
         elif user.role == User.Role.STUDENT:
@@ -1594,11 +1661,14 @@ class StudentDocumentCollectionView(APIView):
         student = Student.objects.filter(pk=resolved_student_id, school_id=request.user.school_id).first()
         if not student:
             raise Http404
-        allowed = (request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER]) or (
+        allowed = request.user.role == User.Role.SCHOOL_ADMIN or (
             request.user.role == User.Role.STUDENT and hasattr(request.user, 'student_profile') and request.user.student_profile.student_id == student.pk
         ) or (
             request.user.role == User.Role.PARENT and hasattr(request.user, 'parent_profile') and request.user.parent_profile.students.filter(pk=student.pk).exists()
         )
+        if request.user.role == User.Role.TEACHER:
+            teacher = getattr(request.user, 'teacher_profile', None)
+            allowed = teacher_can_access_student(teacher, student, school_id=request.user.school_id)
         if not allowed:
             return Response({'detail': 'You do not have permission to view documents for this student.'}, status=status.HTTP_403_FORBIDDEN)
         documents = student.documents.defer('file_data').all()
@@ -1771,6 +1841,7 @@ class EnrollmentLinkViewSet(TenantScopedViewSet):
 class VerifyEnrollmentLinkView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'enrollment_apply'
 
     @extend_schema(responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT})
     def get(self, request):
@@ -1820,6 +1891,7 @@ class VerifyEnrollmentLinkView(APIView):
 class SubmitEnrollmentApplicationView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'enrollment_apply'
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(request=OpenApiTypes.OBJECT, responses={201: EnrollmentApplicationSerializer, 400: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT})
@@ -1866,13 +1938,21 @@ class SubmitEnrollmentApplicationView(APIView):
 
         from apps.common.storage import save_file, enrollment_photo_key, enrollment_document_key
 
+        photo_file = request.FILES.get('photo')
+        doc_file = request.FILES.get('document')
+        try:
+            if photo_file:
+                validate_enrollment_photo(photo_file)
+            if doc_file:
+                validate_enrollment_document(doc_file)
+        except DjangoValidationError as exc:
+            return Response({'detail': exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+
         photo_data = None
         photo_key = ''
         photo_content_type = ''
-        if 'photo' in request.FILES:
-            photo_file = request.FILES['photo']
-            photo_bytes = photo_file.read()
-            photo_content_type = photo_file.content_type or 'image/jpeg'
+        if photo_file:
+            photo_bytes, photo_content_type, _ = optimize_raster_image(photo_file)
             photo_key = enrollment_photo_key(link.school_id, app_no)
             save_file(photo_bytes, photo_key)
             photo_data = photo_bytes
@@ -1883,13 +1963,12 @@ class SubmitEnrollmentApplicationView(APIView):
         document_name = ''
         document_content_type = ''
         document_category = str(request.data.get('documentCategory') or request.data.get('document_category') or 'Birth Certificate').strip()
-        if 'document' in request.FILES:
-            doc_file = request.FILES['document']
+        if doc_file:
             doc_bytes = doc_file.read()
             document_size = len(doc_bytes)
-            document_name = doc_file.name
-            document_content_type = doc_file.content_type or 'application/pdf'
-            document_key = enrollment_document_key(link.school_id, app_no, doc_file.name)
+            document_name = sanitize_filename(doc_file.name)[:255]
+            document_content_type = detected_content_type(doc_file)
+            document_key = enrollment_document_key(link.school_id, app_no, document_name)
             save_file(doc_bytes, document_key)
             document_data = doc_bytes
 
@@ -1976,9 +2055,24 @@ class SubmitEnrollmentApplicationView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class EnrollmentApplicationPermission(permissions.BasePermission):
+    """Enrollment PII and lifecycle actions are restricted to administrators."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+            and getattr(view, 'action', None) not in {
+                'create', 'update', 'partial_update', 'destroy',
+            }
+        )
+
+
 class EnrollmentApplicationViewSet(TenantScopedViewSet):
     serializer_class = EnrollmentApplicationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [EnrollmentApplicationPermission]
     queryset = EnrollmentApplication.objects.defer(
         'photo_data', 'document_data'
     ).select_related('school', 'link', 'user', 'approved_by', 'created_student').order_by('-submitted_at')
@@ -2051,7 +2145,10 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
         if app.status == EnrollmentApplication.Status.APPROVED:
             return Response({'detail': 'This application has already been approved.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        school = request.user.school
+        # The application is already tenant-scoped by get_queryset for School
+        # Admins. Use its school as the source of truth so platform admins
+        # cannot accidentally create a school-less student.
+        school = app.school
         target_class = str(request.data.get('className') or request.data.get('class_name') or app.class_name).strip()
         target_section = str(request.data.get('section') or app.section or 'A').strip()
         requested_admission_no = str(request.data.get('admissionNo') or request.data.get('admission_no') or '').strip()

@@ -10,6 +10,7 @@ class School(models.Model):
     primary_color = models.CharField(max_length=7, default='#6366f1')
     secondary_color = models.CharField(max_length=7, default='#10b981')
     theme = models.CharField(max_length=32, default='glass-academy')
+    hall_ticket_settings = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
     is_demo = models.BooleanField(default=False, help_text='Marks sales/staging data that can be safely removed.')
     created_at = models.DateTimeField(auto_now_add=True)

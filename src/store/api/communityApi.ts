@@ -13,6 +13,10 @@ export interface SchoolEventRecord {
   end_date?: string | null;
   registration_deadline?: string | null;
   venue: string;
+  organizer?: string;
+  contact_details?: string;
+  meeting_url?: string;
+  imageUrl?: string | null;
   capacity: number;
   ticket_required: boolean;
   status: EventStatus;
@@ -86,7 +90,7 @@ export const communityApi = baseApi.injectEndpoints({
       providesTags: ['CommunityEvent'],
     }),
 
-    createEvent: build.mutation<SchoolEventRecord, Partial<SchoolEventRecord>>({
+    createEvent: build.mutation<SchoolEventRecord, FormData | Partial<SchoolEventRecord>>({
       query: (body) => ({
         url: '/events/',
         method: 'POST',
@@ -95,7 +99,7 @@ export const communityApi = baseApi.injectEndpoints({
       invalidatesTags: ['CommunityEvent'],
     }),
 
-    updateEvent: build.mutation<SchoolEventRecord, { id: number | string; data: Partial<SchoolEventRecord> }>({
+    updateEvent: build.mutation<SchoolEventRecord, { id: number | string; data: FormData | Partial<SchoolEventRecord> }>({
       query: ({ id, data }) => ({
         url: `/events/${id}/`,
         method: 'PATCH',

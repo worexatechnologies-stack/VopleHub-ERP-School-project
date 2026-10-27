@@ -4,12 +4,13 @@ import {
   GraduationCap, LayoutDashboard, LockKeyhole, Mail,
   MessageSquare, ShieldCheck, BarChart3, CalendarCheck,
   School, Users, Bell, TrendingUp,
-  Clock, Activity, AlertCircle, RefreshCw
+  Clock, Activity, AlertCircle, RefreshCw, ArrowLeft, Key
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { Link } from 'react-router';
 import { AuthUser } from '../utils/auth';
 import { BrandSettings, UserRole } from '../types';
-import { useLoginMutation } from '../store/api/authApi';
+import { useLoginMutation, useVerifyOtpMutation, useResendOtpMutation, useGetCsrfTokenQuery } from '../store/api/authApi';
 import { persistAuthSession } from '../store/api/baseApi';
 import WorexaLogo from './WorexaLogo';
 import volpeLogo from '../assets/volpe-logo.png';
@@ -18,12 +19,13 @@ import './LoginScreen.css';
 interface LoginScreenProps {
   onLogin: (user: AuthUser, token: string) => void;
   brandSettings?: BrandSettings;
+  portalRole?: 'Super Admin' | 'School Admin';
   onPublicAccess?: () => void;
 }
 
 type PortalRole = 'Super Admin' | 'School Admin' | 'Teacher' | 'Parent' | 'Student';
 
-const roles: PortalRole[] = ['Super Admin', 'School Admin', 'Teacher', 'Parent', 'Student'];
+const generalLoginRoles: PortalRole[] = ['Teacher', 'Parent', 'Student'];
 
 const roleNames: Record<string, string> = {
   'Super Admin': 'Super Admin',
@@ -377,12 +379,16 @@ const searchPlaceholders = [
   'Explore Class 10 exam schedules…',
 ];
 
-export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: LoginScreenProps) {
-  const [activeRole, setActiveRole] = useState<PortalRole>('School Admin');
+export default function LoginScreen({ onLogin, brandSettings, portalRole, onPublicAccess }: LoginScreenProps) {
+  // Bootstrap CSRF before login and clear any auth cookies left by the older
+  // browser-JWT flow. Browser authentication now uses only Django sessionid.
+  useGetCsrfTokenQuery();
+  const [activeRole, setActiveRole] = useState<PortalRole>(portalRole || 'Teacher');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [suggestedRole, setSuggestedRole] = useState<PortalRole | null>(null);
   const [rememberMe, setRememberMe] = useState(true);
   const [capsLockActive, setCapsLockActive] = useState(false);
 
@@ -393,7 +399,172 @@ export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: 
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
 
   const [loginMutation, { isLoading }] = useLoginMutation();
+  const [verifyOtpMutation, { isLoading: isVerifying }] = useVerifyOtpMutation();
+  const [resendOtpMutation, { isLoading: isResending }] = useResendOtpMutation();
+
+  // Multi-Factor Authentication (OTP) State
+  interface MfaSessionState {
+    mfaToken: string;
+    email: string;
+    maskedEmail?: string;
+    maskedPhone?: string;
+    devOtp?: string;
+    role?: string;
+  }
+
+  const [mfaSession, setMfaSession] = useState<MfaSessionState | null>(null);
+  const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [resendCooldown, setResendCooldown] = useState<number>(0);
+  const otpInputRefs = React.useRef<(HTMLInputElement | null)[]>([]);
+
   const schoolName = brandSettings?.schoolName || 'Volpehub Education';
+
+  // Resend cooldown countdown
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendCooldown]);
+
+  // Focus first OTP input when MFA challenge begins
+  useEffect(() => {
+    if (mfaSession) {
+      setTimeout(() => {
+        otpInputRefs.current[0]?.focus();
+      }, 100);
+    }
+  }, [mfaSession]);
+
+  const handleOtpDigitChange = (index: number, val: string) => {
+    const char = val.slice(-1);
+    if (char && !/^\d$/.test(char)) return;
+
+    const nextDigits = [...otpDigits];
+    nextDigits[index] = char;
+    setOtpDigits(nextDigits);
+    setErrorMessage('');
+
+    if (char && index < 5) {
+      otpInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !otpDigits[index] && index > 0) {
+      otpInputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowLeft' && index > 0) {
+      otpInputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowRight' && index < 5) {
+      otpInputRefs.current[index + 1]?.focus();
+    } else if (e.key === 'Enter') {
+      const fullCode = otpDigits.join('');
+      if (fullCode.length === 6) {
+        handleVerifyOtp();
+      }
+    }
+  };
+
+  const handleOtpPaste = (e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData('text').trim();
+    const digits = pasted.replace(/\D/g, '').slice(0, 6).split('');
+    if (digits.length > 0) {
+      const nextDigits = ['', '', '', '', '', ''];
+      digits.forEach((d, i) => {
+        nextDigits[i] = d;
+      });
+      setOtpDigits(nextDigits);
+      const focusIndex = Math.min(digits.length, 5);
+      otpInputRefs.current[focusIndex]?.focus();
+    }
+  };
+
+  const handleFillDevOtp = () => {
+    const code = mfaSession?.devOtp;
+    if (!code) return;
+    const chars = code.split('').slice(0, 6);
+    const nextDigits = ['', '', '', '', '', ''];
+    chars.forEach((c, i) => {
+      nextDigits[i] = c;
+    });
+    setOtpDigits(nextDigits);
+    setErrorMessage('');
+    otpInputRefs.current[5]?.focus();
+  };
+
+  const handleCancelMfa = () => {
+    setMfaSession(null);
+    setOtpDigits(['', '', '', '', '', '']);
+    setErrorMessage('');
+  };
+
+  const handleVerifyOtp = async () => {
+    if (!mfaSession) return;
+    const fullOtp = otpDigits.join('');
+    if (fullOtp.length < 6) {
+      setErrorMessage('Please enter all 6 digits of the verification code.');
+      return;
+    }
+    setErrorMessage('');
+    try {
+      const session = await verifyOtpMutation({
+        mfa_token: mfaSession.mfaToken,
+        otp: fullOtp,
+      }).unwrap();
+
+      if (!session.user) {
+        throw new Error('Verification failed. Invalid session returned.');
+      }
+
+      const returnedRole = session.user.role;
+      const normalizedReturned = roleToKey[returnedRole] || returnedRole;
+      const displayRole = roleDisplay[normalizedReturned] || returnedRole;
+
+      const canonicalRequestedRole = roleToKey[activeRole] || activeRole;
+      if (normalizedReturned !== canonicalRequestedRole) {
+        setErrorMessage(portalRole
+          ? `These credentials belong to a ${displayRole} account. Please use the ${displayRole} login.`
+          : `These credentials belong to a ${displayRole} account. Please select the ${displayRole} portal tab to sign in.`);
+        return;
+      }
+
+      persistAuthSession(session.access || '', session.user, session.refresh, session.sessionId || session.session_id);
+      onLogin(session.user, session.access || '');
+    } catch (error: any) {
+      let msg = 'Invalid or expired verification code. Please try again.';
+      if (error?.data?.detail) {
+        msg = error.data.detail;
+      } else if (error?.data?.message) {
+        msg = error.data.message;
+      } else if (typeof error?.error === 'string') {
+        msg = error.error;
+      }
+      setErrorMessage(msg);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!mfaSession || resendCooldown > 0) return;
+    setErrorMessage('');
+    try {
+      const res = await resendOtpMutation({ mfa_token: mfaSession.mfaToken }).unwrap();
+      setResendCooldown(30);
+      if (res.dev_otp) {
+        setMfaSession((prev) => (prev ? { ...prev, devOtp: res.dev_otp } : null));
+      }
+    } catch (error: any) {
+      let msg = 'Failed to resend verification code. Please wait before retrying.';
+      if (error?.data?.detail) {
+        msg = error.data.detail;
+      }
+      if (error?.data?.cooldown) {
+        setResendCooldown(error.data.cooldown);
+      }
+      setErrorMessage(msg);
+    }
+  };
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -405,8 +576,11 @@ export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: 
   const changeRole = (role: PortalRole) => {
     setActiveRole(role);
     setErrorMessage('');
+    setSuggestedRole(null);
     setEmail('');
     setPassword('');
+    setMfaSession(null);
+    setOtpDigits(['', '', '', '', '', '']);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -439,36 +613,62 @@ export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: 
         role: canonicalRequestedRole,
       }).unwrap();
 
+      // Multi-Factor Authentication Challenge: Non-Superadmin roles enter OTP verification
+      if (session.mfa_required && session.mfa_token) {
+        setMfaSession({
+          mfaToken: session.mfa_token,
+          email: session.email || email,
+          maskedEmail: session.masked_email,
+          maskedPhone: session.masked_phone,
+          devOtp: session.dev_otp,
+          role: session.role || canonicalRequestedRole,
+        });
+        setOtpDigits(['', '', '', '', '', '']);
+        setResendCooldown(30);
+        setPassword('');
+        return;
+      }
+
+      if (!session.user) {
+        throw new Error('Authentication failed. No valid user session returned.');
+      }
+
       const returnedRole = session.user.role;
       const normalizedReturned = roleToKey[returnedRole] || returnedRole;
       const displayRole = roleDisplay[normalizedReturned] || returnedRole;
 
+      // Strict Portal Tab Isolation: Students only in Student portal, Teachers in Teacher portal, Parents in Parent portal, Admins in Admin portal
       if (normalizedReturned !== canonicalRequestedRole) {
-        const isCrossAdmin =
-          ['super_admin', 'school_admin'].includes(normalizedReturned) &&
-          ['super_admin', 'school_admin'].includes(canonicalRequestedRole);
-
-        if (!isCrossAdmin) {
-          const expectedTab = roleNames[displayRole] || displayRole;
-          setErrorMessage(`These credentials belong to a ${displayRole} account. Please select the "${expectedTab}" portal tab to sign in.`);
-          return;
+        setErrorMessage(portalRole
+          ? `These credentials belong to a ${displayRole} account. Please use the ${displayRole} login.`
+          : `These credentials belong to a ${displayRole} account. Please select the ${displayRole} portal tab to sign in.`);
+        if (!portalRole && displayRole in roleNames) {
+          setSuggestedRole(displayRole as PortalRole);
         }
+        return;
       }
 
-      persistAuthSession(session.access, session.user);
-      onLogin(session.user, session.access);
+      persistAuthSession(session.access || '', session.user, session.refresh, session.sessionId || session.session_id);
+      onLogin(session.user, session.access || '');
     } catch (error: any) {
       let msg = 'Unable to sign in. Please verify your credentials and selected role.';
       if (error?.status === 'FETCH_ERROR' || error?.error?.toLowerCase?.().includes('fetch')) {
-        msg = 'Unable to connect to the backend server. Please make sure the server is running on port 8000.';
+        msg = 'We could not connect right now. Please try again in a moment.';
       } else if (error?.data?.detail) {
         msg = error.data.detail;
+        if (!portalRole && error?.data?.user_role) {
+          const uRole = error.data.user_role;
+          const dRole = roleDisplay[uRole];
+          if (dRole && dRole in roleNames) {
+            setSuggestedRole(dRole as PortalRole);
+          }
+        }
       } else if (error?.data?.message) {
         msg = error.data.message;
       } else if (typeof error?.error === 'string') {
         msg = error.error;
       } else if (typeof error?.status === 'number' && error.status >= 500) {
-        msg = 'Unable to connect to the backend server. Please ensure the backend server is running on port 8000.';
+        msg = 'Something went wrong on our side. Please try again or contact support.';
       } else if (error instanceof Error) {
         msg = error.message;
       }
@@ -486,6 +686,10 @@ export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: 
       <div className="ls-ambient-orb orb-3" aria-hidden="true" />
 
       <div className="ls-canvas">
+        <Link to="/" className="ls-back-home" aria-label="Back to home">
+          <ArrowLeft size={16} aria-hidden="true" />
+          <span>Back</span>
+        </Link>
 
         {/* ═══════════ LEFT PANEL: AUTH PORTAL ═══════════ */}
         <div className="ls-left">
@@ -526,158 +730,304 @@ export default function LoginScreen({ onLogin, brandSettings, onPublicAccess }: 
             <p className="ls-subline">Sign in to continue to your connected school workspace.</p>
           </div>
 
-          {/* Role selector tabs with sliding spring indicator */}
-          <div className="ls-roles" role="tablist" aria-label="Choose your access portal">
-            {roles.map((role) => {
-              const isActive = activeRole === role;
-              return (
-                <button
-                  key={role}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  onClick={() => changeRole(role)}
-                  className={`ls-role-tab ${isActive ? 'is-active' : ''}`}
-                >
-                  {isActive && (
-                    <motion.div
-                      layoutId="activeRoleIndicator"
-                      className="ls-role-active-indicator"
-                      transition={{ type: 'spring', stiffness: 480, damping: 34 }}
-                    />
-                  )}
-                  <span className="ls-role-tab-content">
-                    {roleIcons[role]}
-                    <span className="ls-role-label-full">{roleNames[role]}</span>
-                    <span className="ls-role-label-short">{shortRoleNames[role]}</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-
-          {/* Form */}
-          <form onSubmit={submit} onKeyDown={handleKeyDown} onKeyUp={handleKeyDown} className="ls-form" id="manual-login-form">
-            <AnimatePresence mode="wait">
-              {errorMessage && (
-                <motion.div
-                  initial={{ opacity: 0, y: -6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -6 }}
-                  className="ls-error"
-                  role="alert"
-                >
-                  <AlertCircle size={15} className="shrink-0" />
-                  <span>{errorMessage}</span>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <label className="ls-field-label">
-              <span>Email address</span>
-              <span className="ls-field-wrap">
-                <Mail size={16} className="ls-field-icon" />
-                <input
-                  id="login-input-email"
-                  type="email"
-                  autoComplete="email"
-                  placeholder="name@school.edu"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="ls-field-input"
-                />
-              </span>
-            </label>
-
-            <label className="ls-field-label">
-              <span className="ls-password-label-row">
-                <span>Password</span>
-                {capsLockActive && (
-                  <span className="ls-caps-warning">⇪ Caps Lock is ON</span>
-                )}
-              </span>
-              <span className="ls-field-wrap">
-                <LockKeyhole size={16} className="ls-field-icon" />
-                <input
-                  id="login-input-password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  placeholder="Enter your password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  className="ls-field-input"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                  className="ls-eye-btn"
-                >
-                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </span>
-            </label>
-
-            {/* Remember Me and Forgot Password */}
-            <div className="ls-form-meta">
-              <label className="ls-remember-wrap">
-                <input
-                  type="checkbox"
-                  checked={rememberMe}
-                  onChange={(e) => setRememberMe(e.target.checked)}
-                  className="ls-checkbox"
-                />
-                <span>Remember this device</span>
-              </label>
+          {mfaSession ? (
+            /* ═══════════ MULTI-FACTOR AUTHENTICATION (OTP) STEP ═══════════ */
+            <motion.div
+              key="mfa-step"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="ls-form"
+            >
               <button
                 type="button"
-                className="ls-forgot-btn"
-                onClick={() => setErrorMessage('Please contact your School Administrator to reset your password.')}
+                onClick={handleCancelMfa}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors mb-1 cursor-pointer self-start"
               >
-                Forgot password?
+                <ArrowLeft size={14} />
+                <span>Return to password login</span>
               </button>
-            </div>
 
-            {/* Submit button */}
-            <motion.button
-              whileTap={{ scale: 0.985 }}
-              className="ls-submit-btn group"
-              type="submit"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <>
-                  <RefreshCw size={16} className="animate-spin" />
-                  <span>Authenticating…</span>
-                </>
-              ) : (
-                <>
-                  <span>Sign in to {roleNames[activeRole]} Portal</span>
-                  <ArrowRight size={16} className="ls-btn-arrow" />
-                </>
+              <div className="flex items-center justify-between gap-2 mt-1 mb-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500/10 text-amber-700 border border-amber-500/20">
+                  <ShieldCheck size={14} className="text-amber-600" />
+                  Two-Factor Authentication
+                </span>
+                <span className="text-xs font-semibold text-slate-400">
+                  {roleNames[activeRole]}
+                </span>
+              </div>
+
+              <div className="text-left mb-2">
+                <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+                  Enter 6-Digit OTP
+                </h2>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  Verification code sent to{' '}
+                  <strong className="text-slate-800 font-semibold">{mfaSession.maskedEmail || mfaSession.email}</strong>
+                  {mfaSession.maskedPhone && (
+                    <> & phone <strong className="text-slate-800 font-semibold">{mfaSession.maskedPhone}</strong></>
+                  )}.
+                </p>
+              </div>
+
+              {/* Developer Mode OTP Helper Banner (only returned by DEBUG servers) */}
+              {mfaSession.devOtp && <div className="rounded-xl border border-indigo-200 bg-indigo-50/80 p-3 mb-2 flex items-center justify-between gap-3 text-left">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                    <Key size={16} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-bold text-indigo-950 truncate">
+                      Developer OTP Mode
+                    </div>
+                    <div className="text-[10px] text-indigo-700 font-mono">
+                      Current Code: <strong>{mfaSession.devOtp}</strong>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleFillDevOtp}
+                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-all cursor-pointer shrink-0"
+                >
+                  Fill {mfaSession.devOtp}
+                </button>
+              </div>}
+
+              <AnimatePresence mode="wait">
+                {errorMessage && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    className="ls-error flex items-center gap-1.5"
+                    role="alert"
+                  >
+                    <AlertCircle size={15} className="shrink-0" />
+                    <span>{errorMessage}</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* 6 Digit Input Boxes */}
+              <div className="flex items-center justify-between gap-2 my-2">
+                {otpDigits.map((digit, idx) => (
+                  <input
+                    key={idx}
+                    ref={(el) => { otpInputRefs.current[idx] = el; }}
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={1}
+                    value={digit}
+                    onChange={(e) => handleOtpDigitChange(idx, e.target.value)}
+                    onKeyDown={(e) => handleOtpKeyDown(idx, e)}
+                    onPaste={idx === 0 ? handleOtpPaste : undefined}
+                    aria-label={`Digit ${idx + 1}`}
+                    className="w-12 h-14 text-center text-xl font-bold font-mono rounded-xl border border-slate-300 bg-white text-slate-900 shadow-xs focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none transition-all"
+                  />
+                ))}
+              </div>
+
+              {/* Submit & Resend Controls */}
+              <motion.button
+                whileTap={{ scale: 0.985 }}
+                className="ls-submit-btn group w-full"
+                type="button"
+                onClick={handleVerifyOtp}
+                disabled={isVerifying || otpDigits.join('').length < 6}
+              >
+                {isVerifying ? (
+                  <>
+                    <RefreshCw size={16} className="animate-spin" />
+                    <span>Verifying Code…</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Verify & Continue</span>
+                    <ArrowRight size={16} className="ls-btn-arrow" />
+                  </>
+                )}
+              </motion.button>
+
+              <div className="flex items-center justify-between text-xs pt-1">
+                <span className="text-slate-500">Didn't receive the code?</span>
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={resendCooldown > 0 || isResending}
+                  className="font-semibold text-indigo-600 hover:underline disabled:opacity-50 disabled:no-underline cursor-pointer"
+                >
+                  {resendCooldown > 0
+                    ? `Resend in ${resendCooldown}s`
+                    : isResending
+                    ? 'Dispatching…'
+                    : 'Resend Code'}
+                </button>
+              </div>
+            </motion.div>
+          ) : (
+            <>
+              {/* Role selector tabs with sliding spring indicator */}
+              {!portalRole ? <div className="ls-roles" role="tablist" aria-label="Choose your access portal">
+                {generalLoginRoles.map((role) => {
+                  const isActive = activeRole === role;
+                  return (
+                    <button
+                      key={role}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => changeRole(role)}
+                      className={`ls-role-tab ${isActive ? 'is-active' : ''}`}
+                    >
+                      {isActive && (
+                        <motion.div
+                          layoutId="activeRoleIndicator"
+                          className="ls-role-active-indicator"
+                          transition={{ type: 'spring', stiffness: 480, damping: 34 }}
+                        />
+                      )}
+                      <span className="ls-role-tab-content">
+                        {roleIcons[role]}
+                        <span className="ls-role-label-full">{roleNames[role]}</span>
+                        <span className="ls-role-label-short">{shortRoleNames[role]}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div> : (
+                <div className="mb-3 rounded-xl border border-indigo-100 bg-indigo-50/70 px-3 py-2 text-sm font-semibold text-indigo-800" aria-live="polite">
+                  {portalRole === 'Super Admin' ? 'Platform Administration' : 'School Administration'}
+                </div>
               )}
-            </motion.button>
-          </form>
 
-          {/* Trust row */}
-          <div className="ls-trust">
-            <ShieldCheck size={16} className="ls-trust-icon" />
-            <div>
-              <div className="ls-trust-title">Protected School Infrastructure</div>
-              <div className="ls-trust-sub">Role-Based Access Control • Continuous Session Monitoring</div>
-            </div>
-          </div>
+              {/* Form */}
+              <form onSubmit={submit} onKeyDown={handleKeyDown} onKeyUp={handleKeyDown} className="ls-form" id="manual-login-form">
+                <AnimatePresence mode="wait">
+                  {errorMessage && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      className="ls-error flex flex-col gap-1.5"
+                      role="alert"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <AlertCircle size={15} className="shrink-0" />
+                        <span>{errorMessage}</span>
+                      </div>
+                      {suggestedRole && suggestedRole !== 'School Admin' && suggestedRole !== 'Super Admin' && (
+                        <button
+                          type="button"
+                          onClick={() => changeRole(suggestedRole)}
+                          className="text-left text-xs font-bold underline hover:opacity-80 text-rose-800 cursor-pointer pt-0.5"
+                        >
+                          Click here to switch to the {suggestedRole} Portal tab →
+                        </button>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
 
-          {/* Public access */}
-          {onPublicAccess && (
-            <button type="button" className="ls-public-btn" onClick={onPublicAccess}>
-              <span>Explore public learning resources</span>
-              <ArrowRight size={14} className="ls-public-arrow" />
-            </button>
+                <label className="ls-field-label">
+                  <span>Email address</span>
+                  <span className="ls-field-wrap">
+                    <Mail size={16} className="ls-field-icon" />
+                    <input
+                      id="login-input-email"
+                      type="email"
+                      autoComplete="email"
+                      placeholder="name@school.edu"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      required
+                      className="ls-field-input"
+                    />
+                  </span>
+                </label>
+
+                <label className="ls-field-label">
+                  <span className="ls-password-label-row">
+                    <span>Password</span>
+                    {capsLockActive && (
+                      <span className="ls-caps-warning">⇪ Caps Lock is ON</span>
+                    )}
+                  </span>
+                  <span className="ls-field-wrap">
+                    <LockKeyhole size={16} className="ls-field-icon" />
+                    <input
+                      id="login-input-password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      placeholder="Enter your password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      className="ls-field-input"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      className="ls-eye-btn"
+                    >
+                      {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </span>
+                </label>
+
+                {/* Remember Me and Forgot Password */}
+                <div className="ls-form-meta">
+                  <label className="ls-remember-wrap">
+                    <input
+                      type="checkbox"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                      className="ls-checkbox"
+                    />
+                    <span>Remember this device</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="ls-forgot-btn"
+                    onClick={() => setErrorMessage('Please contact your School Administrator to reset your password.')}
+                  >
+                    Forgot password?
+                  </button>
+                </div>
+
+                {/* Submit button */}
+                <motion.button
+                  whileTap={{ scale: 0.985 }}
+                  className="ls-submit-btn group"
+                  type="submit"
+                  disabled={isLoading}
+                >
+                  {isLoading ? (
+                    <>
+                      <RefreshCw size={16} className="animate-spin" />
+                      <span>Authenticating…</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Sign in to {roleNames[activeRole]} Portal</span>
+                      <ArrowRight size={16} className="ls-btn-arrow" />
+                    </>
+                  )}
+                </motion.button>
+              </form>
+            </>
           )}
+
+          {portalRole && (
+            <nav className="mt-4 flex flex-wrap justify-center gap-x-4 gap-y-2 text-xs font-semibold text-slate-500" aria-label="Other sign-in portals">
+              <Link to="/login" className="hover:text-indigo-700 hover:underline">Choose another portal</Link>
+              <Link to="/admin" className="hover:text-indigo-700 hover:underline">School admin</Link>
+              <Link to="/super-admin" className="hover:text-indigo-700 hover:underline">Super admin</Link>
+            </nav>
+          )}
+
 
           {/* Footer */}
           <footer className="ls-footer">

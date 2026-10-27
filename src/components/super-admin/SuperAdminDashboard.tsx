@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion } from 'motion/react';
 import { store } from '../../store';
-import { schoolApi } from '../../store/api/schoolApi';
+import { schoolApi, useGetSchoolRecordCountsQuery } from '../../store/api/schoolApi';
 import { authApi } from '../../store/api/authApi';
 import { studentApi } from '../../store/api/studentApi';
 import {
@@ -54,6 +54,12 @@ interface SuperAdminDashboardProps {
 }
 
 export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashboardProps) {
+  const { data: schoolRecordCounts, refetch: refetchSchoolCounts } = useGetSchoolRecordCountsQuery(undefined, {
+    pollingInterval: 3000,
+    refetchOnMountOrArgChange: true,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
   const [schools, setSchools] = useState<SchoolRecord[]>([]);
   const [admins, setAdmins] = useState<AdminUser[]>([]);
   const [studentsCount, setStudentsCount] = useState<number>(0);
@@ -63,6 +69,13 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
   const [filterType, setFilterType] = useState<'all' | 'live' | 'demo'>('all');
   const [lastSynced, setLastSynced] = useState<Date>(new Date());
   const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  const totalFleetStudents = useMemo(() => {
+    if (schoolRecordCounts && Object.keys(schoolRecordCounts).length > 0) {
+      return Object.values(schoolRecordCounts).reduce((sum, item) => sum + (item.students || 0), 0);
+    }
+    return studentsCount;
+  }, [schoolRecordCounts, studentsCount]);
 
   const refreshTimeoutRef = useRef<number | null>(null);
 
@@ -81,6 +94,7 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
       // 1. Fetch Real Schools from PostgreSQL
       const schoolList = await store.dispatch(schoolApi.endpoints.getSchools.initiate(undefined)).unwrap();
       setSchools(schoolList as unknown as SchoolRecord[]);
+      void refetchSchoolCounts();
 
       // Measure real roundtrip API latency
       const roundTrip = Math.round(performance.now() - startPing);
@@ -262,7 +276,7 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
           <div className="flex items-start justify-between">
             <div>
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Total Enrolled</p>
-              <h3 className="mt-2 text-3xl font-black text-slate-900 tracking-tight tabular-nums">{studentsCount.toLocaleString()}</h3>
+              <h3 className="mt-2 text-3xl font-black text-slate-900 tracking-tight tabular-nums">{totalFleetStudents.toLocaleString()}</h3>
               <p className="mt-1 text-xs font-semibold text-slate-500">Students across fleet</p>
             </div>
             <div className="grid h-12 w-12 place-items-center rounded-2xl bg-emerald-50 text-emerald-600 border border-emerald-100 shadow-xs">
@@ -271,8 +285,11 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
             <span className="inline-flex items-center gap-1.5 font-bold text-emerald-600">
-              <Radio className="w-3.5 h-3.5" />
-              PostgreSQL Roster
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+              </span>
+              Live Sync Active
             </span>
             <span className="font-mono text-[11px] text-slate-400 font-semibold">
               All Campuses
@@ -448,6 +465,27 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
                           Active
                         </span>
                       </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="flex items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50/70 px-3 py-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-semibold text-indigo-800">Students</span>
+                        <span className="relative flex h-2 w-2" title="Live synced roster count">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75"></span>
+                          <span className="relative inline-flex h-2 w-2 rounded-full bg-indigo-500"></span>
+                        </span>
+                      </div>
+                      <span className="text-sm font-black tabular-nums text-indigo-700">
+                        {((schoolRecordCounts?.[String(school.id)]?.students ?? (school as any).studentCount) ?? 0).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2">
+                      <span className="text-[11px] font-semibold text-emerald-800">Teachers</span>
+                      <span className="text-sm font-black tabular-nums text-emerald-700">
+                        {(schoolRecordCounts?.[String(school.id)]?.teachers ?? 0).toLocaleString()}
+                      </span>
                     </div>
                   </div>
 

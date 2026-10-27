@@ -15,7 +15,7 @@ import {
   ShieldAlert,
   School
 } from 'lucide-react';
-import { ACCESS_TOKEN_STORAGE_KEY, PRESET_ACCOUNTS, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME, decodeJWT } from '../../utils/auth';
+import { getStoredAuthenticatedUser, PRESET_ACCOUNTS, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME } from '../../utils/auth';
 import { UserRole } from '../../types';
 import { store } from '../../store';
 import { authApi } from '../../store/api/authApi';
@@ -53,8 +53,8 @@ export default function SuperAdminUsers() {
   });
 
   useEffect(() => {
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    if (token) {
+    const user = getStoredAuthenticatedUser();
+    if (user) {
       store.dispatch(authApi.endpoints.getUsers.initiate()).unwrap()
         .then((accounts) => {
           const roleMap: Record<string, UserRole> = {
@@ -116,14 +116,8 @@ export default function SuperAdminUsers() {
   };
 
   const addAuditLog = (action: string) => {
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    let operatorName = SUPER_ADMIN_NAME;
-    if (token) {
-      try {
-        const decoded = decodeJWT(token);
-        if (decoded) operatorName = decoded.name;
-      } catch (e) {}
-    }
+    const user = getStoredAuthenticatedUser();
+    const operatorName = user?.name || SUPER_ADMIN_NAME;
     const newLog = {
       id: `audit-${Date.now()}`,
       userName: operatorName,

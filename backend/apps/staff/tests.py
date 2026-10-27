@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -525,5 +527,18 @@ class TeacherBulkImportTests(TestCase):
         self.client.force_authenticate(self.teacher_user)
         response = self.client.post('/api/v1/teachers/bulk-import/', data={'teachers': []}, format='json')
         self.assertEqual(response.status_code, 403)
+
+    @patch('apps.common.tasks.process_import_batch.delay')
+    def test_queued_teacher_import_returns_accepted(self, enqueue):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post('/api/v1/teachers/bulk-import/', data={
+            'async_import': True,
+            'jobId': 'teacher-queue-test-1',
+            'batchNumber': 1,
+            'teachers': [{'name': 'Queued Teacher'}],
+        }, format='json')
+        self.assertEqual(response.status_code, 202)
+        enqueue.assert_called_once()
+        self.assertEqual(response.data['status'], 'pending')
 
 

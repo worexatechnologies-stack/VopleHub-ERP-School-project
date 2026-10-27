@@ -2,14 +2,20 @@ import React, { useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertCircle,
+  Megaphone,
+  Bell,
   Calendar,
   CalendarDays,
+  Download,
   CheckCircle2,
   Clock,
   Copy,
   Edit2,
   FileSpreadsheet,
   Globe2,
+  Link as LinkIcon,
+  UserRound,
+  Mail,
   MapPin,
   Plus,
   QrCode,
@@ -20,6 +26,8 @@ import {
   X
 } from 'lucide-react';
 import type { AuthUser } from '../utils/auth';
+import CommunityBroadcastDesk from './community/CommunityBroadcastDesk';
+import CommunityNoticeBoard from './community/CommunityNoticeBoard';
 import { emitNotification } from '../services/notificationBus';
 import {
   useGetEventsQuery,
@@ -37,7 +45,16 @@ import {
 
 type ActivityFilter = 'all' | 'active' | 'inactive';
 
-export default function CommunityEventsModule({ user }: { user?: AuthUser | null }) {
+export default function CommunityEventsModule({
+  user,
+  onNavigateToTab,
+  defaultSubTab = 'events'
+}: {
+  user?: AuthUser | null;
+  onNavigateToTab?: (tabId: string) => void;
+  defaultSubTab?: 'events' | 'broadcasts' | 'notices';
+}) {
+  const [activeCommunityTab, setActiveCommunityTab] = useState<'events' | 'broadcasts' | 'notices'>(defaultSubTab);
   const role = user?.role || 'School Admin';
   const canManage = ['School Admin', 'Super Admin', 'Teacher'].includes(role);
 
@@ -47,7 +64,7 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
   const [eventSearch, setEventSearch] = useState('');
 
   // API Queries (fetches only published events by default)
-  const { data: rawEvents = [], isLoading: eventsLoading } = useGetEventsQuery({
+  const { data: rawEvents = [], isLoading: eventsLoading, error: eventsError } = useGetEventsQuery({
     search: eventSearch.trim() || undefined,
     kind: eventKindFilter !== 'All' ? eventKindFilter : undefined,
     activity_status: activityFilter !== 'all' ? activityFilter : undefined,
@@ -70,14 +87,20 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
   const [registeringEvent, setRegisteringEvent] = useState<SchoolEventRecord | null>(null);
   const [attendeesEvent, setAttendeesEvent] = useState<SchoolEventRecord | null>(null);
   const [attendeeSearch, setAttendeeSearch] = useState('');
+  const [eventImageFile, setEventImageFile] = useState<File | null>(null);
+  const [eventImagePreview, setEventImagePreview] = useState<string | null>(null);
 
   // Form states
   const [eventForm, setEventForm] = useState<{
     kind: EventKind;
     title: string;
     date: string;
+    end_date: string;
     registration_deadline: string;
     venue: string;
+    organizer: string;
+    contact_details: string;
+    meeting_url: string;
     capacity: number;
     ticket_required: boolean;
     audience: string;
@@ -86,8 +109,12 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
     kind: 'School event',
     title: '',
     date: '',
+    end_date: '',
     registration_deadline: '',
     venue: '',
+    organizer: '',
+    contact_details: '',
+    meeting_url: '',
     capacity: 100,
     ticket_required: true,
     audience: 'Teachers, students and parents',
@@ -173,14 +200,20 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
   // Handlers
   const handleOpenCreateEvent = () => {
     setEditingEvent(null);
+    setEventImageFile(null);
+    setEventImagePreview(null);
     const defaultDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const defaultDeadline = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
     setEventForm({
       kind: 'School event',
       title: '',
       date: formatDateTimeLocal(defaultDate),
+      end_date: formatDateTimeLocal(new Date(defaultDate.getTime() + 2 * 60 * 60 * 1000)),
       registration_deadline: formatDateTimeLocal(defaultDeadline),
       venue: '',
+      organizer: user?.name || '',
+      contact_details: user?.email || '',
+      meeting_url: '',
       capacity: 100,
       ticket_required: true,
       audience: 'Teachers, students and parents',
@@ -191,14 +224,20 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
 
   const handleOpenEditEvent = (item: SchoolEventRecord) => {
     setEditingEvent(item);
+    setEventImageFile(null);
+    setEventImagePreview(item.imageUrl || null);
     setEventForm({
       kind: item.kind,
       title: item.title,
       date: formatDateTimeLocal(new Date(item.date)),
+      end_date: item.end_date ? formatDateTimeLocal(new Date(item.end_date)) : '',
       registration_deadline: item.registration_deadline
         ? formatDateTimeLocal(new Date(item.registration_deadline))
         : '',
       venue: item.venue,
+      organizer: item.organizer || '',
+      contact_details: item.contact_details || '',
+      meeting_url: item.meeting_url || '',
       capacity: item.capacity,
       ticket_required: item.ticket_required,
       audience: item.audience,
@@ -229,18 +268,35 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
       return;
     }
 
+    if (eventForm.end_date && new Date(eventForm.end_date) < new Date(eventForm.date)) {
+      emitNotification({
+        title: 'Invalid Event End Time',
+        message: 'Event end time cannot be before the start time.',
+        tone: 'danger',
+        source: 'events',
+      });
+      return;
+    }
+
     try {
+      const formData = new FormData();
+      Object.entries(eventForm).forEach(([key, value]) => {
+        // Empty optional datetime fields must be omitted from multipart data;
+        // sending an empty string would fail DRF DateTimeField validation.
+        if (value !== '' && value !== null && value !== undefined) {
+          const normalizedValue = ['date', 'end_date', 'registration_deadline'].includes(key)
+            ? new Date(String(value)).toISOString()
+            : String(value);
+          formData.append(key, normalizedValue);
+        }
+      });
+      formData.append('status', 'Published');
+      if (eventImageFile) formData.append('imageFile', eventImageFile);
+
       if (editingEvent) {
         await updateEventMutation({
           id: editingEvent.id,
-          data: {
-            ...eventForm,
-            status: 'Published',
-            date: new Date(eventForm.date).toISOString(),
-            registration_deadline: eventForm.registration_deadline
-              ? new Date(eventForm.registration_deadline).toISOString()
-              : null,
-          },
+          data: formData,
         }).unwrap();
         emitNotification({
           title: 'Event Updated',
@@ -249,14 +305,7 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
           source: 'events',
         });
       } else {
-        await createEventMutation({
-          ...eventForm,
-          status: 'Published',
-          date: new Date(eventForm.date).toISOString(),
-          registration_deadline: eventForm.registration_deadline
-            ? new Date(eventForm.registration_deadline).toISOString()
-            : null,
-        }).unwrap();
+        await createEventMutation(formData).unwrap();
         emitNotification({
           title: 'Event Published',
           message: `"${eventForm.title}" is now published and active.`,
@@ -395,6 +444,28 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
     fetchAttendees(item.id);
   };
 
+  const handleAddToCalendar = (item: SchoolEventRecord) => {
+    const formatIcsDate = (value: string) => new Date(value).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+    const start = formatIcsDate(item.date);
+    const end = formatIcsDate(item.end_date || item.date);
+    const escapeIcs = (value: string) => value.replace(/[\\,;\n]/g, match => `\\${match === '\n' ? 'n' : match}`);
+    const content = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Volpehub Education//School Events//EN',
+      'BEGIN:VEVENT', `UID:volpehub-event-${item.id}@volpehub.education`,
+      `DTSTAMP:${formatIcsDate(new Date().toISOString())}`, `DTSTART:${start}`, `DTEND:${end}`,
+      `SUMMARY:${escapeIcs(item.title)}`, `LOCATION:${escapeIcs(item.venue || 'School campus')}`,
+      item.description ? `DESCRIPTION:${escapeIcs(item.description)}` : '',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].filter(Boolean).join('\r\n');
+    const blob = new Blob([content], { type: 'text/calendar;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${item.title.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'school-event'}.ics`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleExportAttendeesCSV = () => {
     if (!attendeesEvent || !attendees.length) return;
     const headers = ['Ticket Code', 'Attendee Name', 'Admission No', 'Class', 'Section', 'Roll No', 'Email', 'Phone', 'Notes', 'Registration Date'];
@@ -423,7 +494,51 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
 
   return (
     <section className="space-y-6 animate-fade-in pb-12" id="community-events-module">
-      {/* Header Banner */}
+      {/* Community Main Navigation Sub-Tabs */}
+      <div className="flex flex-wrap items-center gap-2.5 pb-1 select-none">
+        <button
+          type="button"
+          onClick={() => setActiveCommunityTab('events')}
+          className={`flex items-center gap-2 rounded-2xl px-5 py-2.5 text-xs font-extrabold transition cursor-pointer ${
+            activeCommunityTab === 'events'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-md shadow-indigo-500/20'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <CalendarDays className="h-4 w-4" />
+          Community Events
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveCommunityTab('broadcasts')}
+          className={`flex items-center gap-2 rounded-2xl px-5 py-2.5 text-xs font-extrabold transition cursor-pointer ${
+            activeCommunityTab === 'broadcasts'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-md shadow-indigo-500/20'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <Megaphone className="h-4 w-4" />
+          Community Broadcasts
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveCommunityTab('notices')}
+          className={`flex items-center gap-2 rounded-2xl px-5 py-2.5 text-xs font-extrabold transition cursor-pointer ${
+            activeCommunityTab === 'notices'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-md shadow-indigo-500/20'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+          }`}
+        >
+          <Bell className="h-4 w-4" />
+          Community Notices & Requests
+        </button>
+      </div>
+
+      {activeCommunityTab === 'events' && (
+        <>
+          {/* Header Banner */}
       <header className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-violet-900 via-indigo-700 to-cyan-600 px-7 py-8 text-white shadow-xl">
         <Globe2 className="absolute -bottom-10 -right-8 h-56 w-56 text-white/10 pointer-events-none" />
         <div className="relative flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
@@ -584,6 +699,11 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
       {/* Events Grid */}
       {eventsLoading ? (
         <div className="py-16 text-center text-sm font-semibold text-slate-400">Loading published events...</div>
+      ) : eventsError ? (
+        <Empty
+          icon={<AlertCircle className="h-10 w-10" />}
+          text="Unable to load events right now. Please refresh and try again."
+        />
       ) : events.length === 0 ? (
         <Empty
           icon={<CalendarDays className="h-10 w-10" />}
@@ -610,6 +730,14 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
                 key={item.id}
                 className="flex flex-col rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all hover:border-indigo-200 relative group"
               >
+                {item.imageUrl && (
+                  <img
+                    src={item.imageUrl}
+                    alt=""
+                    loading="lazy"
+                    className="mb-4 h-36 w-full rounded-2xl object-cover bg-slate-100"
+                  />
+                )}
                 {/* Top Kind & Admin Actions */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -670,17 +798,42 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
                 <div className="mt-4 space-y-2 rounded-2xl bg-slate-50 p-3.5 border border-slate-100 text-xs font-semibold text-slate-600">
                   <div className="flex items-center gap-2 text-slate-700">
                     <Calendar className="h-4 w-4 text-indigo-500 shrink-0" />
-                    <span>
+                    <span className="min-w-0 truncate">
                       {new Date(item.date).toLocaleString([], {
                         dateStyle: 'medium',
                         timeStyle: 'short',
                       })}
+                      {item.end_date && (
+                        <span className="block text-[11px] font-medium text-slate-400">
+                          Ends {new Date(item.end_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div className="flex items-center gap-2 text-slate-700">
                     <MapPin className="h-4 w-4 text-cyan-500 shrink-0" />
-                    <span className="truncate">{item.venue}</span>
+                    <span className="truncate">{item.venue || 'Venue to be announced'}</span>
                   </div>
+                  {(item.organizer || item.contact_details) && (
+                    <div className="flex items-center gap-2 text-slate-700">
+                      <UserRound className="h-4 w-4 text-violet-500 shrink-0" />
+                      <span className="min-w-0 truncate">
+                        {item.organizer || 'School team'}
+                        {item.contact_details && <span className="font-medium text-slate-400"> · {item.contact_details}</span>}
+                      </span>
+                    </div>
+                  )}
+                  {item.meeting_url && (
+                    <a
+                      href={item.meeting_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-indigo-600 hover:text-indigo-800 truncate"
+                    >
+                      <LinkIcon className="h-4 w-4 shrink-0" />
+                      <span className="truncate">Join online meeting</span>
+                    </a>
+                  )}
 
                   {/* Deadline Display */}
                   <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 text-[11px]">
@@ -761,6 +914,15 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
 
                 {/* Action Buttons */}
                 <div className="mt-4 pt-2 border-t border-slate-100 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleAddToCalendar(item)}
+                    title="Add to calendar"
+                    className="inline-flex items-center justify-center rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 transition-all"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span className="sr-only">Add to calendar</span>
+                  </button>
                   {canManage && (
                     <button
                       onClick={() => handleOpenAttendees(item)}
@@ -808,8 +970,13 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
         <Modal
           title={editingEvent ? 'Edit school event' : 'Post a new event'}
           close={() => setEventModalOpen(false)}
+          large
         >
-          <form onSubmit={handleSaveEvent} className="space-y-4">
+          <form onSubmit={handleSaveEvent} className="space-y-5">
+            <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 px-3.5 py-3">
+              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-600">Event basics</p>
+              <p className="mt-1 text-[11px] font-medium text-slate-500">Set who should see this event and when it takes place.</p>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-extrabold text-slate-700 mb-1">
@@ -860,6 +1027,53 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
               />
             </div>
 
+            <div>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="text-xs font-extrabold text-slate-700">Event image</label>
+                <span className="text-[10px] font-medium text-slate-400">JPG, PNG or WebP · max 10 MB</span>
+              </div>
+              <div className="flex flex-col gap-3 rounded-2xl border border-dashed border-indigo-200 bg-indigo-50/40 p-3 sm:flex-row sm:items-center">
+                {eventImagePreview ? (
+                  <img src={eventImagePreview} alt="Event preview" className="h-20 w-full rounded-xl object-cover sm:w-32" />
+                ) : (
+                  <div className="grid h-20 w-full place-items-center rounded-xl bg-white text-xs font-semibold text-slate-400 sm:w-32">No image selected</div>
+                )}
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <label className="inline-flex cursor-pointer items-center justify-center rounded-xl bg-white px-3 py-2 text-xs font-bold text-indigo-700 shadow-sm ring-1 ring-indigo-100 hover:bg-indigo-50">
+                    Choose image
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      className="sr-only"
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 10 * 1024 * 1024) {
+                          emitNotification({ title: 'Invalid event image', message: 'Choose a JPG, PNG, or WebP image smaller than 10 MB.', tone: 'danger', source: 'events' });
+                          e.currentTarget.value = '';
+                          return;
+                        }
+                        setEventImageFile(file);
+                        setEventImagePreview(URL.createObjectURL(file));
+                      }}
+                    />
+                  </label>
+                  {eventImageFile && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEventImageFile(null);
+                        setEventImagePreview(editingEvent?.imageUrl || null);
+                      }}
+                      className="rounded-xl px-3 py-2 text-xs font-bold text-slate-500 hover:bg-white hover:text-rose-600"
+                    >
+                      Remove selection
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-extrabold text-slate-700 mb-1">
@@ -872,6 +1086,22 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
                   onChange={e => setEventForm({ ...eventForm, date: e.target.value })}
                   className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-medium focus:border-indigo-500 focus:outline-none"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-extrabold text-slate-700 mb-1">
+                  Event end time <span className="text-slate-400 font-medium">(optional)</span>
+                </label>
+                <input
+                  type="datetime-local"
+                  min={eventForm.date || undefined}
+                  value={eventForm.end_date}
+                  onChange={e => setEventForm({ ...eventForm, end_date: e.target.value })}
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                />
+                <span className="text-[10px] text-slate-400 block mt-0.5">
+                  Helps families see the full programme duration.
+                </span>
               </div>
 
               <div>
@@ -920,9 +1150,56 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
               </div>
             </div>
 
+            <div className="border-t border-slate-100 pt-4">
+              <p className="mb-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">People & access</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="mb-1 flex items-center gap-1.5 text-xs font-extrabold text-slate-700">
+                    <UserRound className="h-3.5 w-3.5 text-violet-500" /> Organizer
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={160}
+                    placeholder="e.g. Cultural Committee"
+                    value={eventForm.organizer}
+                    onChange={e => setEventForm({ ...eventForm, organizer: e.target.value })}
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 flex items-center gap-1.5 text-xs font-extrabold text-slate-700">
+                    <Mail className="h-3.5 w-3.5 text-cyan-500" /> Contact details
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={200}
+                    placeholder="Email or phone for questions"
+                    value={eventForm.contact_details}
+                    onChange={e => setEventForm({ ...eventForm, contact_details: e.target.value })}
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+              <div className="mt-4">
+                <label className="mb-1 flex items-center gap-1.5 text-xs font-extrabold text-slate-700">
+                  <LinkIcon className="h-3.5 w-3.5 text-indigo-500" /> Online meeting link <span className="font-medium text-slate-400">(optional)</span>
+                </label>
+                <input
+                  type="url"
+                  maxLength={500}
+                  placeholder="https://meet.google.com/..."
+                  value={eventForm.meeting_url}
+                  onChange={e => setEventForm({ ...eventForm, meeting_url: e.target.value })}
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[10px] font-medium text-slate-400">Only share links approved by your school.</p>
+              </div>
+            </div>
+
             <div>
+              <p className="mb-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Description</p>
               <label className="block text-xs font-extrabold text-slate-700 mb-1">
-                Description & Agenda
+                Description & agenda
               </label>
               <textarea
                 rows={3}
@@ -1238,6 +1515,16 @@ export default function CommunityEventsModule({ user }: { user?: AuthUser | null
             </div>
           </div>
         </Modal>
+      )}
+        </>
+      )}
+
+      {activeCommunityTab === 'broadcasts' && (
+        <CommunityBroadcastDesk user={user} />
+      )}
+
+      {activeCommunityTab === 'notices' && (
+        <CommunityNoticeBoard user={user} onNavigateToTab={onNavigateToTab} />
       )}
     </section>
   );

@@ -69,6 +69,7 @@ jobs:
           DJANGO_SETTINGS_MODULE: config.settings.dev
         run: |
           python backend/manage.py check
+          python backend/manage.py makemigrations --check --dry-run
 
       - name: Run unit test suite
         env:
@@ -76,7 +77,7 @@ jobs:
           DJANGO_SECRET_KEY: cd-test-secret-key-at-least-32-chars-long
           DJANGO_SETTINGS_MODULE: config.settings.dev
         run: |
-          python backend/manage.py test apps.community apps.notifications apps.timetable apps.staff
+          python backend/manage.py test apps.community apps.notifications apps.timetable apps.staff apps.exams apps.store
 
   publish-images:
     name: Build & Publish GHCR Images
@@ -128,6 +129,16 @@ jobs:
           tags: |
             ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-web:${{ github.sha }}
             ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-web:latest
+
+      - name: Build and push Forward proxy image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: ./forward_proxy
+          file: ./forward_proxy/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-forwardproxy:${{ github.sha }}
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-forwardproxy:latest
 
   deploy-production:
     name: Safe Production Deployment
@@ -207,7 +218,7 @@ jobs:
 
             # 3. Pull exact immutable container image tags
             echo "Pulling container images for release ${IMAGE_TAG}..."
-            docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker
+            docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker forwardproxy
 
             # 4. Validate Docker Compose project configuration
             echo "Validating Compose configuration..."
@@ -223,6 +234,9 @@ jobs:
             echo "Running database migrations..."
             docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py migrate --noinput
 
+            echo "Collecting static files once before starting API replicas..."
+            docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py collectstatic --noinput
+
             # 7. Record release metadata
             if [ -f .current_release ]; then
               cp .current_release .previous_release
@@ -233,29 +247,34 @@ jobs:
             echo "Applying service changes..."
             docker compose -f docker-compose.prod.yml -p volpehub up -d --remove-orphans
 
-            # 9. Verify deployment health endpoint
-            echo "Verifying health endpoint..."
-            MAX_RETRIES=15
-            COUNT=0
-            HEALTHY=0
+            # 9. Verify every serving dependency, not just the API. This waits
+            # for slow starts instead of declaring a healthy API with a broken
+            # web or egress tier a successful release.
+            wait_for_healthy() {
+              SERVICE="$1"
+              MAX_RETRIES=15
+              COUNT=0
+              while [ "$COUNT" -lt "$MAX_RETRIES" ]; do
+                CONTAINER_ID="$(docker compose -f docker-compose.prod.yml -p volpehub ps -q "$SERVICE" | head -n 1)"
+                STATUS="$(docker inspect --format='{{json .State.Health.Status}}' "$CONTAINER_ID" 2>/dev/null || echo '"starting"')"
+                if [ "$STATUS" = '"healthy"' ]; then
+                  return 0
+                fi
+                echo "Waiting for ${SERVICE} health (attempt $((COUNT+1))/$MAX_RETRIES, status: $STATUS)..."
+                sleep 5
+                COUNT=$((COUNT+1))
+              done
+              return 1
+            }
 
-            while [ $COUNT -lt $MAX_RETRIES ]; do
-              STATUS=$(docker inspect --format='{{json .State.Health.Status}}' volpehub-api-1 2>/dev/null || echo '"starting"')
-              if [ "$STATUS" = '"healthy"' ]; then
-                HEALTHY=1
-                break
+            for SERVICE in api web forwardproxy; do
+              if ! wait_for_healthy "$SERVICE"; then
+                echo "Error: ${SERVICE} container failed health check after deployment!" >&2
+                docker compose -f docker-compose.prod.yml -p volpehub ps
+                echo "To rollback, run: ./rollback.sh \$(cat .previous_release)" >&2
+                exit 1
               fi
-              echo "Waiting for health check (attempt $((COUNT+1))/$MAX_RETRIES, status: $STATUS)..."
-              sleep 5
-              COUNT=$((COUNT+1))
             done
-
-            if [ $HEALTHY -ne 1 ]; then
-              echo "Error: VolpeHub API container failed health check after deployment!" >&2
-              docker compose -f docker-compose.prod.yml -p volpehub ps
-              echo "To rollback, run: ./rollback.sh \$(cat .previous_release)" >&2
-              exit 1
-            fi
 
             echo "=== VolpeHub Deployment Succeeded ==="
             docker compose -f docker-compose.prod.yml -p volpehub ps

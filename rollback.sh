@@ -45,7 +45,7 @@ export IMAGE_TAG="$TARGET_SHA"
 
 # Pull the specific immutable image tags from GHCR
 echo "Pulling target images from GHCR..."
-docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker
+docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker forwardproxy
 
 # Deploy the rolled-back stack
 echo "Deploying rolled-back containers..."

@@ -34,10 +34,12 @@ import {
   Check,
   UserPlus,
   Key,
+  ShoppingBag,
 } from 'lucide-react';
 
 // Custom Modules Components
 import Dashboard from './components/Dashboard';
+import RoleDashboard from './components/RoleDashboard';
 import PasswordManager from './components/PasswordManager';
 import StudentModule from './components/StudentModule';
 import AcademicModule from './components/AcademicModule';
@@ -58,6 +60,7 @@ import StudentDocuments from './components/StudentDocuments';
 import TeacherDirectory from './components/TeacherDirectory';
 import NotificationComposerPage from './components/NotificationComposerPage';
 import CommunityEventsModule from './components/CommunityEventsModule';
+import StoreModule from './components/StoreModule';
 import AcademicSetupManager from './components/AcademicSetupManager';
 import HomeworkModule from './components/HomeworkModule';
 
@@ -82,8 +85,9 @@ import { BRAND } from './config/branding';
 // Custom Types and Auth
 import { Student, StudentDocument, UserRole, BrandSettings } from './types';
 
-import { ACCESS_TOKEN_STORAGE_KEY, AUTH_SESSION_EXPIRED_EVENT, AuthUser, clearAuthenticatedSession, clearAuthenticatedUser, getStoredAuthenticatedUser, storeAuthenticatedUser } from './utils/auth';
+import { AUTH_SESSION_EXPIRED_EVENT, AuthUser, clearAuthenticatedSession, storeAuthenticatedUser } from './utils/auth';
 import { authApi } from './store/api/authApi';
+import { baseApi } from './store/api/baseApi';
 import { normalizeStudent, studentApi, useGetStudentsQuery } from './store/api/studentApi';
 import { deactivateFcmDeviceToken } from './services/firebaseMessaging';
 import {
@@ -93,7 +97,7 @@ import {
   loadAcademicStructure,
 } from './services/academicStructure';
 import { useAppDispatch, useAppSelector } from './store';
-import { logout as reduxLogout, setAccessToken as reduxSetAccessToken, setCredentials as reduxSetCredentials, setUser as reduxSetUser } from './store/slices/authSlice';
+import { finishSessionRestore, logout as reduxLogout, setCredentials as reduxSetCredentials, setUser as reduxSetUser } from './store/slices/authSlice';
 import { setActiveTab as reduxSetActiveTab, setCredentialSlip as reduxSetCredentialSlip } from './store/slices/uiSlice';
 import { copyToClipboard } from './utils/clipboard';
 import { getUrlForTab, getTabForUrl } from './utils/portalRouting';
@@ -118,7 +122,8 @@ function AuthenticatedApp() {
   const navigate = useNavigate();
   const location = useLocation();
   const dispatch = useAppDispatch();
-  const token = useAppSelector((state) => state.auth.accessToken);
+  const isAuthenticated = useAppSelector((state) => state.auth.isAuthenticated);
+  const isRestoringSession = useAppSelector((state) => state.auth.isRestoringSession);
   const user = useAppSelector((state) => state.auth.user);
   const activeTab = useAppSelector((state) => state.ui.activeTab);
   const credentialSlip = useAppSelector((state) => state.ui.credentialSlip);
@@ -126,6 +131,12 @@ function AuthenticatedApp() {
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+
+  const loginPortalRole = location.pathname === '/admin'
+    ? 'School Admin'
+    : location.pathname === '/super-admin'
+      ? 'Super Admin'
+      : undefined;
 
   const navigateToTab = (tabId: string) => {
     dispatch(reduxSetActiveTab(tabId));
@@ -140,7 +151,7 @@ function AuthenticatedApp() {
     const rawPath = location.pathname;
     const isLoginOrApp = rawPath === '/login' || rawPath === '/app';
 
-    if (!user || !token) {
+    if (!user || !isAuthenticated) {
       if (!isLoginOrApp && !getTabForUrl(rawPath)) {
         navigate('/', { replace: true });
       }
@@ -161,7 +172,7 @@ function AuthenticatedApp() {
       const canonicalUrl = getUrlForTab(activeTab, user.role);
       navigate(canonicalUrl, { replace: true });
     }
-  }, [location.pathname, user, token, activeTab, navigate, dispatch]);
+  }, [location.pathname, user, isAuthenticated, activeTab, navigate, dispatch]);
 
   // White-Label / Brand settings state
   const [brandSettings, setBrandSettings] = useState<BrandSettings>(() => {
@@ -214,13 +225,6 @@ function AuthenticatedApp() {
   const [students, setStudents] = useState<Student[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
 
-  useEffect(() => {
-    const storedToken = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    if (storedToken && !token) {
-      dispatch(reduxSetAccessToken(storedToken));
-    }
-  }, [token]);
-
   // Academic structure is tenant-scoped and comes only from PostgreSQL.
   const [currentAcademicYear, setCurrentAcademicYear] = useState('');
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
@@ -230,36 +234,63 @@ function AuthenticatedApp() {
     return role === 'Super Admin' ? 'super-admin-dashboard' : 'dashboard';
   };
 
-  // Validate the backend-issued access token before restoring a session.
+  // Validate and restore the Django server-side session on browser boot / refresh.
+  const isInitialSessionCheckDone = useRef(false);
   useEffect(() => {
-    if (!token) return;
-    const storedUser = getStoredAuthenticatedUser();
-    if (storedUser?.mustChangePassword) {
-      dispatch(reduxSetUser(storedUser));
-      return;
-    }
+    if (isInitialSessionCheckDone.current) return;
+    isInitialSessionCheckDone.current = true;
+
+    // Scrub any legacy auth tokens lingering in localStorage
+    try {
+      localStorage.removeItem('school_erp_api_token');
+      localStorage.removeItem('school_erp_api_refresh_token');
+      localStorage.removeItem('school_erp_session_id');
+    } catch {}
+
+    const handleRestoreSuccess = (authenticatedUser: AuthUser) => {
+      storeAuthenticatedUser(authenticatedUser);
+      dispatch(reduxSetUser(authenticatedUser));
+      const matchedTab = getTabForUrl(window.location.pathname, authenticatedUser.role);
+      const initialTab = matchedTab || getDefaultTabForRole(authenticatedUser.role);
+      dispatch(reduxSetActiveTab(initialTab));
+      const targetUrl = getUrlForTab(initialTab, authenticatedUser.role);
+      if (window.location.pathname !== targetUrl) {
+        navigate(targetUrl, { replace: true });
+      }
+    };
+
+    // Validate server-side session directly via /auth/me/ using the HttpOnly session cookie
     dispatch(authApi.endpoints.getCurrentUser.initiate()).unwrap()
       .then((authenticatedUser) => {
-        storeAuthenticatedUser(authenticatedUser);
-        dispatch(reduxSetUser(authenticatedUser));
-        const matchedTab = getTabForUrl(window.location.pathname, authenticatedUser.role);
-        const initialTab = matchedTab || getDefaultTabForRole(authenticatedUser.role);
-        dispatch(reduxSetActiveTab(initialTab));
-        const targetUrl = getUrlForTab(initialTab, authenticatedUser.role);
-        if (window.location.pathname !== targetUrl) {
-          navigate(targetUrl, { replace: true });
+        if (authenticatedUser) {
+          handleRestoreSuccess(authenticatedUser);
         }
       })
-      .catch(() => {
-        clearAuthenticatedSession();
-        dispatch(reduxLogout());
+      .catch((error: any) => {
+        // If 401 or 403: unauthenticated or session expired
+        if (error?.status === 401 || error?.status === 403 || error?.originalStatus === 401 || error?.originalStatus === 403) {
+          clearAuthenticatedSession();
+          sessionStorage.clear();
+          dispatch(baseApi.util.resetApiState());
+          dispatch(reduxLogout());
+        } else {
+          // A cached profile is only display data, never proof of authentication.
+          // If the server cannot validate the cookie, fail closed so a stale
+          // profile cannot restore a logged-out session after a page refresh.
+          console.warn('Session verification encountered temporary server or network issue:', error);
+          clearAuthenticatedSession();
+          dispatch(reduxLogout());
+        }
+      })
+      .finally(() => {
+        dispatch(finishSessionRestore());
       });
-  }, [token]);
+  }, []);
 
   // Each operational portal receives only the students allowed by the API:
   // all in-school students for an admin, linked wards for a parent, and the
   // logged-in student’s own record for a student account.
-  const canFetchStudents = Boolean(token && user && ['School Admin', 'Parent', 'Student', 'Teacher'].includes(user.role));
+  const canFetchStudents = Boolean(isAuthenticated && user && ['School Admin', 'Parent', 'Student', 'Teacher'].includes(user.role));
   const { data: serverStudents, refetch: refetchStudents } = useGetStudentsQuery(undefined, {
     skip: !canFetchStudents,
     refetchOnMountOrArgChange: true,
@@ -267,7 +298,7 @@ function AuthenticatedApp() {
 
   useEffect(() => {
     if (!canFetchStudents) {
-      if (!token && user && ['School Admin', 'Parent', 'Student', 'Teacher'].includes(user.role)) {
+      if (!isAuthenticated && user && ['School Admin', 'Parent', 'Student', 'Teacher'].includes(user.role)) {
         try {
           const stored = localStorage.getItem('erp_students');
           if (stored) {
@@ -298,7 +329,7 @@ function AuthenticatedApp() {
         setCurrentAcademicYear((prev) => prev || rosterYear);
       }
     }
-  }, [canFetchStudents, serverStudents, token, user]);
+  }, [canFetchStudents, serverStudents, isAuthenticated, user]);
 
   useEffect(() => {
     if (canFetchStudents && activeTab === 'student') {
@@ -322,7 +353,7 @@ function AuthenticatedApp() {
   };
 
   useEffect(() => {
-    if (!token || !user || user.role === 'Super Admin') {
+    if (!isAuthenticated || !user || user.role === 'Super Admin') {
       setAcademicYears([]);
       setAcademicClasses([]);
       setCurrentAcademicYear('');
@@ -345,35 +376,37 @@ function AuthenticatedApp() {
         setCurrentAcademicYear('');
       });
     return () => { active = false; };
-  }, [token, user?.schoolId, user?.role]);
+  }, [isAuthenticated, user?.schoolId, user?.role]);
 
   useEffect(() => {
-    if (!token || user?.role !== 'School Admin') {
+    if (!isAuthenticated || user?.role !== 'School Admin') {
       setAccountDirectory([]);
       return;
     }
     dispatch(authApi.endpoints.getUsers.initiate()).unwrap()
       .then(setAccountDirectory)
       .catch(() => setAccountDirectory([]));
-  }, [token, user?.email, user?.schoolId, user?.role]);
+  }, [isAuthenticated, user?.email, user?.schoolId, user?.role]);
 
   useEffect(() => {
     const expireSession = () => {
       clearAuthenticatedSession();
+      sessionStorage.clear();
+      dispatch(baseApi.util.resetApiState());
       dispatch(reduxLogout());
       setStudents([]);
       setAccountDirectory([]);
     };
     window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, expireSession);
     return () => window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, expireSession);
-  }, []);
+  }, [dispatch]);
 
   // Login handler
-  const handleLogin = (newUser: AuthUser, newToken: string) => {
+  const handleLogin = (newUser: AuthUser, _newToken: string) => {
     setStudents([]);
-    if (newToken) {
-      dispatch(reduxSetAccessToken(newToken));
-    }
+    setAccountDirectory([]);
+    sessionStorage.clear();
+    dispatch(baseApi.util.resetApiState());
     dispatch(reduxSetUser(newUser));
     storeAuthenticatedUser(newUser);
     emitNotification({
@@ -391,20 +424,32 @@ function AuthenticatedApp() {
 
   // Logout handler
   const handleLogout = async () => {
-    // Local cleanup must happen even when the network is unavailable.  When
-    // reachable, the API blacklists the refresh token before it is discarded.
+    chatSocket.disconnect();
     try {
       await deactivateFcmDeviceToken();
     } catch {
-      // The token is also replaced on the next login and invalid Firebase
-      // tokens are removed by the backend after delivery feedback.
+      // The backend removes invalid device tokens after delivery feedback.
     }
     try {
       await dispatch(authApi.endpoints.logout.initiate()).unwrap();
-    } catch {
-      // The session is still removed from this device below.
+    } catch (error: any) {
+      // The session cookie is HttpOnly, so a failed server logout cannot be
+      // completed by clearing browser storage. Keep the user signed in and
+      // require a retry instead of leaving a live server session behind.
+      if (error?.status !== 401 && error?.originalStatus !== 401) {
+        chatSocket.connect();
+        emitNotification({
+          title: 'Could not sign out',
+          message: 'The server could not end this session. Check your connection and try again.',
+          tone: 'danger',
+          source: 'auth',
+        });
+        return;
+      }
     }
     clearAuthenticatedSession();
+    sessionStorage.clear();
+    dispatch(baseApi.util.resetApiState());
     dispatch(reduxLogout());
     setStudents([]);
     setAccountDirectory([]);
@@ -551,18 +596,18 @@ function AuthenticatedApp() {
   useEffect(() => {
     // API-backed accounts own credentials on the server. Never replace them
     // with locally invented values for display.
-    if (token) return;
+    if (isAuthenticated) return;
     if (!user || students.length === 0) return;
     if (!['Super Admin', 'School Admin'].includes(user.role)) return;
     students.forEach(student => createStudentAndParentLogins(student, false));
-  }, [token, user?.email, user?.role, students.length]);
+  }, [isAuthenticated, user?.email, user?.role, students.length]);
 
   const handleAddStudent = async (newS: Student): Promise<Student> => {
     const enriched: Student = {
       ...newS,
       academicYear: newS.academicYear || currentAcademicYear
     };
-    if (token) {
+    if (isAuthenticated) {
       const body = new FormData();
       const fields: Record<string, string | number | undefined> = {
         admissionNo: enriched.admissionNo, name: enriched.name, class_: enriched.class, sectionId: enriched.sectionId,
@@ -639,7 +684,7 @@ function AuthenticatedApp() {
 
   const handleStudentApproved = (approvedStudent: Student) => {
     setStudents(prev => [approvedStudent, ...prev.filter(s => s.id !== approvedStudent.id)]);
-    if (token) {
+    if (isAuthenticated) {
       dispatch(studentApi.endpoints.getStudents.initiate(undefined)).unwrap()
         .then((rows) => {
           setStudents(rows.map((s) => ({
@@ -668,7 +713,7 @@ function AuthenticatedApp() {
   };
 
   const handleUpdateStudent = async (updatedStudent: Student) => {
-    if (token) {
+    if (isAuthenticated) {
       const body = new FormData();
       const fields: Record<string, string | number | undefined> = {
         name: updatedStudent.name, class_: updatedStudent.class, section: updatedStudent.section, sectionId: updatedStudent.sectionId,
@@ -691,7 +736,7 @@ function AuthenticatedApp() {
     }
     setStudents(prev => {
       const next = prev.map(student => student.id === updatedStudent.id ? updatedStudent : student);
-      if (!token) {
+      if (!isAuthenticated) {
         try { localStorage.setItem('erp_students', JSON.stringify(next)); } catch { }
       }
       return next;
@@ -728,12 +773,12 @@ function AuthenticatedApp() {
 
   const handleDeleteStudent = async (studentId: string): Promise<void> => {
     const student = students.find(s => s.id === studentId);
-    if (token) {
+    if (isAuthenticated) {
       await dispatch(studentApi.endpoints.deleteStudent.initiate(studentId)).unwrap();
     }
     setStudents(prev => {
       const next = prev.filter(item => item.id !== studentId);
-      if (!token) {
+      if (!isAuthenticated) {
         try { localStorage.setItem('erp_students', JSON.stringify(next)); } catch { }
       }
       return next;
@@ -1162,9 +1207,10 @@ function AuthenticatedApp() {
           { id: 'fees', label: 'Fees Invoicing', icon: CreditCard },
           { id: 'staff-fee', label: 'Staff Fee', icon: Wallet },
           { id: 'exams', label: 'Exams & Grading', icon: FileText },
-          { id: 'communication', label: 'Communications', icon: MessageSquare },
-          { id: 'community-events', label: 'Community & Events', icon: Globe2 },
-          { id: 'transport', label: 'Transport GPS', icon: Truck }
+          { id: 'communication', label: 'Direct Chat', icon: MessageSquare },
+          { id: 'community-events', label: 'Community', icon: Globe2 },
+          { id: 'transport', label: 'Transport GPS', icon: Truck },
+          { id: 'store', label: 'School Store', icon: ShoppingBag }
         ];
 
       case 'Teacher':
@@ -1177,8 +1223,9 @@ function AuthenticatedApp() {
           { id: 'salary-details', label: 'Salary Details', icon: Receipt },
           { id: 'teacher-documents', label: 'My Documents', icon: FolderCheck },
           { id: 'exams', label: 'Exams & Grading', icon: FileText },
-          { id: 'communication', label: 'Communications', icon: MessageSquare },
-          { id: 'community-events', label: 'Community & Events', icon: Globe2 },
+          { id: 'communication', label: 'Direct Chat', icon: MessageSquare },
+          { id: 'community-events', label: 'Community', icon: Globe2 },
+          { id: 'store', label: 'School Store', icon: ShoppingBag },
         ];
 
       case 'Parent':
@@ -1189,8 +1236,9 @@ function AuthenticatedApp() {
           { id: 'attendance', label: 'Ward Attendance', icon: CheckSquare },
           { id: 'fees', label: 'School Fee Desk', icon: CreditCard },
           { id: 'exams', label: 'Exam Reports', icon: FileText },
-          { id: 'communication', label: 'Teacher Chat', icon: MessageSquare },
-          { id: 'community-events', label: 'Community & Events', icon: Globe2 },
+          { id: 'communication', label: 'Direct Chat', icon: MessageSquare },
+          { id: 'community-events', label: 'Community', icon: Globe2 },
+          { id: 'store', label: 'School Store', icon: ShoppingBag },
           { id: 'transport', label: 'Transport Tracker', icon: Truck }
         ];
 
@@ -1201,9 +1249,10 @@ function AuthenticatedApp() {
           { id: 'homework', label: 'Class Homework', icon: BookOpen },
           { id: 'student-documents', label: 'My Documents', icon: FolderCheck },
           { id: 'exams', label: 'Datesheets & Reports', icon: FileText },
-          { id: 'communication', label: 'Class Notices', icon: Bell },
+          { id: 'communication', label: 'Direct Chat', icon: MessageSquare },
           { id: 'fees', label: 'My School Fees', icon: CreditCard },
-          { id: 'community-events', label: 'School Community', icon: Globe2 },
+          { id: 'community-events', label: 'Community', icon: Globe2 },
+          { id: 'store', label: 'School Store', icon: ShoppingBag },
           { id: 'transport', label: 'Transport GPS', icon: Truck }
         ];
 
@@ -1215,15 +1264,23 @@ function AuthenticatedApp() {
   const [chatUnreadPeopleCount, setChatUnreadPeopleCount] = useState<number>(0);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      chatSocket.disconnect();
+      return;
+    }
+
+    // Connect to WebSocket globally so real-time sync (homework, attendance, chat, notifications) is alive everywhere!
+    chatSocket.connect();
     let alive = true;
 
     const fetchUnread = async () => {
       try {
-        const token = localStorage.getItem('token') || sessionStorage.getItem('token');
-        if (!token) return;
         const res = await fetch('/api/v1/chat/conversations/', {
-          headers: { Authorization: `Bearer ${token}` }
+          credentials: 'include',
+          headers: {
+            'X-Client-Type': 'web',
+            'X-Auth-Mode': 'session',
+          },
         });
         if (!res.ok) return;
         const convs = await res.json();
@@ -1242,11 +1299,66 @@ function AuthenticatedApp() {
     const unsubRead = chatSocket.on('conversation.read', () => fetchUnread());
     const unsubUnread = chatSocket.on('unread_count.updated', () => fetchUnread());
 
+    // Listen to real-time homework events for instant notifications across open tabs
+    const unsubHomework = chatSocket.on('homework.sync', (payload: any) => {
+      const action = payload?.action;
+      const data = payload?.data || {};
+      const title = data?.title || 'Homework';
+      const className = data?.className || '';
+      const subjectName = data?.subjectName || '';
+
+      if (action === 'created') {
+        emitNotification({
+          title: 'New Homework Assigned',
+          message: `${title} for ${className} ${subjectName}`.trim(),
+          tone: 'info',
+          source: 'Homework',
+        });
+      } else if (action === 'submitted') {
+        const studentName = data?.student_name || 'A student';
+        emitNotification({
+          title: 'Homework Submitted',
+          message: `${studentName} submitted work for ${title}`.trim(),
+          tone: 'success',
+          source: 'Homework',
+        });
+      } else if (action === 'graded') {
+        emitNotification({
+          title: 'Homework Graded',
+          message: `Evaluation completed for ${title}`.trim(),
+          tone: 'success',
+          source: 'Homework',
+        });
+      } else if (action === 'deleted') {
+        emitNotification({
+          title: 'Homework Removed',
+          message: 'A homework assignment was removed.',
+          tone: 'warning',
+          source: 'Homework',
+        });
+      }
+    });
+
+    const unsubAttendance = chatSocket.on('attendance.sync', (payload: any) => {
+      const action = payload?.action;
+      if (action === 'bulk_marked') {
+        const count = payload?.data?.count || '';
+        emitNotification({
+          title: 'Attendance Synced',
+          message: `Class attendance register updated (${count} records) in real time.`,
+          tone: 'info',
+          source: 'Attendance',
+        });
+      }
+    });
+
     return () => {
       alive = false;
       unsubMsg();
       unsubRead();
       unsubUnread();
+      unsubHomework();
+      unsubAttendance();
     };
   }, [user]);
 
@@ -1327,7 +1439,7 @@ function AuthenticatedApp() {
         }`}
       id="school-erp-app"
     >
-      <PushNotificationManager enabled={Boolean(token && user)} />
+      <PushNotificationManager enabled={Boolean(isAuthenticated && user)} />
 
       {/* Dynamic theme style overrides */}
       <style>{`
@@ -1361,8 +1473,19 @@ function AuthenticatedApp() {
         <div className="w-full h-full relative z-20 bg-[#080c14] overflow-y-auto">
           <PublicLearningModule onExit={() => setIsPublicMode(false)} />
         </div>
-      ) : (!user || !token) ? (
-        <LoginScreen onLogin={handleLogin} brandSettings={brandSettings} onPublicAccess={() => setIsPublicMode(true)} />
+      ) : isRestoringSession ? (
+        <div className="w-full h-screen bg-[#080c14] flex flex-col items-center justify-center text-white relative z-20">
+          <div className="w-10 h-10 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-3" />
+          <p className="text-xs text-slate-400 font-medium tracking-wide">Securing session...</p>
+        </div>
+      ) : (!user || !isAuthenticated) ? (
+        <LoginScreen
+          key={loginPortalRole || 'general-login'}
+          onLogin={handleLogin}
+          brandSettings={brandSettings}
+          portalRole={loginPortalRole}
+          onPublicAccess={() => setIsPublicMode(true)}
+        />
       ) : (
         <>
           {credentialSlip && createPortal(
@@ -1429,7 +1552,12 @@ function AuthenticatedApp() {
             volpeLogo={volpeLogo}
             menuItems={menuItems}
             activeTab={activeTab}
-            onSelectTab={(tabId) => navigateToTab(tabId)}
+            onSelectTab={(tabId) => {
+              navigateToTab(tabId);
+              if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                setIsSidebarOpen(false);
+              }
+            }}
             user={user}
           />
 
@@ -1437,7 +1565,7 @@ function AuthenticatedApp() {
           <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 
             {/* Top Header navbar */}
-            <header id="app-topbar" className={`h-16 flex items-center justify-between px-6 shrink-0 relative z-30 border-b ${isGlass
+            <header id="app-topbar" className={`print:hidden h-16 flex items-center justify-between px-6 shrink-0 relative z-30 border-b ${isGlass
                 ? 'bg-slate-900/40 border-slate-850 backdrop-blur-md text-slate-100'
                 : is3D
                   ? 'bg-white border-slate-200 shadow-sm text-slate-800'
@@ -1446,7 +1574,7 @@ function AuthenticatedApp() {
               <div className="flex items-center gap-4">
                 <button
                   onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                  className={`p-1.5 rounded-xl md:block hidden cursor-pointer border transition-all ${isGlass
+                  className={`p-1.5 rounded-xl flex items-center justify-center cursor-pointer border transition-all ${isGlass
                       ? 'border-slate-800 bg-slate-950/40 text-slate-300 hover:bg-slate-800 hover:text-white'
                       : is3D
                         ? 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white shadow-[2px_2px_5px_rgba(163,177,198,0.15)]'
@@ -1456,20 +1584,15 @@ function AuthenticatedApp() {
                   <Menu className="w-5 h-5" />
                 </button>
 
-                <div className="md:hidden flex items-center gap-2">
-                  <img
-                    src={brandSettings?.logoType === 'image' && brandSettings.logoImageUrl ? brandSettings.logoImageUrl : volpeLogo}
-                    alt="Logo"
-                    className="w-7 h-7 object-contain shrink-0"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).src = volpeLogo;
-                    }}
-                    referrerPolicy="no-referrer"
-                  />
-                  <h2 className="text-xs font-sans font-bold tracking-wider text-slate-900 uppercase truncate max-w-[150px] sm:max-w-none">
-                    {brandSettings.schoolName}
-                  </h2>
+                <div className="flex items-center gap-1.5 sm:gap-2 pl-1 sm:pl-3 min-w-0">
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">{user?.role || 'Portal'}</span>
+                  <span className="text-xs text-slate-300">/</span>
+                  <span className="text-xs font-black text-slate-800 tracking-tight">
+                    {menuItems.find((m) => m.id === activeTab)?.label || 'Dashboard'}
+                  </span>
                 </div>
+
+
               </div>
 
               <div className="flex items-center gap-2 sm:gap-4">
@@ -1477,7 +1600,28 @@ function AuthenticatedApp() {
 
                 {/* Logged in User Information */}
                 <div className={`flex items-center gap-3 pl-4 border-l ${isGlass ? 'border-slate-850' : 'border-slate-200'}`} id="user-header-card">
-
+                  {user && (
+                    <div className="flex items-center gap-2.5">
+                      <div className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 text-xs font-black text-white shadow-xs select-none">
+                        {(user.name || user.email || 'U').slice(0, 1).toUpperCase()}
+                      </div>
+                      <div className="hidden sm:block text-left">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-slate-900 leading-tight truncate max-w-[130px]">{user.name || 'User'}</p>
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase tracking-wider ${
+                            user.role === 'School Admin' ? 'bg-indigo-100 text-indigo-700' :
+                            user.role === 'Teacher' ? 'bg-purple-100 text-purple-700' :
+                            user.role === 'Student' ? 'bg-emerald-100 text-emerald-700' :
+                            user.role === 'Parent' ? 'bg-amber-100 text-amber-700' :
+                            'bg-slate-100 text-slate-700'
+                          }`}>
+                            {user.role}
+                          </span>
+                        </div>
+                        <p className="text-[10px] font-medium text-slate-400 leading-tight truncate max-w-[130px]">{user.schoolName || brandSettings.schoolName || user.email}</p>
+                      </div>
+                    </div>
+                  )}
 
                   {(user?.role === 'School Admin' || user?.role === 'Super Admin') && (
                     <button
@@ -1515,7 +1659,7 @@ function AuthenticatedApp() {
             </header>
 
             {/* Inner Tab Router Body */}
-            <main ref={mainScrollRef} className="mb-14 min-h-0 flex-1 overscroll-contain overflow-y-auto p-6 md:mb-0 md:p-8">
+            <main ref={mainScrollRef} className="min-h-0 flex-1 overscroll-contain overflow-y-auto p-3 sm:p-5 md:p-8">
               <AnimatePresence mode="wait">
                 <motion.div
                   key={activeTab}
@@ -1546,15 +1690,24 @@ function AuthenticatedApp() {
                     />
                   )}
                   {canAccessActiveTab && activeTab === 'dashboard' && user && (
-                    <Dashboard
-                      onNavigateToTab={(tab: string) => navigateToTab(tab)}
-                      isGlass={isGlass}
-                      role={user.role}
-                      userName={user.name}
-                      students={students}
-                      schoolName={user.schoolName || brandSettings.schoolName}
-                      currentAcademicYear={currentAcademicYear}
-                    />
+                    user.role === 'Teacher' || user.role === 'Student' || user.role === 'Parent' ? (
+                      <RoleDashboard
+                        role={user.role}
+                        userName={user.name}
+                        onNavigateToTab={(tab: string) => navigateToTab(tab)}
+                        isGlass={isGlass}
+                      />
+                    ) : (
+                      <Dashboard
+                        onNavigateToTab={(tab: string) => navigateToTab(tab)}
+                        isGlass={isGlass}
+                        role={user.role}
+                        userName={user.name}
+                        students={students}
+                        schoolName={user.schoolName || brandSettings.schoolName}
+                        currentAcademicYear={currentAcademicYear}
+                      />
+                    )
                   )}
                   {canAccessActiveTab && activeTab === 'admissions' && user?.role === 'School Admin' && (
                     <AdmissionsModule
@@ -1651,7 +1804,8 @@ function AuthenticatedApp() {
                   {canAccessActiveTab && activeTab === 'communication' && (
                     <CommunicationModule user={user} isGlass={isGlass} onNavigateToTab={(tab: string) => navigateToTab(tab)} />
                   )}
-                  {canAccessActiveTab && activeTab === 'community-events' && <CommunityEventsModule user={user} />}
+                  {canAccessActiveTab && activeTab === 'community-events' && <CommunityEventsModule user={user} onNavigateToTab={(tab: string) => navigateToTab(tab)} />}
+                  {canAccessActiveTab && activeTab === 'store' && <StoreModule user={user} schoolName={user.schoolName || brandSettings.schoolName} />}
                   {canAccessActiveTab && activeTab === 'notify-teachers' && user?.role === 'School Admin' && (
                     <NotificationComposerPage mode="school-to-teachers" user={user} students={students} />
                   )}
@@ -1666,86 +1820,6 @@ function AuthenticatedApp() {
                 </motion.div>
               </AnimatePresence>
             </main>
-          </div>
-
-          {/* Mobile Bottom Navigation Bar (rendered on smaller screens) */}
-          <div className="md:hidden !fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur-md border-t border-slate-200 text-slate-500 grid grid-cols-5 h-16 z-50 px-1 py-1 shadow-[0_-4px_20px_rgba(0,0,0,0.08)]">
-            <button
-              onClick={() => navigateToTab(getFirstAllowedTab(['dashboard', 'super-admin-dashboard']))}
-              className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none ${
-                activeTab === 'dashboard' || activeTab === 'super-admin-dashboard' ? 'text-indigo-600' : 'text-slate-500'
-              }`}
-            >
-              {(activeTab === 'dashboard' || activeTab === 'super-admin-dashboard') && (
-                <motion.div
-                  layoutId="mobileActiveTab"
-                  transition={{ type: 'spring', stiffness: 450, damping: 35 }}
-                  className="absolute inset-0 rounded-xl bg-indigo-50/80 -z-10"
-                />
-              )}
-              <Grid className="w-4 h-4" />
-              <span>Home</span>
-            </button>
-
-            <button
-              onClick={() => navigateToTab(getFirstAllowedTab(['super-admin-schools', 'student', 'teachers', 'academic']))}
-              className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none ${
-                ['student', 'teachers', 'academic', 'super-admin-schools'].includes(activeTab) ? 'text-indigo-600' : 'text-slate-500'
-              }`}
-            >
-              {['student', 'teachers', 'academic', 'super-admin-schools'].includes(activeTab) && (
-                <motion.div
-                  layoutId="mobileActiveTab"
-                  transition={{ type: 'spring', stiffness: 450, damping: 35 }}
-                  className="absolute inset-0 rounded-xl bg-indigo-50/80 -z-10"
-                />
-              )}
-              <Users className="w-4 h-4" />
-              <span>{user.role === 'Super Admin' ? 'Branches' : user.role === 'School Admin' ? 'Students' : 'Academic'}</span>
-            </button>
-
-            <button
-              onClick={() => navigateToTab(getFirstAllowedTab(['super-admin-admins', 'attendance', 'exams']))}
-              className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none ${
-                ['attendance', 'exams', 'super-admin-admins'].includes(activeTab) ? 'text-indigo-600' : 'text-slate-500'
-              }`}
-            >
-              {['attendance', 'exams', 'super-admin-admins'].includes(activeTab) && (
-                <motion.div
-                  layoutId="mobileActiveTab"
-                  transition={{ type: 'spring', stiffness: 450, damping: 35 }}
-                  className="absolute inset-0 rounded-xl bg-indigo-50/80 -z-10"
-                />
-              )}
-              <CheckSquare className="w-4 h-4" />
-              <span>{user.role === 'Super Admin' ? 'Admins' : allowedTabIds.includes('attendance') ? 'Attendance' : 'Exams'}</span>
-            </button>
-
-            <button
-              onClick={() => navigateToTab(getFirstAllowedTab(['super-admin-sys-settings', 'learning', 'communication', 'transport']))}
-              disabled={!allowedTabIds.some(id => ['super-admin-sys-settings', 'learning', 'communication', 'transport'].includes(id))}
-              className={`relative flex flex-col items-center justify-center gap-0.5 text-[9px] font-bold transition-colors select-none disabled:opacity-30 ${
-                ['learning', 'communication', 'transport', 'super-admin-sys-settings'].includes(activeTab) ? 'text-indigo-600' : 'text-slate-500'
-              }`}
-            >
-              {['learning', 'communication', 'transport', 'super-admin-sys-settings'].includes(activeTab) && (
-                <motion.div
-                  layoutId="mobileActiveTab"
-                  transition={{ type: 'spring', stiffness: 450, damping: 35 }}
-                  className="absolute inset-0 rounded-xl bg-indigo-50/80 -z-10"
-                />
-              )}
-              <BookOpen className="w-4 h-4" />
-              <span>{user.role === 'Super Admin' ? 'Settings' : allowedTabIds.includes('learning') ? 'LMS' : allowedTabIds.includes('communication') ? 'Chat' : 'More'}</span>
-            </button>
-
-            <button
-              onClick={handleLogout}
-              className="flex flex-col items-center justify-center gap-0.5 text-[9px] text-rose-500 hover:text-rose-600 font-bold transition-colors"
-            >
-              <LogOut className="w-4 h-4" />
-              <span>Log Out</span>
-            </button>
           </div>
 
           {(user?.role === 'School Admin' || user?.role === 'Super Admin') && (
@@ -1764,7 +1838,6 @@ function AuthenticatedApp() {
 
 const LandingPage = React.lazy(() => import('./components/marketing/LandingPage'));
 const ContactPage = React.lazy(() => import('./components/marketing/ContactPage'));
-const ProductPage = React.lazy(() => import('./components/marketing/ProductPage'));
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -1792,11 +1865,13 @@ export default function App() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/contact" element={<ContactPage />} />
         <Route path="/demo" element={<ContactPage />} />
-        <Route path="/platform" element={<ProductPage kind="platform" />} />
-        <Route path="/solutions" element={<ProductPage kind="solutions" />} />
-        <Route path="/how-it-works" element={<ProductPage kind="how-it-works" />} />
-        <Route path="/security" element={<ProductPage kind="security" />} />
+        <Route path="/platform" element={<Navigate to="/" replace />} />
+        <Route path="/solutions" element={<Navigate to="/" replace />} />
+        <Route path="/how-it-works" element={<Navigate to="/" replace />} />
+        <Route path="/security" element={<Navigate to="/" replace />} />
         <Route path="/login" element={<AuthenticatedApp />} />
+        <Route path="/admin" element={<AuthenticatedApp />} />
+        <Route path="/super-admin" element={<AuthenticatedApp />} />
         <Route path="/app/*" element={<AuthenticatedApp />} />
         <Route path="/app" element={<AuthenticatedApp />} />
         <Route path="/enroll" element={<StudentEnrollmentPage />} />

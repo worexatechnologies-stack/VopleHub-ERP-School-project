@@ -1,8 +1,10 @@
-from django.db.models import Q
+from django.db import transaction
+from django.db.models import Q, Count, Exists, OuterRef
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.http import Http404, HttpResponse
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from apps.accounts.models import User
@@ -19,7 +21,7 @@ from .serializers import (
 
 class EventPermission(permissions.BasePermission):
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        if not (request.user and request.user.is_authenticated):
             return False
         if request.method in permissions.SAFE_METHODS:
             return True
@@ -29,10 +31,35 @@ class EventPermission(permissions.BasePermission):
             User.Role.TEACHER,
         ]
 
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if user.role == User.Role.SUPER_ADMIN:
+            return True
+        if str(obj.school_id or '') != str(user.school_id or ''):
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return True
+        if user.role == User.Role.TEACHER:
+            return obj.created_by_id == user.id
+        return False
+
 
 class SchoolEventViewSet(TenantScopedViewSet):
     """Tenant-scoped School Event CRUD, deadline-enforced registration, and attendee management."""
-    queryset = SchoolEvent.objects.select_related('school', 'created_by').prefetch_related('registrations')
+    queryset = SchoolEvent.objects.select_related('school', 'created_by').defer('image_data').annotate(
+        active_registration_count=Count(
+            'registrations',
+            filter=Q(registrations__status=EventRegistration.RegistrationStatus.CONFIRMED),
+        )
+    ).annotate(
+        has_event_image=Exists(
+            SchoolEvent.objects.filter(pk=OuterRef('pk'), image_data__isnull=False)
+        )
+    ).prefetch_related('registrations')
     serializer_class = SchoolEventSerializer
     permission_classes = [EventPermission]
     search_fields = ['title', 'venue', 'description', 'kind']
@@ -66,21 +93,47 @@ class SchoolEventViewSet(TenantScopedViewSet):
             school_id=user.school_id,
             created_by=user,
         )
+        self._queue_event_notification(event, user)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        was_published = serializer.instance.status == SchoolEvent.Status.PUBLISHED
+        event = serializer.save()
+        if not was_published and event.status == SchoolEvent.Status.PUBLISHED:
+            self._queue_event_notification(event, user)
+
+    def _queue_event_notification(self, event, user):
+        if event.status != SchoolEvent.Status.PUBLISHED:
+            return
         try:
-            from apps.notifications.services import create_bulk_notifications
-            users = list(User.objects.filter(school_id=user.school_id, is_active=True).exclude(id=user.id))
-            create_bulk_notifications(
-                school=user.school,
-                recipients=users,
+            from apps.notifications.tasks import enqueue_notification_fanout
+            enqueue_notification_fanout(
+                school_id=user.school_id,
+                sender_id=user.id,
                 title=f"New School Event: {event.title}",
                 body=f"{event.title} is scheduled for {event.date.strftime('%B %d, %Y') if event.date else 'upcoming date'} ({event.venue or 'Campus'}).",
                 category="Event",
                 channel="events",
-                sender=user,
-                related={'type': 'event', 'eventId': str(event.id), 'title': event.title},
+                related={
+                    'type': 'event',
+                    'eventId': str(event.id),
+                    'title': event.title,
+                    'audience': event.audience,
+                },
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Could not queue event notification: %s", exc)
+
+    @action(methods=['get'], detail=True, permission_classes=[permissions.IsAuthenticated], url_path='image')
+    def image(self, request, pk=None):
+        event = self.get_object()
+        if not event.image_data:
+            raise Http404
+        response = HttpResponse(bytes(event.image_data), content_type=event.image_content_type or 'image/webp')
+        response['Cache-Control'] = 'private, max-age=300'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @extend_schema(
         request=EventRegisterInputSerializer,
@@ -90,6 +143,7 @@ class SchoolEventViewSet(TenantScopedViewSet):
         },
     )
     @action(methods=['post'], detail=True, permission_classes=[permissions.IsAuthenticated])
+    @transaction.atomic
     def register(self, request, pk=None):
         """Register the authenticated user or their student record for an event.
         
@@ -100,6 +154,9 @@ class SchoolEventViewSet(TenantScopedViewSet):
         4. Duplicate registration prevention
         """
         event = self.get_object()
+        # Serialize registrations for this event so concurrent requests cannot
+        # both observe the final available seat and exceed capacity.
+        event = SchoolEvent.objects.select_for_update().get(pk=event.pk)
         user = request.user
 
         # 1. Registration deadline check
@@ -254,11 +311,39 @@ class SchoolEventViewSet(TenantScopedViewSet):
         return Response({'detail': 'Registration successfully cancelled.'}, status=status.HTTP_200_OK)
 
 
+class EventRegistrationPermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if user.role == User.Role.SUPER_ADMIN:
+            return True
+        if user.role == User.Role.SCHOOL_ADMIN:
+            return str(obj.school_id or '') == str(user.school_id or '')
+        if request.method in permissions.SAFE_METHODS:
+            if user.role == User.Role.TEACHER:
+                return str(obj.school_id or '') == str(user.school_id or '')
+            student_profile = getattr(user, 'student_profile', None)
+            if student_profile and obj.student_id == student_profile.student_id:
+                return True
+            return obj.user_id == user.id
+        student_profile = getattr(user, 'student_profile', None)
+        if student_profile and obj.student_id == student_profile.student_id:
+            return True
+        return obj.user_id == user.id
+
+
 class EventRegistrationViewSet(TenantScopedViewSet):
-    """Tenant-scoped registration management and ticket querying."""
+    """Read-only, tenant-scoped registration and ticket querying.
+
+    Registration creation/cancellation goes through the validated event
+    actions, which bind the authenticated user and student server-side.
+    """
     queryset = EventRegistration.objects.select_related('school', 'event', 'student', 'user')
     serializer_class = EventRegistrationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [EventRegistrationPermission]
+    http_method_names = ['get', 'head', 'options']
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -291,6 +376,19 @@ class CommunityPostPermission(permissions.BasePermission):
             User.Role.TEACHER,
         ]
 
+    def has_object_permission(self, request, view, obj):
+        if not request.user.is_authenticated:
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        # Super Admins and School Admins can manage any post in their school
+        if request.user.role in [User.Role.SUPER_ADMIN, User.Role.SCHOOL_ADMIN]:
+            return str(obj.school_id or '') == str(request.user.school_id or '')
+        # Teachers can only edit/delete their OWN posts
+        if request.user.role == User.Role.TEACHER:
+            return obj.author_id == request.user.id
+        return False
+
 
 class CommunityPostViewSet(TenantScopedViewSet):
     """Tenant-scoped Community Feed Announcements and Updates."""
@@ -310,17 +408,22 @@ class CommunityPostViewSet(TenantScopedViewSet):
             author_name=author_name,
         )
         try:
-            from apps.notifications.services import create_bulk_notifications
-            users = list(User.objects.filter(school_id=user.school_id, is_active=True).exclude(id=user.id))
-            create_bulk_notifications(
-                school=user.school,
-                recipients=users,
+            from apps.notifications.tasks import enqueue_notification_fanout
+            enqueue_notification_fanout(
+                school_id=user.school_id,
+                sender_id=user.id,
                 title=f"New Announcement: {post.title}",
                 body=f"{author_name} posted: {post.body[:120]}...",
                 category="Notice",
                 channel="community",
-                sender=user,
-                related={'type': 'notice', 'postId': str(post.id), 'title': post.title},
+                related={
+                    'type': 'notice',
+                    'postId': str(post.id),
+                    'title': post.title,
+                    'audience': post.audience,
+                    'channels': post.channels,
+                },
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Could not queue community notification: %s", exc)

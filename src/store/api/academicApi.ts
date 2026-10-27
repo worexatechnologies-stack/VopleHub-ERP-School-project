@@ -16,6 +16,9 @@ export interface ClassRecord {
   sortOrder: number;
   subjectIds?: number[];
   subjects?: Array<number | { id?: number }>;
+  classTeacherId?: number | null;
+  classTeacherName?: string | null;
+  classTeacherEmail?: string | null;
   schoolId?: number;
 }
 
@@ -23,6 +26,9 @@ export interface SectionRecord {
   id: number;
   classId: number;
   name: string;
+  classTeacherId?: number | null;
+  classTeacherName?: string | null;
+  classTeacherEmail?: string | null;
   schoolId?: number;
 }
 
@@ -97,11 +103,11 @@ export const academicApi = baseApi.injectEndpoints({
       queryFn: (_arg, _api, _extra, baseQuery) => fetchAllPages<ClassRecord>('/classes/', baseQuery),
       providesTags: ['Class'],
     }),
-    createClass: build.mutation<ClassRecord, { name: string; code: string; sortOrder: number; subjectIds: number[] }>({
+    createClass: build.mutation<ClassRecord, { name: string; code: string; sortOrder: number; subjectIds: number[]; classTeacherId?: number | null }>({
       query: (body) => ({ url: '/classes/', method: 'POST', body }),
       invalidatesTags: ['Class'],
     }),
-    updateClass: build.mutation<ClassRecord, { id: number; name: string; code: string; sortOrder: number; subjectIds: number[] }>({
+    updateClass: build.mutation<ClassRecord, { id: number; name?: string; code?: string; sortOrder?: number; subjectIds?: number[]; classTeacherId?: number | null }>({
       query: ({ id, ...body }) => ({ url: `/classes/${id}/`, method: 'PATCH', body }),
       invalidatesTags: ['Class'],
     }),

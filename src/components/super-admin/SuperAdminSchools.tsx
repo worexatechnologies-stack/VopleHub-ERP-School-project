@@ -1,7 +1,8 @@
 import { FormEvent, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle, Plus, Power, Save, School, Trash2, XCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle, Plus, Power, RefreshCw, Save, School, Trash2, UsersRound, XCircle } from 'lucide-react';
 import {
   useGetSchoolsQuery,
+  useGetSchoolRecordCountsQuery,
   useCreateSchoolMutation,
   useUpdateSchoolMutation,
   useDeleteSchoolMutation,
@@ -10,7 +11,7 @@ import {
 } from '../../store/api/schoolApi';
 import { useAppDispatch } from '../../store';
 import { getErrorMessage, getErrorStatus } from '../../utils/apiError';
-import { ACCESS_TOKEN_STORAGE_KEY } from '../../utils/auth';
+import { getStoredAuthenticatedUser } from '../../utils/auth';
 import AuthenticatedImage from '../AuthenticatedImage';
 import { formatBytes, optimizeImageForUpload } from '../../services/imageOptimizer';
 
@@ -22,9 +23,18 @@ const normalizeCode = (value: string) => value
 
 export default function SuperAdminSchools() {
   const dispatch = useAppDispatch();
-  const tokenExists = Boolean(localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY));
-  const { data: rawSchools = [], isLoading, error: queryError } = useGetSchoolsQuery(undefined, {
+  const tokenExists = Boolean(getStoredAuthenticatedUser());
+  const { data: rawSchools = [], isLoading, error: queryError, refetch: refetchSchools } = useGetSchoolsQuery(undefined, {
     skip: !tokenExists,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
+  const { data: schoolRecordCounts, isFetching: isFetchingCounts, refetch: refetchCounts } = useGetSchoolRecordCountsQuery(undefined, {
+    skip: !tokenExists,
+    pollingInterval: 3000,
+    refetchOnMountOrArgChange: true,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
   });
   const [createSchoolMutation] = useCreateSchoolMutation();
   const [updateSchoolMutation] = useUpdateSchoolMutation();
@@ -213,16 +223,39 @@ export default function SuperAdminSchools() {
     <div className="space-y-6" id="sa-schools-container">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-base font-bold uppercase tracking-wide text-slate-800">School Directory</h2>
-          <p className="mt-0.5 text-xs text-slate-500">Create and manage database-backed schools with custom subdomains and branding.</p>
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-bold uppercase tracking-wide text-slate-800">School Directory</h2>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+              </span>
+              Live Sync
+            </span>
+          </div>
+          <p className="mt-0.5 text-xs text-slate-500">Create and manage database-backed schools with real-time student and faculty rosters.</p>
         </div>
-        <button
-          onClick={() => setIsAdding((value) => !value)}
-          className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-indigo-700"
-        >
-          <Plus className="h-4 w-4" />
-          {isAdding ? 'Cancel' : 'Create Real School'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              void refetchSchools();
+              void refetchCounts();
+            }}
+            title="Refresh school and roster counts immediately"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs transition hover:bg-slate-50 active:scale-95 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 text-slate-500 ${isFetchingCounts ? 'animate-spin text-indigo-600' : ''}`} />
+            <span className="hidden sm:inline">Sync</span>
+          </button>
+          <button
+            onClick={() => setIsAdding((value) => !value)}
+            className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-indigo-700 cursor-pointer"
+          >
+            <Plus className="h-4 w-4" />
+            {isAdding ? 'Cancel' : 'Create Real School'}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -343,6 +376,36 @@ export default function SuperAdminSchools() {
                 <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold ${school.isDemo ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>
                   {school.isDemo ? 'Demo data' : 'Real school'}
                 </span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="flex items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50/70 p-2.5 transition-all">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-800">
+                      <UsersRound className="h-3.5 w-3.5 shrink-0" />
+                      <span>Students</span>
+                      <span className="relative flex h-2 w-2" title="Live synced student roster count">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75"></span>
+                        <span className="relative inline-flex h-2 w-2 rounded-full bg-indigo-500"></span>
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400">Roster count</span>
+                  </div>
+                  <span className="rounded-lg bg-white px-2.5 py-1 text-sm font-black tabular-nums text-indigo-700 shadow-xs border border-indigo-100/60">
+                    {schoolRecordCounts?.[String(school.id)]?.students ?? school.studentCount ?? 0}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-100 bg-emerald-50/70 p-2.5 transition-all">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-800">
+                      <UsersRound className="h-3.5 w-3.5 shrink-0" />
+                      <span>Teachers</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400">Faculty count</span>
+                  </div>
+                  <span className="rounded-lg bg-white px-2.5 py-1 text-sm font-black tabular-nums text-emerald-700 shadow-xs border border-emerald-100/60">
+                    {schoolRecordCounts?.[String(school.id)]?.teachers ?? 0}
+                  </span>
+                </div>
               </div>
               <div className="mt-5 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
                 <span className={`flex items-center gap-1 text-xs font-semibold ${school.is_active ? 'text-emerald-600' : 'text-rose-600'}`}>

@@ -151,7 +151,31 @@ export default function TimetableView({
   return (
     <div className="space-y-6 animate-fade-in" id="timetable-view-portal">
       {/* Portal Header Card */}
-      <div className="portal-header-card flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      {/* Clean Print-Only Schedule Header */}
+      <div className="hidden print:block mb-4 pb-3 border-b-2 border-slate-900">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight">
+              {timingConfig?.schoolName || user?.schoolName || 'Volpehub Education'}
+            </h1>
+            <p className="text-sm font-bold text-slate-800 mt-1">
+              {headingText}
+            </p>
+          </div>
+          <div className="text-right">
+            <span className="inline-block px-3 py-1 rounded-md bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest">
+              OFFICIAL TIMETABLE SCHEDULE
+            </span>
+            <div className="text-[10px] font-mono text-slate-600 mt-1 space-y-0.5">
+              <div>Academic Session: {timingConfig?.academicYear || 'Current Year'}</div>
+              <div>Generated: {new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Portal Header Card (Screen Only) */}
+      <div className="portal-header-card flex flex-col md:flex-row justify-between items-start md:items-center gap-4 print:hidden">
         <div className="flex items-start gap-4">
           <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shrink-0">
             <Clock className="w-5 h-5 text-white" />
@@ -206,7 +230,7 @@ export default function TimetableView({
 
       {/* Quick Child Switcher Pills */}
       {user.role === 'Parent' && linkedChildren.length > 1 && (
-        <div className="portal-card px-5 py-4 flex flex-wrap items-center gap-2.5">
+        <div className="portal-card px-5 py-4 flex flex-wrap items-center gap-2.5 print:hidden">
           <span className="text-xs font-bold text-slate-500 mr-1">Switch Ward:</span>
           {linkedChildren.map((child) => {
             const isSelected = activeChild?.id === child.id;
@@ -231,9 +255,9 @@ export default function TimetableView({
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 print:block">
         {/* Main schedule view */}
-        <div className="lg:col-span-3 space-y-5">
+        <div className="lg:col-span-3 space-y-5 print:w-full print:max-w-none">
           {displayMode === 'weekly' ? (
             <TimetableGrid
               slots={user.role === 'Teacher' ? slots : slots.filter(s => s.published)}
@@ -378,7 +402,7 @@ export default function TimetableView({
         </div>
 
         {/* Sidebar panels */}
-        <div className="space-y-5">
+        <div className="space-y-5 print:hidden">
           {/* My Subjects card */}
           <div className="portal-card p-5 space-y-4">
             <div className="flex items-start gap-2.5">
@@ -492,6 +516,15 @@ export default function TimetableView({
               Attendance rosters lock 15 minutes after the first period bell.
             </div>
           </div>
+        </div>
+      </div>
+      {/* Print-Only Official Footer */}
+      <div className="hidden print:flex items-center justify-between text-[8pt] text-slate-500 border-t border-slate-300 pt-3 mt-4">
+        <div>
+          <span>Volpehub Education ERP • Confidential School Record</span>
+        </div>
+        <div>
+          <span>Authorized Signatory / Principal: ________________________________</span>
         </div>
       </div>
     </div>

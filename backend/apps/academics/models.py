@@ -26,6 +26,13 @@ class Class(models.Model):
     code = models.SlugField(max_length=80)
     sort_order = models.PositiveIntegerField(default=0)
     subjects = models.ManyToManyField('Subject', related_name='classes', blank=True)
+    class_teacher = models.ForeignKey(
+        'staff.Teacher',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='managed_classes',
+    )
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['school', 'code'], name='unique_school_class_code')]
@@ -36,6 +43,13 @@ class Section(models.Model):
     school = models.ForeignKey('schools.School', on_delete=models.CASCADE, related_name='sections')
     class_room = models.ForeignKey(Class, on_delete=models.CASCADE, related_name='sections')
     name = models.CharField(max_length=20)
+    class_teacher = models.ForeignKey(
+        'staff.Teacher',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='managed_sections',
+    )
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['school', 'class_room', 'name'], name='unique_school_class_section')]
@@ -78,6 +92,7 @@ class Homework(models.Model):
     max_marks = models.PositiveIntegerField(default=20)
     attachment_name = models.CharField(max_length=255, blank=True)
     attachment_url = models.CharField(max_length=500, blank=True)
+    attachments = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     submissions = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

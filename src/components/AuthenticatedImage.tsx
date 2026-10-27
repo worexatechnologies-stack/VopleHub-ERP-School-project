@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
 
 import { API_BASE_URL } from '../services/api';
-import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
 
 interface AuthenticatedImageProps {
   src: string;
   alt: string;
   className?: string;
+  onLoad?: () => void;
+  onError?: () => void;
 }
 
-/** Load private API image URLs with the JWT, without placing tokens in URLs. */
-export default function AuthenticatedImage({ src, alt, className }: AuthenticatedImageProps) {
+/** Load private API image URLs with backend session credentials. */
+export default function AuthenticatedImage({ src, alt, className, onLoad, onError }: AuthenticatedImageProps) {
   const [resolvedSrc, setResolvedSrc] = useState('');
 
   useEffect(() => {
@@ -27,15 +28,17 @@ export default function AuthenticatedImage({ src, alt, className }: Authenticate
     let objectUrl = '';
     const load = async () => {
       try {
-        const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
         const response = await fetch(src.startsWith('/api/') ? src : `${API_BASE_URL}${src}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: 'include',
         });
         if (!response.ok) throw new Error('Image request failed');
         objectUrl = URL.createObjectURL(await response.blob());
         if (!cancelled) setResolvedSrc(objectUrl);
       } catch {
-        if (!cancelled) setResolvedSrc('');
+        if (!cancelled) {
+          setResolvedSrc('');
+          onError?.();
+        }
       }
     };
     void load();
@@ -43,7 +46,7 @@ export default function AuthenticatedImage({ src, alt, className }: Authenticate
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [src]);
+  }, [src, onError]);
 
-  return resolvedSrc ? <img src={resolvedSrc} alt={alt} className={className} /> : null;
+  return resolvedSrc ? <img src={resolvedSrc} alt={alt} className={className} onLoad={onLoad} onError={onError} /> : null;
 }

@@ -272,13 +272,15 @@ def sync_school_credential_vault(school):
     }
 
 
-def update_vault_password_for_user(user, plaintext_password: str):
+def update_vault_password_for_user(user, plaintext_password: str = ''):
     """Automatically update the CredentialVaultRecord when a user sets or changes their password.
 
     Applies ONLY to non-privileged roles (Student, Teacher, Parent).
     Strictly ignores Admin and Super Admin accounts.
+    User-managed private passwords are encrypted via Argon2id in User.password and
+    NEVER stored in plaintext in the CredentialVaultRecord.
     """
-    if not user or not plaintext_password:
+    if not user:
         return None
 
     raw_role = str(getattr(user, 'role', '') or '').strip().lower().replace(' ', '_')
@@ -291,7 +293,6 @@ def update_vault_password_for_user(user, plaintext_password: str):
 
     from apps.accounts.models import CredentialVaultRecord, User
 
-    clean_pwd = str(plaintext_password).strip()
     clean_login = (user.email or user.username or '').strip().lower()
     clean_name = (user.get_full_name() or user.first_name or user.username or clean_login).strip()
 
@@ -302,12 +303,12 @@ def update_vault_password_for_user(user, plaintext_password: str):
 
     if record:
         record.user = user
-        record.plaintext_password = clean_pwd
+        record.plaintext_password = '[User Managed]'
         record.must_change_password = False
         record.source = 'user_password_change'
         record.save(update_fields=['user', 'plaintext_password', 'must_change_password', 'source', 'updated_at'])
         logger.info(
-            'Updated credential vault password for user %s (role=%s) in school %s',
+            'Updated credential vault record for user %s (role=%s) in school %s to [User Managed]',
             user.pk,
             record.role,
             school.id,
@@ -353,7 +354,7 @@ def update_vault_password_for_user(user, plaintext_password: str):
         role=user.role,
         name=clean_name,
         login_id=clean_login,
-        plaintext_password=clean_pwd,
+        plaintext_password='[User Managed]',
         user=user,
         identifier=identifier,
         class_name=class_name,

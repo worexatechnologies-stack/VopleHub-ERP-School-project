@@ -80,13 +80,15 @@ export function getUrlForTab(tabId: string, role?: string): string {
       return '/transport-gps';
     case 'learning':
       return '/learning';
+    case 'store':
+      return '/store';
 
     default:
       return `/${tabId.replace(/_/g, '-')}`;
   }
 }
 
-export function getTabForUrl(rawPath: string, _role?: string): string | null {
+export function getTabForUrl(rawPath: string, role?: string): string | null {
   if (!rawPath) return null;
   let path = decodeURIComponent(rawPath).trim().toLowerCase();
   path = path.split('?')[0].split('#')[0];
@@ -103,8 +105,6 @@ export function getTabForUrl(rawPath: string, _role?: string): string | null {
   switch (slug) {
     case 'admin-dashboard':
     case 'dashboard':
-    case 'admin':
-    case 'admin-portal':
     case 'teacher-dashboard':
     case 'parent-portal':
     case 'parent-dashboard':
@@ -112,8 +112,14 @@ export function getTabForUrl(rawPath: string, _role?: string): string | null {
     case 'student-dashboard':
       return 'dashboard';
 
-    case 'super-admin-dashboard':
+    case 'admin':
+    case 'admin-portal':
+      return role === 'Super Admin' ? 'super-admin-dashboard' : 'dashboard';
+
     case 'super-admin':
+      return role && role !== 'Super Admin' ? 'dashboard' : 'super-admin-dashboard';
+
+    case 'super-admin-dashboard':
     case 'overview-dashboard':
       return 'super-admin-dashboard';
 
@@ -241,6 +247,11 @@ export function getTabForUrl(rawPath: string, _role?: string): string | null {
 
     case 'learning':
       return 'learning';
+
+    case 'store':
+    case 'school-store':
+    case 'shop':
+      return 'store';
 
     default:
       return null;

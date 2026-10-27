@@ -1,48 +1,54 @@
-"""Production-grade JWT authentication helpers.
+"""JWT helpers for native mobile clients and legacy credential cleanup.
 
 Security decisions
 ------------------
-* Access tokens are short-lived (15 minutes) and are NEVER stored in the DB.
-* Refresh tokens are long-lived (30 days) and are sent ONLY as HttpOnly,
-  Secure (in prod), SameSite=Lax cookies. The raw value is never stored:
-  we persist a bcrypt hash keyed by the JWT ``jti`` claim.
+* Browser clients authenticate with Django's server-side session framework.
+* Native clients use short-lived access JWTs and random opaque refresh tokens.
+  Only a SHA-256 digest of each mobile refresh token is stored in the DB.
 * Refresh rotation: every call to /auth/refresh/ issues a new refresh token,
   revokes the old record, and creates a new hashed record. If a revoked token
   is ever reused, we revoke all of that user's sessions.
 """
-import bcrypt
 import hashlib
+import secrets
 import uuid
 from datetime import timedelta
+from http.cookies import Morsel
 
 from django.conf import settings
 from django.utils import timezone
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import AccessToken
 
 from .models import RefreshTokenRecord
 
-#: Name of the HttpOnly cookie that carries the refresh token.
+#: Names of the HttpOnly cookies used by browser clients.
 REFRESH_COOKIE_NAME = 'refresh_token_cookie'
+ACCESS_COOKIE_NAME = 'access_token_cookie'
 
 #: 30-day refresh lifetime, configurable via Django settings.
 REFRESH_TOKEN_LIFETIME_DAYS = getattr(settings, 'REFRESH_TOKEN_LIFETIME_DAYS', 30)
 
 
 def hash_refresh_token(raw_token: str) -> str:
-    """Return a bcrypt hash of the SHA256-hashed raw JWT refresh token.
-
-    Pre-hashing with SHA-256 avoids bcrypt's 72-byte input length limitation
-    while maintaining bcrypt's work factor protection against offline brute-force.
-    """
-    token_bytes = hashlib.sha256(raw_token.encode('utf-8')).hexdigest().encode('utf-8')
-    return bcrypt.hashpw(token_bytes, bcrypt.gensalt()).decode('utf-8')
+    """Store only the SHA-256 digest of the high-entropy opaque refresh token."""
+    return hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
 
 
 def _client_ip(request):
-    """Best-effort client IP extraction (X-Forwarded-For aware)."""
+    """Client IP extraction with trusted-proxy awareness.
+
+    Prioritizes HTTP_X_REAL_IP set by the reverse proxy. If falling back to
+    HTTP_X_FORWARDED_FOR with trusted upstream proxy (NUM_PROXIES=1), uses the
+    rightmost IP to prevent spoofing via prepended client headers.
+    """
+    real_ip = request.META.get('HTTP_X_REAL_IP')
+    if real_ip:
+        return real_ip.strip()
     forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
     if forwarded:
-        return forwarded.split(',')[0].strip()
+        parts = [p.strip() for p in forwarded.split(',') if p.strip()]
+        if parts:
+            return parts[-1]
     return request.META.get('REMOTE_ADDR')
 
 
@@ -58,15 +64,12 @@ def _device_label(request) -> str:
 def issue_token_pair(user, request):
     """Create access + refresh token pair and persist the hashed refresh.
 
-    Returns a dict with ``access``, ``refresh`` (raw, for the cookie) and
-    the DB record ``record``.
+    Returns a dict with ``access``, ``refresh`` (raw, for the mobile client)
+    and the database record ``record`` containing only the refresh hash.
     """
-    refresh = RefreshToken.for_user(user)
+    access = str(AccessToken.for_user(user))
+    raw_refresh = secrets.token_urlsafe(48)
     jti = uuid.uuid4()
-    refresh['jti'] = str(jti)
-
-    raw_refresh = str(refresh)
-    access = str(refresh.access_token)
 
     record = RefreshTokenRecord.objects.create(
         jti=jti,
@@ -81,6 +84,9 @@ def issue_token_pair(user, request):
 
 def rotate_refresh_token(user, old_record: RefreshTokenRecord, request):
     """Revoke the old record and issue a fresh pair (rotation)."""
+    now = timezone.now()
+    old_record.last_used_at = now
+    old_record.save(update_fields=['last_used_at'])
     old_record.revoke()
     return issue_token_pair(user, request)
 
@@ -100,33 +106,43 @@ def revoke_all_user_sessions(user) -> None:
 
 
 def read_refresh_cookie(request) -> str | None:
-    """Read the HttpOnly refresh-token cookie safely, with request data fallback."""
-    cookie_token = request.COOKIES.get(REFRESH_COOKIE_NAME)
-    if cookie_token:
-        return cookie_token
-    if hasattr(request, 'data') and isinstance(request.data, dict):
-        return request.data.get('refresh')
-    return None
-
-
-def set_refresh_cookie(response, raw_refresh: str) -> None:
-    """Set the refresh-token cookie on the response.
-
-    * HttpOnly=True  -> JavaScript cannot read it (XSS safe).
-    * Secure=not DEBUG -> sent only over HTTPS in production.
-    * SameSite='Lax' -> CSRF-safe while preserving same-site navigation.
-    """
-    response.set_cookie(
-        key=REFRESH_COOKIE_NAME,
-        value=raw_refresh,
-        max_age=REFRESH_TOKEN_LIFETIME_DAYS * 24 * 60 * 60,
-        httponly=True,
-        secure=not settings.DEBUG,
-        samesite='Lax',
-        path='/api/v1/auth/',
-    )
+    """Read a refresh cookie left by the legacy browser JWT flow."""
+    return request.COOKIES.get(REFRESH_COOKIE_NAME)
 
 
 def clear_refresh_cookie(response) -> None:
-    """Expire the refresh-token cookie immediately."""
-    response.delete_cookie(REFRESH_COOKIE_NAME, path='/api/v1/auth/')
+    """Expire legacy browser JWT cookies during migration and logout."""
+    def expire_paths(cookie_name, paths, secure, httponly):
+        unique_paths = list(dict.fromkeys(paths))
+        for index, path in enumerate(unique_paths):
+            # SimpleCookie keys by cookie name, so put additional same-name
+            # deletions under internal dict keys while retaining the real key
+            # in each Morsel. This emits distinct Set-Cookie headers per path.
+            cookie_key = cookie_name if index == 0 else f'{cookie_name}_legacy_path_{index}'
+            morsel = Morsel()
+            morsel.set(cookie_name, '', '')
+            morsel['path'] = path
+            morsel['max-age'] = 0
+            morsel['expires'] = 'Thu, 01 Jan 1970 00:00:00 GMT'
+            morsel['samesite'] = 'Lax'
+            if secure:
+                morsel['secure'] = True
+            if httponly:
+                morsel['httponly'] = True
+            domain = settings.SESSION_COOKIE_DOMAIN
+            if domain:
+                morsel['domain'] = domain
+            response.cookies[cookie_key] = morsel
+
+    expire_paths(
+        REFRESH_COOKIE_NAME,
+        [getattr(settings, 'REFRESH_COOKIE_PATH', '/api/v1/auth/'), '/'],
+        getattr(settings, 'REFRESH_COOKIE_SECURE', not settings.DEBUG),
+        True,
+    )
+    expire_paths(
+        ACCESS_COOKIE_NAME,
+        [getattr(settings, 'ACCESS_COOKIE_PATH', '/'), '/api/v1/'],
+        getattr(settings, 'ACCESS_COOKIE_SECURE', not settings.DEBUG),
+        True,
+    )

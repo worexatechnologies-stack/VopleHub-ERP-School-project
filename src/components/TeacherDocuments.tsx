@@ -1,3 +1,4 @@
+import { getStoredAuthenticatedUser } from '../utils/auth';
 import React, { useState, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -79,7 +80,7 @@ const DOCUMENT_PRESETS = [
 ];
 
 export default function TeacherDocuments({ user, schoolName = 'School Management Portal' }: TeacherDocumentsProps) {
-  const isServerBacked = Boolean(localStorage.getItem('school_erp_api_token'));
+  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const { data: teachers = [], refetch } = useGetTeachersQuery(undefined, { skip: !isServerBacked });
 
   // Find the current logged-in teacher profile

@@ -148,7 +148,7 @@ export default function AcademicModule({
   return (
     <div className="space-y-6 animate-fade-in" id="academic-module-main">
       {/* Portal Header */}
-      <div className="portal-header-card flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="portal-header-card flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:hidden">
         <div className="flex items-start gap-4">
           <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shrink-0">
             <Clock className="w-5 h-5 text-white" />
@@ -170,13 +170,13 @@ export default function AcademicModule({
 
       <div className="space-y-6" id="timetable-sub-view">
         {timetableError && (
-          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700 flex items-center gap-2" role="alert">
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700 flex items-center gap-2 print:hidden" role="alert">
             <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0"></span>
             {timetableError}
           </div>
         )}
         {timetableLoading && (
-          <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-sm font-semibold text-indigo-700 flex items-center gap-2">
+          <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-sm font-semibold text-indigo-700 flex items-center gap-2 print:hidden">
             <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse shrink-0"></span>
             Loading the live timetable from the database…
           </div>
@@ -184,7 +184,7 @@ export default function AcademicModule({
 
         {/* Branch Switcher ONLY for Super Admin */}
         {isSuperAdmin && (
-          <div className="portal-card p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div className="portal-card p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-slate-900 flex items-center justify-center">
                 <School className="w-4 h-4 text-indigo-400" />

@@ -783,3 +783,54 @@ class StudentBulkImportTests(TestCase):
         response = self.client.post('/api/v1/students/bulk-import/', data={'students': []}, format='json')
         self.assertEqual(response.status_code, 403)
 
+    @patch('apps.common.tasks.process_import_batch.delay')
+    def test_queued_student_import_returns_scoped_status(self, enqueue):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post('/api/v1/students/bulk-import/', data={
+            'async_import': True,
+            'jobId': 'student-queue-test-1',
+            'batchNumber': 1,
+            'students': [{'name': 'Queued Student'}],
+        }, format='json')
+        self.assertEqual(response.status_code, 202)
+        enqueue.assert_called_once()
+
+        status_response = self.client.get(
+            '/api/v1/students/bulk-import/status/',
+            {'jobId': 'student-queue-test-1', 'batchNumber': 1},
+        )
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data['status'], 'pending')
+
+        self.client.force_authenticate(self.teacher)
+        forbidden = self.client.get(
+            '/api/v1/students/bulk-import/status/',
+            {'jobId': 'student-queue-test-1', 'batchNumber': 1},
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+    def test_worker_processes_queued_student_batch(self):
+        from apps.common.tasks import process_import_batch
+        from apps.common.import_queue import encrypt_import_payload, import_status_key
+        from django.core.cache import cache
+
+        process_import_batch.apply(kwargs={
+            'entity': 'students',
+            'school_id': self.school.pk,
+            'user_id': self.admin.pk,
+            'job_id': 'student-worker-test-1',
+            'batch_number': 1,
+            'encrypted_payload': encrypt_import_payload({
+                'jobId': 'student-worker-test-1',
+                'batchNumber': 1,
+                'students': [{'name': 'Worker Imported Student', 'class_name': 'Class 10', 'section': 'A'}],
+            }),
+        })
+        result = cache.get(import_status_key(
+            entity='students', school_id=self.school.pk, user_id=self.admin.pk,
+            job_id='student-worker-test-1', batch_number=1,
+        ))
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['result']['createdCount'], 1)
+        self.assertTrue(Student.objects.filter(school=self.school, name='Worker Imported Student').exists())
+

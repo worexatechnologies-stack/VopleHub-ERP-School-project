@@ -12,9 +12,19 @@ class SchoolSerializer(serializers.ModelSerializer):
     secondaryColor = serializers.CharField(source='secondary_color', required=False, default='#10b981')
     theme = serializers.CharField(required=False, default='glass-academy')
     isDemo = serializers.BooleanField(source='is_demo', read_only=True)
+    studentCount = serializers.SerializerMethodField(read_only=True)
     class Meta:
         model = School
-        fields = ['id', 'schoolName', 'code', 'subdomain', 'logoIcon', 'logoImageUrl', 'logoFile', 'primaryColor', 'secondaryColor', 'theme', 'is_active', 'isDemo']
+        fields = ['id', 'schoolName', 'code', 'subdomain', 'logoIcon', 'logoImageUrl', 'logoFile', 'primaryColor', 'secondaryColor', 'theme', 'is_active', 'isDemo', 'studentCount']
+
+    def get_studentCount(self, obj) -> int:
+        annotated = getattr(obj, 'student_count', None)
+        if annotated is not None:
+            return annotated
+        try:
+            return obj.students.count()
+        except Exception:
+            return 0
 
     def get_logoImageUrl(self, obj) -> str | None:
         if not obj.logo_data:

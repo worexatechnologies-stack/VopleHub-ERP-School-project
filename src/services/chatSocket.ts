@@ -3,7 +3,9 @@
  * Supports auto-reconnect with backoff, authentication, event deduplication,
  * typing indicators, presence, read receipts, and connection status subscriptions.
  */
-import { ACCESS_TOKEN_STORAGE_KEY } from '../utils/auth';
+import { getStoredAuthenticatedUser } from '../utils/auth';
+import { store } from '../store';
+import { baseApi } from '../store/api/baseApi';
 
 export type ChatSocketStatus = 'connected' | 'connecting' | 'disconnected';
 
@@ -73,6 +75,7 @@ class ChatSocketClient {
   private isIntentionallyClosed = false;
   private processedEventIds: Set<string> = new Set();
   private processedEventTimestamps: Array<{ key: string; time: number }> = [];
+  private messageQueue: string[] = [];
 
   public getStatus(): ChatSocketStatus {
     return this.status;
@@ -141,8 +144,8 @@ class ChatSocketClient {
       return;
     }
 
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    if (!token) {
+    const user = getStoredAuthenticatedUser();
+    if (!user) {
       this.setStatus('disconnected');
       return;
     }
@@ -155,18 +158,17 @@ class ChatSocketClient {
     let wsUrl: string;
 
     if (customWsUrl) {
-      const sep = customWsUrl.includes('?') ? '&' : '?';
-      wsUrl = `${customWsUrl}${sep}token=${encodeURIComponent(token)}`;
+      wsUrl = customWsUrl;
     } else if (apiBaseUrl.startsWith('http')) {
       const urlObj = new URL(apiBaseUrl);
       const wsProtocol = urlObj.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${wsProtocol}//${urlObj.host}/ws/chat/?token=${encodeURIComponent(token)}`;
+      wsUrl = `${wsProtocol}//${urlObj.host}/ws/chat/`;
     } else {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // In local dev without reverse proxy, port 3000/5173 points to backend 8000
       const isDevPort = ['3000', '5173'].includes(window.location.port);
       const host = isDevPort ? `${window.location.hostname}:8000` : window.location.host;
-      wsUrl = `${protocol}//${host}/ws/chat/?token=${encodeURIComponent(token)}`;
+      wsUrl = `${protocol}//${host}/ws/chat/`;
     }
 
     try {
@@ -181,6 +183,14 @@ class ChatSocketClient {
         if (this.activeConversationId) {
           this.joinConversation(this.activeConversationId);
         }
+
+        // Flush pending queued actions
+        while (this.messageQueue.length > 0) {
+          const item = this.messageQueue.shift();
+          if (item && this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(item);
+          }
+        }
       };
 
       this.socket.onmessage = (event) => {
@@ -192,6 +202,39 @@ class ChatSocketClient {
               return;
             }
             const payload = data.data !== undefined ? data.data : data;
+
+            // Handle real-time cross-tab auto synchronization (homework, attendance, etc.)
+            if (eventType.endsWith('.sync') || payload?.entity) {
+              const rawEntity = String(payload?.entity || eventType.replace(/\.sync$/, '')).toLowerCase();
+              const entityTagMap: Record<string, string> = {
+                homework: 'Homework',
+                attendance: 'Attendance',
+                notification: 'Notification',
+                student: 'Student',
+                teacher: 'Teacher',
+                class: 'Class',
+                subject: 'Subject',
+                section: 'Section',
+                exam: 'Exam',
+                examresult: 'ExamResult',
+                timetable: 'Timetable',
+              };
+
+              const tag = entityTagMap[rawEntity];
+              if (tag) {
+                try {
+                  store.dispatch(baseApi.util.invalidateTags([tag as any]));
+                } catch (err) {
+                  console.warn('[ChatSocket] Tag invalidation failed for tag:', tag, err);
+                }
+              }
+
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent(rawEntity + ':synced', { detail: payload }));
+                window.dispatchEvent(new CustomEvent('realtime:synced', { detail: { entity: rawEntity, ...payload } }));
+              }
+            }
+
             this.emit(eventType, payload);
             // Universal wildcard listener
             this.emit('*', data);
@@ -261,8 +304,14 @@ class ChatSocketClient {
   }
 
   public sendAction(action: string, payload: Record<string, any> = {}) {
+    const raw = JSON.stringify({ action, ...payload });
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ action, ...payload }));
+      this.socket.send(raw);
+    } else {
+      this.messageQueue.push(raw);
+      if (!this.socket || this.socket.readyState === WebSocket.CLOSED) {
+        this.connect();
+      }
     }
   }
 
@@ -274,8 +323,22 @@ class ChatSocketClient {
     this.sendAction('join_conversation', { conversationId });
   }
 
-  public sendTyping(conversationId: number, isTyping: boolean) {
-    this.sendAction('typing', { conversationId, isTyping });
+  public sendTyping(conversationId: number, isTyping: boolean, text?: string, targetUserId?: number) {
+    this.sendAction('typing', {
+      conversationId,
+      isTyping,
+      text: text || '',
+      ...(targetUserId ? { targetUserId } : {}),
+    });
+  }
+
+  public queryPresence() {
+    this.sendAction('presence.query');
+  }
+
+  public subscribeEntitySync(entity: string, callback: (payload: any) => void): () => void {
+    const eventName = entity.toLowerCase() + ".sync";
+    return this.on(eventName, callback);
   }
 }
 
