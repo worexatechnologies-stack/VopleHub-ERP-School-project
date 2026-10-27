@@ -86,9 +86,17 @@ class StoreTests(TestCase):
         self.client.force_authenticate(self.admin)
         product = StoreProduct.objects.create(school=self.school, name='Badge', sku='badge-001', price='100.00', stock_quantity=1, created_by=self.admin)
         self.client.force_authenticate(self.parent)
-        first = self.client.post('/api/v1/store/orders/', {'items': [{'productId': product.id, 'quantity': 1}]}, format='json')
+        first = self.client.post('/api/v1/store/orders/', {
+            'items': [{'productId': product.id, 'quantity': 1}],
+            'buyerName': 'Parent User',
+            'buyerPhone': '9000000000',
+        }, format='json')
         self.assertEqual(first.status_code, 201)
-        second = self.client.post('/api/v1/store/orders/', {'items': [{'productId': product.id, 'quantity': 1}]}, format='json')
+        second = self.client.post('/api/v1/store/orders/', {
+            'items': [{'productId': product.id, 'quantity': 1}],
+            'buyerName': 'Parent User',
+            'buyerPhone': '9000000000',
+        }, format='json')
         self.assertEqual(second.status_code, 400)
         self.assertEqual(StoreOrder.objects.count(), 1)
 
@@ -106,7 +114,11 @@ class StoreTests(TestCase):
         payment_settings.save()
         product = StoreProduct.objects.create(school=self.school, name='Notebook', sku='note-001', price='50.00', stock_quantity=1, created_by=self.admin)
         self.client.force_authenticate(self.parent)
-        created = self.client.post('/api/v1/store/orders/', {'items': [{'productId': product.id, 'quantity': 1}]}, format='json')
+        created = self.client.post('/api/v1/store/orders/', {
+            'items': [{'productId': product.id, 'quantity': 1}],
+            'buyerName': 'Parent User',
+            'buyerPhone': '9000000000',
+        }, format='json')
         self.assertEqual(created.status_code, 201)
         order = StoreOrder.objects.get(pk=created.data['id'])
         payload = {'event': 'payment.captured', 'payload': {'payment': {'entity': {'id': 'pay_webhook_1', 'order_id': order.gateway_order_id}}}}
@@ -182,6 +194,8 @@ class StoreTests(TestCase):
         self.client.force_authenticate(self.parent)
         order = self.client.post('/api/v1/store/orders/', {
             'items': [{'productId': variants[0].id, 'quantity': 3}],
+            'buyerName': 'Parent User',
+            'buyerPhone': '9000000000',
         }, format='json')
         self.assertEqual(order.status_code, 201, order.data)
         self.assertEqual(order.data['items'][0]['productName'], 'Daily uniform · Size 28')
@@ -192,6 +206,8 @@ class StoreTests(TestCase):
 
         oversize = self.client.post('/api/v1/store/orders/', {
             'items': [{'productId': variants[0].id, 'quantity': 8}],
+            'buyerName': 'Parent User',
+            'buyerPhone': '9000000000',
         }, format='json')
         self.assertEqual(oversize.status_code, 400)
 
