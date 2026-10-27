@@ -48,6 +48,8 @@ def _normalize_and_validate_origins(setting_name, origins):
         cleaned.append(f"https://{parsed.netloc}")
     if not cleaned:
         cleaned = [
+            'https://volpehub.in',
+            'https://www.volpehub.in',
             'https://volpehub.education',
             'https://www.volpehub.education',
             'https://worexa.com',
@@ -59,6 +61,8 @@ def _normalize_and_validate_origins(setting_name, origins):
 CORS_ALLOWED_ORIGINS = _normalize_and_validate_origins(
     'CORS_ALLOWED_ORIGINS',
     env.list('CORS_ALLOWED_ORIGINS', default=[
+        'https://volpehub.in',
+        'https://www.volpehub.in',
         'https://volpehub.education',
         'https://www.volpehub.education',
         'https://worexa.com',
