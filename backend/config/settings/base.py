@@ -98,6 +98,8 @@ CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
     'http://127.0.0.1:5173',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    'https://volpehub.in',
+    'https://www.volpehub.in',
     'https://volpehub.education',
     'https://www.volpehub.education',
     'https://worexa.com',
@@ -105,6 +107,7 @@ CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
 ])
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://([a-zA-Z0-9-]+\.)?volpehub\.in$",
     r"^https://([a-zA-Z0-9-]+\.)?volpehub\.education$",
     r"^https://([a-zA-Z0-9-]+\.)?worexa\.com$",
 ]
@@ -151,6 +154,8 @@ CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[
     'http://127.0.0.1:5173',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    'https://volpehub.in',
+    'https://www.volpehub.in',
     'https://volpehub.education',
     'https://www.volpehub.education',
     'https://worexa.com',
@@ -158,6 +163,7 @@ CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[
 ])
 CSRF_TRUSTED_ORIGINS = [
     *CSRF_TRUSTED_ORIGINS,
+    'https://*.volpehub.in',
     'https://*.volpehub.education',
     'https://*.worexa.com',
 ]

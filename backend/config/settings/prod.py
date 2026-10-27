@@ -46,15 +46,17 @@ def _normalize_and_validate_origins(setting_name, origins):
         ):
             continue
         cleaned.append(f"https://{parsed.netloc}")
-    if not cleaned:
-        cleaned = [
-            'https://volpehub.in',
-            'https://www.volpehub.in',
-            'https://volpehub.education',
-            'https://www.volpehub.education',
-            'https://worexa.com',
-            'https://www.worexa.com',
-        ]
+    # Always guarantee production domains are included even if .env defines a custom subset
+    for domain in (
+        'https://volpehub.in',
+        'https://www.volpehub.in',
+        'https://volpehub.education',
+        'https://www.volpehub.education',
+        'https://worexa.com',
+        'https://www.worexa.com',
+    ):
+        if domain not in cleaned:
+            cleaned.append(domain)
     return cleaned
 
 
