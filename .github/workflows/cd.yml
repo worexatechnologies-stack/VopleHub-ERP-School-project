@@ -172,6 +172,7 @@ jobs:
             backup.sh \
             restore.sh \
             rollback.sh \
+            deploy.sh \
             "${SSH_USER}@${SSH_HOST}:/opt/volpehub/"
 
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" "mkdir -p /opt/volpehub/docker/postgres /opt/volpehub/backups"
@@ -181,7 +182,7 @@ jobs:
             "${SSH_USER}@${SSH_HOST}:/opt/volpehub/docker/postgres/"
 
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            "chmod +x /opt/volpehub/backup.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/docker/postgres/init-app-role.sh"
+            "chmod +x /opt/volpehub/backup.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/deploy.sh /opt/volpehub/docker/postgres/init-app-role.sh"
 
       - name: Execute atomic production deployment
         env:
@@ -193,89 +194,4 @@ jobs:
           GHCR_ACTOR: ${{ github.actor }}
         run: |
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            bash -s -- "${IMAGE_TAG}" "${GHCR_NAMESPACE}" "${GHCR_ACTOR}" "${GHCR_PULL_TOKEN:-}" << 'EOF'
-            set -euo pipefail
-            IMAGE_TAG="$1"
-            GHCR_NAMESPACE="$2"
-            GHCR_ACTOR="$3"
-            GHCR_PULL_TOKEN="${4:-}"
-            export IMAGE_TAG GHCR_NAMESPACE
-
-            cd /opt/volpehub
-
-            echo "=== VolpeHub Deployment: ${IMAGE_TAG} ==="
-
-            # 1. Verify production environment file is in place
-            if [ ! -f .env ] && [ ! -f backend/.env ]; then
-              echo "Error: Production .env file not found in /opt/volpehub" >&2
-              exit 1
-            fi
-
-            # 2. Authenticate with GHCR if token provided
-            if [ -n "${GHCR_PULL_TOKEN}" ]; then
-              echo "${GHCR_PULL_TOKEN}" | docker login ghcr.io -u "${GHCR_ACTOR}" --password-stdin > /dev/null 2>&1
-            fi
-
-            # 3. Pull exact immutable container image tags
-            echo "Pulling container images for release ${IMAGE_TAG}..."
-            docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker forwardproxy
-
-            # 4. Validate Docker Compose project configuration
-            echo "Validating Compose configuration..."
-            docker compose -f docker-compose.prod.yml -p volpehub config -q
-
-            # 5. Execute pre-deployment database backup if database container is running
-            if docker compose -f docker-compose.prod.yml -p volpehub ps --services --filter "status=running" | grep -q "db"; then
-              echo "Creating pre-deployment database backup..."
-              ./backup.sh < /dev/null
-            fi
-
-            # 6. Apply database migrations safely before traffic switch
-            echo "Running database migrations..."
-            docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py migrate --noinput
-
-            echo "Collecting static files once before starting API replicas..."
-            docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py collectstatic --noinput
-
-            # 7. Record release metadata
-            if [ -f .current_release ]; then
-              cp .current_release .previous_release
-            fi
-            echo "${IMAGE_TAG}" > .current_release
-
-            # 8. Apply service changes using targeted compose project
-            echo "Applying service changes..."
-            docker compose -f docker-compose.prod.yml -p volpehub up -d --remove-orphans
-
-            # 9. Verify every serving dependency, not just the API. This waits
-            # for slow starts instead of declaring a healthy API with a broken
-            # web or egress tier a successful release.
-            wait_for_healthy() {
-              SERVICE="$1"
-              MAX_RETRIES=15
-              COUNT=0
-              while [ "$COUNT" -lt "$MAX_RETRIES" ]; do
-                CONTAINER_ID="$(docker compose -f docker-compose.prod.yml -p volpehub ps -q "$SERVICE" | head -n 1)"
-                STATUS="$(docker inspect --format='{{json .State.Health.Status}}' "$CONTAINER_ID" 2>/dev/null || echo '"starting"')"
-                if [ "$STATUS" = '"healthy"' ]; then
-                  return 0
-                fi
-                echo "Waiting for ${SERVICE} health (attempt $((COUNT+1))/$MAX_RETRIES, status: $STATUS)..."
-                sleep 5
-                COUNT=$((COUNT+1))
-              done
-              return 1
-            }
-
-            for SERVICE in api web forwardproxy; do
-              if ! wait_for_healthy "$SERVICE"; then
-                echo "Error: ${SERVICE} container failed health check after deployment!" >&2
-                docker compose -f docker-compose.prod.yml -p volpehub ps
-                echo "To rollback, run: ./rollback.sh \$(cat .previous_release)" >&2
-                exit 1
-              fi
-            done
-
-            echo "=== VolpeHub Deployment Succeeded ==="
-            docker compose -f docker-compose.prod.yml -p volpehub ps
-          EOF
+            "/opt/volpehub/deploy.sh '${IMAGE_TAG}' '${GHCR_NAMESPACE}' '${GHCR_ACTOR}' '${GHCR_PULL_TOKEN:-}'"
