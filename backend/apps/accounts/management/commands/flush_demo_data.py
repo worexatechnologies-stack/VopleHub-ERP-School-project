@@ -3,6 +3,7 @@ from django.db import transaction
 
 from apps.schools.models import School
 from apps.accounts.models import User
+from apps.common.tenancy import with_superadmin_rls_context
 
 
 class Command(BaseCommand):
@@ -11,6 +12,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--yes-i-am-sure', action='store_true', help='Required because demo schools and all related data are permanently deleted.')
 
+    @with_superadmin_rls_context
     def handle(self, *args, **options):
         if not options['yes_i_am_sure']:
             raise CommandError('Refusing to delete data without --yes-i-am-sure.')

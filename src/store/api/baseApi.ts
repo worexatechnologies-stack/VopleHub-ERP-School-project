@@ -6,7 +6,6 @@ import {
   FetchBaseQueryError,
 } from '@reduxjs/toolkit/query/react';
 
-import type { RootState } from '../index';
 import { logout } from '../slices/authSlice';
 import {
   AUTH_SESSION_EXPIRED_EVENT,
@@ -23,24 +22,19 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\
  * 1. Automatically includes the HttpOnly server-side session cookie.
  * 2. Injects X-CSRFToken header on all mutating HTTP requests (POST, PUT, PATCH, DELETE).
  * 3. Injects X-Client-Type: web and X-Auth-Mode: session headers.
- * 4. Injects tenant boundary (X-School-Id) header.
+ * 4. Tenant scope is derived from the authenticated account on the server.
  * 5. Handles session expiration gracefully without infinite retry loops.
  */
 const rawBaseQuery = fetchBaseQuery({
   baseUrl: API_BASE_URL,
   credentials: 'include',
-  prepareHeaders: (headers, { getState, endpoint }) => {
+  prepareHeaders: (headers) => {
     headers.set('X-Client-Type', 'web');
     headers.set('X-Auth-Mode', 'session');
 
     const csrf = getCsrfToken();
     if (csrf) {
       headers.set('X-CSRFToken', csrf);
-    }
-
-    const currentSchoolId = (getState() as RootState).auth?.user?.schoolId;
-    if (currentSchoolId) {
-      headers.set('X-School-Id', String(currentSchoolId));
     }
 
     return headers;

@@ -8,6 +8,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from config.celery import app
 from .import_queue import decrypt_import_payload, set_import_status
 from .models import ExportJob
+from .tenancy import tenant_rls_context
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,8 @@ def export_resource_task(self, job_id):
         else:
             raise ValueError(f"Unknown resource_type: {job.resource_type}")
 
-        total_count = qs.count()
+        with tenant_rls_context(school.id):
+            total_count = qs.count()
         job.total_records = total_count
         job.save(update_fields=['total_records'])
 
@@ -139,12 +141,27 @@ def export_resource_task(self, job_id):
             writer.writerow(headers)
 
             processed = 0
-            for item in qs.iterator(chunk_size=2000):
-                writer.writerow(row_extractor(item))
-                processed += 1
-                if processed % 10000 == 0:
-                    job.processed_records = processed
-                    job.save(update_fields=['processed_records'])
+            offset = 0
+            while offset < total_count:
+                batch_size = min(2000, total_count - offset)
+                # Keep each page in a short transaction so transaction-pooler
+                # RLS context is reliable without holding a DB transaction open
+                # while the CSV is written to disk.
+                with tenant_rls_context(school.id):
+                    page_ids = list(
+                        qs.values_list('pk', flat=True)[offset:offset + batch_size]
+                    )
+                    batch = list(qs.filter(pk__in=page_ids)) if page_ids else []
+
+                if not batch:
+                    break
+                for item in batch:
+                    writer.writerow(row_extractor(item))
+                    processed += 1
+                    if processed % 10000 == 0:
+                        job.processed_records = processed
+                        job.save(update_fields=['processed_records'])
+                offset += len(page_ids)
 
         job.status = ExportJob.Status.COMPLETED
         job.processed_records = processed
@@ -194,7 +211,8 @@ def process_import_batch(*, entity, school_id, user_id, job_id, batch_number, en
             f'/api/v1/{entity}/bulk-import/', payload, format='json'
         )
         force_authenticate(request, user=user)
-        response = viewset.as_view({'post': 'bulk_import'})(request)
+        with tenant_rls_context(school_id):
+            response = viewset.as_view({'post': 'bulk_import'})(request)
         result = getattr(response, 'data', {})
         final_status = 'failed' if response.status_code >= 400 else 'completed'
         set_import_status(**key_args, status=final_status, result=result)

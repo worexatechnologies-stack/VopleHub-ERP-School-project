@@ -2,6 +2,7 @@ import logging
 import uuid
 
 from celery import shared_task
+from apps.common.tenancy import tenant_rls_context
 
 from .fcm import FCMNotificationService
 
@@ -91,22 +92,23 @@ def fanout_notification_task(
             nonlocal total
             if not ids:
                 return
-            batch_users = list(User.objects.filter(
-                school_id=school_id,
-                is_active=True,
-                id__in=ids,
-            ))
-            total += create_bulk_notifications(
-                school=school_id,
-                recipients=batch_users,
-                title=title,
-                body=body,
-                category=category,
-                channel=channel,
-                sender_id=sender_id,
-                related=related or {},
-                broadcast_id=broadcast_id,
-            )
+            with tenant_rls_context(school_id):
+                batch_users = list(User.objects.filter(
+                    school_id=school_id,
+                    is_active=True,
+                    id__in=ids,
+                ))
+                total += create_bulk_notifications(
+                    school=school_id,
+                    recipients=batch_users,
+                    title=title,
+                    body=body,
+                    category=category,
+                    channel=channel,
+                    sender_id=sender_id,
+                    related=related or {},
+                    broadcast_id=broadcast_id,
+                )
 
         for user_id in recipients.values_list('id', flat=True).iterator(chunk_size=1000):
             batch_ids.append(user_id)

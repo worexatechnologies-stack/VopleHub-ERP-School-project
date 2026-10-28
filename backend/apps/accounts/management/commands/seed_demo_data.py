@@ -8,6 +8,7 @@ from apps.academics.models import AcademicYear, Class, Section, Subject
 from apps.schools.models import School
 from apps.sis.models import Student
 from apps.staff.models import Teacher
+from apps.common.tenancy import with_superadmin_rls_context
 
 
 class Command(BaseCommand):
@@ -29,6 +30,7 @@ class Command(BaseCommand):
             user.save(update_fields=['password'])
         return user
 
+    @with_superadmin_rls_context
     def handle(self, *args, **options):
         if not settings.DEBUG:
             if not options['allow_production_demo_data']:

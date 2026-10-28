@@ -5,11 +5,13 @@ from apps.schools.models import School
 from apps.academics.models import AcademicYear, Class, Section, Subject
 from apps.staff.models import Teacher
 from apps.sis.models import Student
+from apps.common.tenancy import with_superadmin_rls_context
 
 
 class Command(BaseCommand):
     help = 'Idempotently set up and sync all administrative and demo accounts with reliable passwords.'
 
+    @with_superadmin_rls_context
     def handle(self, *args, **options):
         self.stdout.write('Configuring core and demo accounts...')
 

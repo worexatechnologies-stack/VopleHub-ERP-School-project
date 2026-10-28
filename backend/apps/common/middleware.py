@@ -3,10 +3,11 @@ import logging
 import time
 from django.conf import settings
 from django.contrib.auth import logout as django_logout
-from django.db import connection
+from django.db import connection, transaction
 from django.http import JsonResponse
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
 from apps.accounts.authentication import CachedJWTAuthentication
+from apps.common.tenancy import tenant_rls_context
 
 logger = logging.getLogger('apps.performance')
 
@@ -113,10 +114,10 @@ class PerformanceMonitoringMiddleware:
 
 
 class JwtTenantSecurityMiddleware:
-    """Authenticate bearer tokens early, enforce temporary-password state, and set RLS context.
+    """Authenticate bearer tokens early, enforce password changes, and set tenant RLS context.
 
-    Uses session-scoped SET with guaranteed finally-block RESET to eliminate transaction starvation
-    and avoid holding long-running PostgreSQL transactions open during network I/O.
+    Tenant context is transaction-local so it stays attached to the PostgreSQL backend
+    assigned by PgBouncer transaction pooling and is cleared automatically at commit.
     """
 
     def __init__(self, get_response):
@@ -150,26 +151,16 @@ class JwtTenantSecurityMiddleware:
         if not user or connection.vendor != 'postgresql':
             return self.get_response(request)
 
-        tenant_set = False
-
-        def lazy_tenant_wrapper(execute, sql, params, many, context):
-            nonlocal tenant_set
-            if not tenant_set:
-                tenant_set = True
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        'SET app.school_id = %s; SET app.is_superadmin = %s;',
-                        [str(user.school_id or ''), 'true' if user.role == 'super_admin' else 'false'],
-                    )
-            return execute(sql, params, many, context)
-
-        try:
-            with connection.execute_wrapper(lazy_tenant_wrapper):
-                return self.get_response(request)
-        finally:
-            if tenant_set and connection.vendor == 'postgresql' and connection.connection is not None:
-                try:
-                    with connection.cursor() as cursor:
-                        cursor.execute('RESET app.school_id; RESET app.is_superadmin;')
-                except Exception:
-                    pass
+        # PgBouncer is configured for transaction pooling. Keep all ORM work for
+        # this authenticated request in the transaction where SET LOCAL applies.
+        with tenant_rls_context(
+            user.school_id,
+            is_superadmin=user.role == 'super_admin',
+        ):
+            response = self.get_response(request)
+            # DRF converts API exceptions into responses before they leave the
+            # view stack. Roll back those failed requests explicitly because
+            # this middleware owns the surrounding transaction.
+            if response.status_code >= 400:
+                transaction.set_rollback(True)
+            return response

@@ -1,11 +1,13 @@
 from django.core.management.base import BaseCommand
 from apps.sis.models import Student, StudentDocument, EnrollmentApplication
 from apps.accounts.models import User, StudentProfile, ParentProfile
+from apps.common.tenancy import with_superadmin_rls_context
 
 
 class Command(BaseCommand):
     help = 'Safely wipe all student records, student user accounts, and links.'
 
+    @with_superadmin_rls_context
     def handle(self, *args, **options):
         self.stdout.write('Deleting all student users and profiles...')
         u_count, _ = User.objects.filter(role=User.Role.STUDENT).delete()
