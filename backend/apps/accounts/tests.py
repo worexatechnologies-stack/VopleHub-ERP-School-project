@@ -6,7 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.password_validation import validate_password
 from .credential_generator import create_user_with_credentials, generate_password
 
-from apps.accounts.models import ParentProfile, StudentProfile, User
+from apps.accounts.models import CredentialVaultRecord, ParentProfile, StudentProfile, User
 from apps.schools.models import School
 from apps.sis.models import Student
 from apps.attendance.models import AttendanceRecord
@@ -433,6 +433,55 @@ class TemporaryPasswordMiddlewareTests(TestCase):
         self.assertIn(client.post('/api/v1/auth/change-password/', {'password': 'NewStrongPass123!'}, format='json').status_code, [200, 204])
         user.refresh_from_db()
         self.assertFalse(user.must_change_password)
+
+    @override_settings(SECURE_SSL_REDIRECT=False)
+    def test_school_admin_password_change_clears_vault_temporary_marker(self):
+        school = School.objects.create(name='Password Change School', code='password-change-school')
+        user = User.objects.create_user(
+            username='password-change-admin', email='password-change-admin@example.com',
+            password='TemporaryPass123!', role=User.Role.SCHOOL_ADMIN,
+            school=school, must_change_password=True,
+        )
+        record = CredentialVaultRecord.objects.create(
+            school=school, user=user, role=CredentialVaultRecord.Role.ADMIN,
+            name='Password Change Admin', login_id=user.email,
+            plaintext_password='TemporaryPass123!', source='admin_creation',
+            must_change_password=True,
+        )
+        client = APIClient()
+        client.force_authenticate(user)
+
+        response = client.post(
+            '/api/v1/auth/change-password/',
+            {'password': 'PermanentPassword123!'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        record.refresh_from_db()
+        self.assertFalse(user.must_change_password)
+        self.assertFalse(record.must_change_password)
+        self.assertEqual(record.plaintext_password, '[User Managed]')
+        self.assertEqual(record.source, 'user_password_change')
+
+        from apps.accounts.views import _enforce_vault_temp_password
+        _enforce_vault_temp_password(user)
+        user.refresh_from_db()
+        self.assertFalse(user.must_change_password)
+
+    def test_users_without_vault_are_not_reprompted_after_first_login(self):
+        from django.utils import timezone
+        from apps.accounts.views import _enforce_vault_temp_password
+
+        for role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]:
+            user = User.objects.create_user(
+                username=f'no-vault-{role}', email=f'no-vault-{role}@example.com',
+                password='PermanentPassword123!', role=role,
+                must_change_password=False, last_login=timezone.now(),
+            )
+            _enforce_vault_temp_password(user)
+            user.refresh_from_db()
+            self.assertFalse(user.must_change_password, role)
 
 
 @override_settings(SECURE_SSL_REDIRECT=False)

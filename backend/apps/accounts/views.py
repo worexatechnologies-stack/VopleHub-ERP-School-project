@@ -105,18 +105,26 @@ def _enforce_vault_temp_password(user):
     if not user or user.role not in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
         return
     from apps.accounts.models import CredentialVaultRecord
-    vault_rec = CredentialVaultRecord.objects.filter(
-        school=user.school, login_id__iexact=user.email
-    ).first() or CredentialVaultRecord.objects.filter(user=user).first()
+    # Prefer the account's direct relation. A stale login-id match must not
+    # override the current credential record when an email has changed.
+    vault_rec = CredentialVaultRecord.objects.filter(user=user).first()
+    if not vault_rec:
+        vault_rec = CredentialVaultRecord.objects.filter(
+            school=user.school, login_id__iexact=user.email
+        ).first()
     if vault_rec:
-        if vault_rec.plaintext_password != '[User Managed]' and vault_rec.source != 'user_password_change':
-            if not user.must_change_password:
-                user.must_change_password = True
-                user.save(update_fields=['must_change_password'])
-            if not vault_rec.must_change_password:
-                vault_rec.must_change_password = True
-                vault_rec.save(update_fields=['must_change_password'])
-    elif not user.must_change_password and (user.last_login is None or user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]):
+        # The vault's explicit flag is authoritative. A historic plaintext
+        # value can remain after a user changes their password and is not by
+        # itself evidence that another reset is needed.
+        is_temporary = (
+            vault_rec.must_change_password
+            and vault_rec.plaintext_password != '[User Managed]'
+            and vault_rec.source != 'user_password_change'
+        )
+        if is_temporary and not user.must_change_password:
+            user.must_change_password = True
+            user.save(update_fields=['must_change_password'])
+    elif not user.must_change_password and user.last_login is None:
         user.must_change_password = True
         user.save(update_fields=['must_change_password'])
 
@@ -621,13 +629,28 @@ class ChangePasswordView(APIView):
         request.user.must_change_password = False
         request.user.save(update_fields=['password', 'must_change_password'])
 
-        # If user is a Teacher, Student, or Parent, automatically update their CredentialVaultRecord
+        # Mark the account's vault record as user-managed for every role. If an
+        # admin's creation/reset record keeps its temporary-password marker,
+        # login will otherwise force another password change next time.
         if request.user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]:
             try:
                 from apps.accounts.credential_vault import update_vault_password_for_user
                 update_vault_password_for_user(request.user, password)
             except Exception as exc:
                 logger.error('Failed to update vault password on password change: %s', exc)
+        elif request.user.role == User.Role.SCHOOL_ADMIN and request.user.school_id:
+            admin_credentials = CredentialVaultRecord.objects.filter(user=request.user)
+            if not admin_credentials.exists():
+                admin_credentials = CredentialVaultRecord.objects.filter(
+                    school_id=request.user.school_id,
+                    login_id__iexact=request.user.email,
+                )
+            admin_credentials.update(
+                user=request.user,
+                plaintext_password='[User Managed]',
+                must_change_password=False,
+                source='user_password_change',
+            )
 
         # Revoke all previous active refresh tokens on password change to terminate stale sessions
         RefreshTokenRecord.objects.filter(user=request.user, revoked_at__isnull=True).update(revoked_at=timezone.now())
