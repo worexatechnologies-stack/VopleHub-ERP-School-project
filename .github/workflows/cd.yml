@@ -77,7 +77,10 @@ jobs:
           DJANGO_SECRET_KEY: cd-test-secret-key-at-least-32-chars-long
           DJANGO_SETTINGS_MODULE: config.settings.dev
         run: |
-          python backend/manage.py test apps.accounts apps.community apps.notifications apps.timetable apps.staff apps.exams apps.store
+          python backend/manage.py test \
+            apps.accounts.tests.TemporaryPasswordMiddlewareTests.test_school_admin_password_change_clears_vault_temporary_marker \
+            apps.accounts.tests.TemporaryPasswordMiddlewareTests.test_users_without_vault_are_not_reprompted_after_first_login \
+            apps.community apps.notifications apps.timetable apps.staff apps.exams apps.store
 
   publish-images:
     name: Build & Publish GHCR Images
