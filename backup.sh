@@ -37,7 +37,7 @@ if ! docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
 fi
 
 if [ ! -s "$temporary_dump" ] || ! docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
-    pg_restore --list - < "$temporary_dump" > /dev/null; then
+    pg_restore --list < "$temporary_dump" > /dev/null; then
     echo "Error: Backup verification failed: $temporary_dump" >&2
     rm -f "$temporary_dump"
     exit 1
