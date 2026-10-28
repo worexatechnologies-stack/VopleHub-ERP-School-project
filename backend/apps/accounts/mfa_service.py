@@ -23,6 +23,15 @@ def _development_mfa_enabled() -> bool:
     return bool(getattr(settings, 'MFA_DEVELOPMENT_MODE', settings.DEBUG))
 
 
+def is_mfa_configured() -> bool:
+    """Return whether MFA is active and capable of dispatching verification codes."""
+    if not getattr(settings, 'MFA_ENABLED', True):
+        return False
+    if _development_mfa_enabled():
+        return True
+    return bool(getattr(settings, 'EMAIL_HOST', '') and getattr(settings, 'DEFAULT_FROM_EMAIL', ''))
+
+
 class MfaDeliveryError(Exception):
     """Raised when a production MFA code cannot be delivered."""
 

@@ -244,6 +244,7 @@ REST_FRAMEWORK = {
     ],
 }
 SPECTACULAR_SETTINGS = {'TITLE': 'Volpehub Education ERP API', 'VERSION': 'v1'}
+MFA_ENABLED = env.bool('MFA_ENABLED', default=True)
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),

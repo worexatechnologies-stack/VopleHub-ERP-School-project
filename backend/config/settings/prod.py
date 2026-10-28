@@ -6,9 +6,9 @@ DEBUG = False
 # Demo checkout is deliberately unavailable in production.  A real school
 # must configure its Razorpay credentials through the authenticated admin UI.
 RAZORPAY_DUMMY_MODE = False
-# Never return developer OTPs or allow the fixed development code in production,
-# even if a caller overrides DEBUG in a test or management command.
-MFA_DEVELOPMENT_MODE = False
+# Never return developer OTPs or allow the fixed development code in production by default.
+# Can be enabled explicitly in .env for staging verification.
+MFA_DEVELOPMENT_MODE = env.bool('MFA_DEVELOPMENT_MODE', default=False)
 LEGACY_PUBLIC_FEE_READS = False
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = env.bool('DJANGO_SECURE_SSL_REDIRECT', default=True)

@@ -181,9 +181,11 @@ class LoginView(APIView):
             or getattr(user, 'is_superuser', False)
         )
 
-        if not is_super_admin:
+        # Multi-Factor Authentication: Non-superadmin roles require 2FA OTP
+        # only when MFA is configured and active on the server.
+        from apps.accounts.mfa_service import MfaDeliveryError, create_mfa_challenge, is_mfa_configured
+        if not is_super_admin and is_mfa_configured():
             AccountLoginRateThrottle.record_success(raw_email, request=request)
-            from apps.accounts.mfa_service import MfaDeliveryError, create_mfa_challenge
             try:
                 challenge = create_mfa_challenge(user, request=request, requested_role=requested_role)
             except MfaDeliveryError:
