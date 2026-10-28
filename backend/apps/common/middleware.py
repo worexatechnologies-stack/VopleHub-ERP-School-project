@@ -13,6 +13,8 @@ logger = logging.getLogger('apps.performance')
 PASSWORD_CHANGE_PATHS = {
     '/api/v1/auth/change-password/',
     '/api/v1/auth/logout/',
+    '/api/v1/auth/me/',
+    '/api/v1/auth/csrf/',
 }
 
 

@@ -62,6 +62,10 @@ def _normalize_and_validate_origins(setting_name, origins):
         origin = str(raw).strip().rstrip('/')
         if not origin:
             continue
+        if origin.startswith('https://*.') and len(origin) > 10:
+            if origin not in cleaned:
+                cleaned.append(origin)
+            continue
         parsed = urlsplit(origin)
         if (
             parsed.scheme != 'https'
@@ -74,40 +78,49 @@ def _normalize_and_validate_origins(setting_name, origins):
             or '*' in origin
         ):
             continue
-        cleaned.append(f"https://{parsed.netloc}")
+        netloc_origin = f"https://{parsed.netloc}"
+        if netloc_origin not in cleaned:
+            cleaned.append(netloc_origin)
     # Always guarantee production domains are included even if .env defines a custom subset
     for domain in (
         'https://volpehub.in',
         'https://www.volpehub.in',
+        'https://*.volpehub.in',
         'https://volpehub.education',
         'https://www.volpehub.education',
+        'https://*.volpehub.education',
         'https://worexa.com',
         'https://www.worexa.com',
+        'https://*.worexa.com',
     ):
         if domain not in cleaned:
             cleaned.append(domain)
     return cleaned
 
 
-CORS_ALLOWED_ORIGINS = _normalize_and_validate_origins(
-    'CORS_ALLOWED_ORIGINS',
+_all_prod_origins = _normalize_and_validate_origins(
+    'ORIGINS',
     env.list('CORS_ALLOWED_ORIGINS', default=[
         'https://volpehub.in',
         'https://www.volpehub.in',
+        'https://*.volpehub.in',
         'https://volpehub.education',
         'https://www.volpehub.education',
+        'https://*.volpehub.education',
         'https://worexa.com',
         'https://www.worexa.com',
+        'https://*.worexa.com',
     ])
 )
-# Production browser access is limited to explicitly configured origins. This
-# prevents an untrusted/compromised sibling subdomain from reading the CSRF
-# bootstrap response through credentialed CORS.
-CORS_ALLOWED_ORIGIN_REGEXES = []
-CSRF_TRUSTED_ORIGINS = _normalize_and_validate_origins(
-    'CSRF_TRUSTED_ORIGINS',
-    env.list('CSRF_TRUSTED_ORIGINS', default=CORS_ALLOWED_ORIGINS)
-)
+# django-cors-headers requires exact origins in CORS_ALLOWED_ORIGINS and regexes for subdomains
+CORS_ALLOWED_ORIGINS = [origin for origin in _all_prod_origins if '*' not in origin]
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://([a-zA-Z0-9-]+\.)?volpehub\.in$",
+    r"^https://([a-zA-Z0-9-]+\.)?volpehub\.education$",
+    r"^https://([a-zA-Z0-9-]+\.)?worexa\.com$",
+]
+# Django CSRF middleware natively supports wildcard subdomains like https://*.volpehub.in
+CSRF_TRUSTED_ORIGINS = _all_prod_origins
 SECURE_CROSS_ORIGIN_OPENER_POLICY = 'same-origin'
 
 CHANNEL_LAYERS = {
