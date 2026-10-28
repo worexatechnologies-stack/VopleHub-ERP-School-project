@@ -31,3 +31,4 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunPython(sync_temporary_passwords, reverse_code=migrations.RunPython.noop),
     ]
+

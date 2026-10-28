@@ -12,6 +12,7 @@ import { AuthUser } from '../utils/auth';
 import { BrandSettings, UserRole } from '../types';
 import { useLoginMutation, useVerifyOtpMutation, useResendOtpMutation, useGetCsrfTokenQuery } from '../store/api/authApi';
 import { persistAuthSession } from '../store/api/baseApi';
+import HumanVerification from './auth/HumanVerification';
 import WorexaLogo from './WorexaLogo';
 import volpeLogo from '../assets/volpe-logo.png';
 import './LoginScreen.css';
@@ -391,6 +392,8 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
   const [suggestedRole, setSuggestedRole] = useState<PortalRole | null>(null);
   const [rememberMe, setRememberMe] = useState(true);
   const [capsLockActive, setCapsLockActive] = useState(false);
+  const [humanToken, setHumanToken] = useState<string | null>(null);
+  const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
 
   // 3D Parallax tilt state for showcase card
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
@@ -579,6 +582,8 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
     setSuggestedRole(null);
     setEmail('');
     setPassword('');
+    setHumanToken(null);
+    setHasAttemptedSubmit(false);
     setMfaSession(null);
     setOtpDigits(['', '', '', '', '', '']);
   };
@@ -604,6 +609,11 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
       setErrorMessage('Please enter your email and password.');
       return;
     }
+    if (!humanToken) {
+      setHasAttemptedSubmit(true);
+      setErrorMessage('Please complete human verification to sign in.');
+      return;
+    }
     setErrorMessage('');
     try {
       const canonicalRequestedRole = roleToKey[activeRole] || activeRole;
@@ -611,6 +621,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
         email: email.trim().toLowerCase(),
         password,
         role: canonicalRequestedRole,
+        human_verification_token: humanToken,
       }).unwrap();
 
       // Multi-Factor Authentication Challenge: Non-Superadmin roles enter OTP verification
@@ -996,6 +1007,16 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
                     Forgot password?
                   </button>
                 </div>
+
+                {/* Human Verification Challenge */}
+                <HumanVerification
+                  onVerify={(token) => {
+                    setHumanToken(token);
+                    setErrorMessage('');
+                  }}
+                  onReset={() => setHumanToken(null)}
+                  hasAttemptedSubmit={hasAttemptedSubmit}
+                />
 
                 {/* Submit button */}
                 <motion.button

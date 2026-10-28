@@ -84,6 +84,22 @@ class CsrfTokenView(APIView):
         clear_refresh_cookie(response)
         return response
 
+
+class HumanChallengeView(APIView):
+    """Issues a fresh, signed human verification challenge for login protection."""
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = []
+
+    def get(self, request):
+        from .human_verification import generate_challenge_token
+        challenge = generate_challenge_token(request)
+        return Response({
+            'success': True,
+            'token': challenge['token'],
+            'timestamp': challenge['timestamp'],
+        })
+
+
 class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
     # AccountLoginRateThrottle counts failed credentials only. A conventional
@@ -96,6 +112,7 @@ class LoginView(APIView):
             'email': serializers.EmailField(),
             'password': serializers.CharField(write_only=True),
             'role': serializers.CharField(required=False),
+            'human_verification_token': serializers.CharField(required=False),
         }),
         responses={200: inline_serializer('LoginResponse', {
             'access': serializers.CharField(required=False),
@@ -106,6 +123,16 @@ class LoginView(APIView):
     def post(self, request):
         if not _is_mobile_client(request):
             SessionAuthentication().enforce_csrf(request)
+            from .human_verification import verify_human_token
+            human_token = (
+                request.data.get('human_verification_token')
+                or request.data.get('humanVerificationToken')
+                or request.data.get('turnstile_token')
+                or request.headers.get('X-Human-Verification-Token')
+            )
+            is_valid, error_msg = verify_human_token(human_token, request=request)
+            if not is_valid:
+                return Response({'detail': error_msg or 'Please complete human verification to sign in.'}, status=status.HTTP_400_BAD_REQUEST)
         raw_email = (request.data.get('email') or request.data.get('username') or '').strip()
         password = str(request.data.get('password', ''))
         requested_role = (request.data.get('role') or '').strip()
