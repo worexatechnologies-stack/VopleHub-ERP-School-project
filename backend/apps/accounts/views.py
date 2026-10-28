@@ -100,6 +100,27 @@ class HumanChallengeView(APIView):
         })
 
 
+def _enforce_vault_temp_password(user):
+    """Enforce must_change_password=True if the user is using an admin-generated/temporary password."""
+    if not user or user.role not in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
+        return
+    from apps.accounts.models import CredentialVaultRecord
+    vault_rec = CredentialVaultRecord.objects.filter(
+        school=user.school, login_id__iexact=user.email
+    ).first() or CredentialVaultRecord.objects.filter(user=user).first()
+    if vault_rec:
+        if vault_rec.plaintext_password != '[User Managed]' and vault_rec.source != 'user_password_change':
+            if not user.must_change_password:
+                user.must_change_password = True
+                user.save(update_fields=['must_change_password'])
+            if not vault_rec.must_change_password:
+                vault_rec.must_change_password = True
+                vault_rec.save(update_fields=['must_change_password'])
+    elif not user.must_change_password and (user.last_login is None or user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]):
+        user.must_change_password = True
+        user.save(update_fields=['must_change_password'])
+
+
 class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
     # AccountLoginRateThrottle counts failed credentials only. A conventional
@@ -202,6 +223,9 @@ class LoginView(APIView):
                     'user_role': user.role,
                 }, status=status.HTTP_403_FORBIDDEN)
 
+        # Enforce password reset on login if account is using an admin-generated/temporary password
+        _enforce_vault_temp_password(user)
+
         # Multi-Factor Authentication: Super Admins skip OTP; all other roles require 2FA OTP
         is_super_admin = (
             user.role == User.Role.SUPER_ADMIN
@@ -237,22 +261,6 @@ class LoginView(APIView):
             }, status=status.HTTP_200_OK)
 
         AccountLoginRateThrottle.record_success(raw_email, request=request)
-
-        # Enforce password reset on login if account is using an admin-generated/temporary password
-        if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
-            from apps.accounts.models import CredentialVaultRecord
-            vault_rec = CredentialVaultRecord.objects.filter(
-                school=user.school, login_id__iexact=user.email
-            ).first() or CredentialVaultRecord.objects.filter(user=user).first()
-            if vault_rec:
-                if vault_rec.plaintext_password != '[User Managed]' and vault_rec.source != 'user_password_change':
-                    if not user.must_change_password:
-                        user.must_change_password = True
-                    if not vault_rec.must_change_password:
-                        vault_rec.must_change_password = True
-                        vault_rec.save(update_fields=['must_change_password'])
-            elif not user.must_change_password and (user.last_login is None or user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]):
-                user.must_change_password = True
 
         user.last_login = timezone.now()
         user.is_online = True
@@ -376,15 +384,7 @@ class MeView(APIView):
     @extend_schema(responses=UserSerializer)
     def get(self, request):
         user = request.user
-        if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
-            from apps.accounts.models import CredentialVaultRecord
-            vault_rec = CredentialVaultRecord.objects.filter(
-                school=user.school, login_id__iexact=user.email
-            ).first() or CredentialVaultRecord.objects.filter(user=user).first()
-            if vault_rec and vault_rec.plaintext_password != '[User Managed]' and vault_rec.source != 'user_password_change':
-                if not user.must_change_password:
-                    user.must_change_password = True
-                    user.save(update_fields=['must_change_password'])
+        _enforce_vault_temp_password(user)
         return Response(UserSerializer(user).data)
 
 
@@ -1019,6 +1019,7 @@ class VerifyOtpView(APIView):
             return Response({'detail': result['error']}, status=status.HTTP_400_BAD_REQUEST)
 
         user = result['user']
+        _enforce_vault_temp_password(user)
         user.last_login = timezone.now()
         user.is_online = True
         user.last_seen_at = timezone.now()
