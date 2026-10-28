@@ -459,7 +459,7 @@ function AuthenticatedApp() {
 
   const handleTemporaryPasswordChanged = () => {
     if (!user) return;
-    const updatedUser = { ...user, mustChangePassword: false };
+    const updatedUser = { ...user, mustChangePassword: false, must_change_password: false } as AuthUser;
     storeAuthenticatedUser(updatedUser);
     dispatch(reduxSetUser(updatedUser));
     const defaultTab = getDefaultTabForRole(updatedUser.role);
@@ -1421,7 +1421,10 @@ function AuthenticatedApp() {
   const isGlass = false;
   const is3D = false;
 
-  if (!isPublicMode && user?.mustChangePassword) {
+  const isForcedPasswordChange = !isPublicMode && Boolean(
+    user?.mustChangePassword || (user as any)?.must_change_password
+  );
+  if (isForcedPasswordChange && user?.email) {
     return (
       <ForcedPasswordChange
         email={user.email}

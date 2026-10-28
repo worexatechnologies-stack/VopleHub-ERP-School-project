@@ -237,10 +237,27 @@ class LoginView(APIView):
             }, status=status.HTTP_200_OK)
 
         AccountLoginRateThrottle.record_success(raw_email, request=request)
+
+        # Enforce password reset on login if account is using an admin-generated/temporary password
+        if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
+            from apps.accounts.models import CredentialVaultRecord
+            vault_rec = CredentialVaultRecord.objects.filter(
+                school=user.school, login_id__iexact=user.email
+            ).first() or CredentialVaultRecord.objects.filter(user=user).first()
+            if vault_rec:
+                if vault_rec.plaintext_password != '[User Managed]' and vault_rec.source != 'user_password_change':
+                    if not user.must_change_password:
+                        user.must_change_password = True
+                    if not vault_rec.must_change_password:
+                        vault_rec.must_change_password = True
+                        vault_rec.save(update_fields=['must_change_password'])
+            elif not user.must_change_password and (user.last_login is None or user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]):
+                user.must_change_password = True
+
         user.last_login = timezone.now()
         user.is_online = True
         user.last_seen_at = timezone.now()
-        user.save(update_fields=['last_login', 'is_online', 'last_seen_at'])
+        user.save(update_fields=['last_login', 'is_online', 'last_seen_at', 'must_change_password'])
 
         if is_web_session and _create_web_session(request, user):
             response = Response({'user': UserSerializer(user).data}, status=status.HTTP_200_OK)
@@ -358,7 +375,17 @@ class MeView(APIView):
 
     @extend_schema(responses=UserSerializer)
     def get(self, request):
-        return Response(UserSerializer(request.user).data)
+        user = request.user
+        if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
+            from apps.accounts.models import CredentialVaultRecord
+            vault_rec = CredentialVaultRecord.objects.filter(
+                school=user.school, login_id__iexact=user.email
+            ).first() or CredentialVaultRecord.objects.filter(user=user).first()
+            if vault_rec and vault_rec.plaintext_password != '[User Managed]' and vault_rec.source != 'user_password_change':
+                if not user.must_change_password:
+                    user.must_change_password = True
+                    user.save(update_fields=['must_change_password'])
+        return Response(UserSerializer(user).data)
 
 
 class UserListView(APIView):
