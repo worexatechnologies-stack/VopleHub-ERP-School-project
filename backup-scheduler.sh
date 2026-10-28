@@ -2,25 +2,37 @@
 set -u
 
 backup_dir="${BACKUP_DIR:-/backups}"
-retention_days="${BACKUP_RETENTION_DAYS:-14}"
-interval_seconds="${BACKUP_INTERVAL_SECONDS:-86400}"
+retention_seconds="${BACKUP_RETENTION_SECONDS:-86400}"
+daily_time="${BACKUP_DAILY_TIME:-02:00}"
+timezone="${BACKUP_TIMEZONE:-Asia/Kolkata}"
 
-case "$retention_days" in
-    ''|*[!0-9]*) echo "BACKUP_RETENTION_DAYS must be a positive integer" >&2; exit 1 ;;
+case "$retention_seconds" in
+    ''|*[!0-9]*) echo "BACKUP_RETENTION_SECONDS must be a positive integer" >&2; exit 1 ;;
 esac
-case "$interval_seconds" in
-    ''|*[!0-9]*) echo "BACKUP_INTERVAL_SECONDS must be a positive integer" >&2; exit 1 ;;
+if [ "$retention_seconds" -lt 60 ]; then
+    echo "BACKUP_RETENTION_SECONDS must be at least 60" >&2
+    exit 1
+fi
+case "$daily_time" in
+    [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;;
+    *) echo "BACKUP_DAILY_TIME must use 24-hour HH:MM format" >&2; exit 1 ;;
 esac
-if [ "$retention_days" -lt 1 ] || [ "$interval_seconds" -lt 60 ]; then
-    echo "Retention must be at least 1 day and interval must be at least 60 seconds" >&2
+if [ ! -e "/usr/share/zoneinfo/$timezone" ]; then
+    echo "Timezone data is missing for BACKUP_TIMEZONE=$timezone" >&2
     exit 1
 fi
 
 mkdir -p "$backup_dir"
 
 cleanup_old_backups() {
-    find "$backup_dir" -type f \( -name 'volpehub-*.dump' -o -name 'postgres-*.dump' \) \
-        -mtime "+$((retention_days - 1))" -delete
+    now_epoch="$(date -u +%s)"
+    for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/postgres-*.dump; do
+        [ -f "$old_backup" ] || continue
+        modified_epoch="$(stat -c %Y "$old_backup")"
+        if [ "$((now_epoch - modified_epoch))" -ge "$retention_seconds" ]; then
+            rm -f "$old_backup"
+        fi
+    done
 }
 
 create_backup() {
@@ -46,7 +58,31 @@ create_backup() {
     echo "[VolpeHub Backup Scheduler] Backup verified; retained files: $(find "$backup_dir" -maxdepth 1 -type f -name 'volpehub-*.dump' | wc -l | tr -d ' ')"
 }
 
+wait_for_next_run() {
+    now_epoch="$(date -u +%s)"
+    today="$(TZ="$timezone" date +%Y-%m-%d)"
+    target_epoch="$(TZ="$timezone" date -d "$today $daily_time:00" +%s)" || return 1
+
+    # If the container restarts just after 2 AM, still run the day's backup
+    # within a five-minute grace window instead of skipping until tomorrow.
+    if [ "$now_epoch" -ge "$target_epoch" ] && [ "$now_epoch" -lt "$((target_epoch + 300))" ]; then
+        wait_seconds=0
+    else
+        if [ "$target_epoch" -le "$now_epoch" ]; then
+            target_epoch="$((target_epoch + 86400))"
+        fi
+        wait_seconds="$((target_epoch - now_epoch))"
+    fi
+
+    next_run="$(TZ="$timezone" date -d "@$((now_epoch + wait_seconds))" '+%Y-%m-%d %H:%M:%S %Z')"
+    echo "[VolpeHub Backup Scheduler] Next database backup at $next_run"
+    sleep "$wait_seconds"
+}
+
 while :; do
-    create_backup || true
-    sleep "$interval_seconds"
+    wait_for_next_run || { echo "Could not calculate the next backup time" >&2; sleep 60; continue; }
+    while ! create_backup; do
+        echo "[VolpeHub Backup Scheduler] Retrying in 15 minutes" >&2
+        sleep 900
+    done
 done

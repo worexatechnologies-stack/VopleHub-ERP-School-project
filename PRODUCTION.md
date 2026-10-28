@@ -89,8 +89,9 @@ BOOTSTRAP_SUPERADMIN_PASSWORD=generate-initial-strong-superadmin-password
 BOOTSTRAP_SUPERADMIN_NAME=VolpeHub Administrator
 
 # Backups
-BACKUP_RETENTION_DAYS=14
-BACKUP_INTERVAL_SECONDS=86400
+BACKUP_DAILY_TIME=02:00
+BACKUP_TIMEZONE=Asia/Kolkata
+BACKUP_RETENTION_SECONDS=86400
 ```
 
 ---
@@ -132,7 +133,7 @@ Configure the following secrets in the GitHub repository:
    - Establish a secure SSH session with strict host verification.
    - Sync `docker-compose.prod.yml`, `Caddyfile`, and scripts to `/opt/volpehub/`.
    - Take an automated pre-deployment snapshot of PostgreSQL (`backup.sh`).
-   - Run a dedicated backup container that creates a verified PostgreSQL dump daily and removes dumps older than the configured retention period.
+   - Run a dedicated backup container that creates a verified PostgreSQL dump daily at 2:00 AM Asia/Kolkata and removes dumps at 24 hours old.
    - Run safe database migrations: `docker compose -f docker-compose.prod.yml -p volpehub run --rm api python manage.py migrate --noinput`.
    - Apply service updates: `docker compose -f docker-compose.prod.yml -p volpehub up -d --remove-orphans`.
    - Verify container health status via `/api/health/`.

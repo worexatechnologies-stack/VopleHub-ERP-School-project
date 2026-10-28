@@ -46,18 +46,24 @@ fi
 mv "$temporary_dump" "$target_dump"
 echo "[VolpeHub Backup] Backup verified: $(du -h "$target_dump" | cut -f1)"
 
-# Keep the configured number of full days. Cleanup happens only after the new
+# Keep only the configured age in seconds. Cleanup happens only after the new
 # archive has been created and verified successfully.
-retention_days="${BACKUP_RETENTION_DAYS:-14}"
-case "$retention_days" in
-    ''|*[!0-9]*) echo "Error: BACKUP_RETENTION_DAYS must be a positive integer" >&2; exit 1 ;;
+retention_seconds="${BACKUP_RETENTION_SECONDS:-86400}"
+case "$retention_seconds" in
+    ''|*[!0-9]*) echo "Error: BACKUP_RETENTION_SECONDS must be a positive integer" >&2; exit 1 ;;
 esac
-if [ "$retention_days" -lt 1 ]; then
-    echo "Error: BACKUP_RETENTION_DAYS must be at least 1" >&2
+if [ "$retention_seconds" -lt 60 ]; then
+    echo "Error: BACKUP_RETENTION_SECONDS must be at least 60" >&2
     exit 1
 fi
-find "$backup_dir" -type f \( -name 'volpehub-*.dump' -o -name 'postgres-*.dump' \) \
-    -mtime "+$((retention_days - 1))" -delete
+now_epoch="$(date -u +%s)"
+for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/postgres-*.dump; do
+    [ -f "$old_backup" ] || continue
+    modified_epoch="$(stat -c %Y "$old_backup")"
+    if [ "$((now_epoch - modified_epoch))" -ge "$retention_seconds" ]; then
+        rm -f "$old_backup"
+    fi
+done
 
 echo "[VolpeHub Backup] Current backups in '$backup_dir':"
 ls -lh "$backup_dir"/*.dump 2>/dev/null || echo "  (none)"
