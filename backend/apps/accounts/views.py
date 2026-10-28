@@ -816,17 +816,26 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
                 continue
             rec = CredentialVaultRecord.objects.filter(login_id__iexact=admin.email).first()
             if not rec:
-                CredentialVaultRecord.objects.create(
+                rec = CredentialVaultRecord.objects.create(
                     school=admin.school,
                     user=admin,
                     role=CredentialVaultRecord.Role.ADMIN,
                     name=admin.get_full_name() or admin.first_name or admin.email.split('@')[0],
                     login_id=admin.email,
-                    plaintext_password='Admin@123',
+                    # The actual password hash cannot be reversed. Keep the
+                    # vault honest and masked instead of displaying a fake default.
+                    plaintext_password='[User Managed]',
                     identifier=f"ADM-{admin.pk:04d}",
                     source='admin_roster',
                     must_change_password=admin.must_change_password,
                 )
+            elif rec.source == 'admin_roster' and rec.plaintext_password == 'Admin@123':
+                # Repair legacy records previously populated with a fake default.
+                # Never attempt to infer a real password from the user's hash.
+                rec.plaintext_password = '[User Managed]'
+                rec.user = admin
+                rec.must_change_password = admin.must_change_password
+                rec.save(update_fields=['plaintext_password', 'user', 'must_change_password', 'updated_at'])
 
     def get_queryset(self):
         user = self.request.user

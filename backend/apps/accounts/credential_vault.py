@@ -1,7 +1,4 @@
 import logging
-from typing import Optional
-from django.db import transaction
-from django.utils.text import slugify
 
 logger = logging.getLogger(__name__)
 
@@ -102,14 +99,15 @@ def record_credential(
 def sync_school_credential_vault(school):
     """Ensure all non-admin school members (students, teachers, parents) have accessible vault credentials.
 
-    If a user has no vault record, generates a compliant password and registers it in the vault.
+    If an existing user has no vault record, adds a masked placeholder record without
+    changing that user's password. Accounts created by this sync still receive their
+    generated temporary credentials through the account-creation service.
     NEVER touches School Admin or Super Admin accounts.
     """
     if not school:
         return {'synced': 0, 'students': 0, 'teachers': 0, 'parents': 0}
 
-    from apps.accounts.models import CredentialVaultRecord, StudentProfile, ParentProfile, User
-    from apps.accounts.credential_generator import generate_password
+    from apps.accounts.models import CredentialVaultRecord, StudentProfile, ParentProfile
     from apps.sis.models import Student
     from apps.staff.models import Teacher
 
@@ -122,46 +120,66 @@ def sync_school_credential_vault(school):
             school=school, role=CredentialVaultRecord.Role.STUDENT
         ).values_list('identifier', flat=True)
     )
-    existing_teacher_logins = set(
+    existing_student_user_ids = set(
         CredentialVaultRecord.objects.filter(
+            school=school, role=CredentialVaultRecord.Role.STUDENT, user__isnull=False
+        ).values_list('user_id', flat=True)
+    )
+    existing_student_logins = {
+        login.strip().lower()
+        for login in CredentialVaultRecord.objects.filter(
+            school=school, role=CredentialVaultRecord.Role.STUDENT
+        ).values_list('login_id', flat=True)
+        if login
+    }
+    existing_teacher_logins = {
+        login.strip().lower()
+        for login in CredentialVaultRecord.objects.filter(
             school=school, role=CredentialVaultRecord.Role.TEACHER
         ).values_list('login_id', flat=True)
-    )
-    existing_parent_logins = set(
-        CredentialVaultRecord.objects.filter(
+        if login
+    }
+    existing_parent_logins = {
+        login.strip().lower()
+        for login in CredentialVaultRecord.objects.filter(
             school=school, role=CredentialVaultRecord.Role.PARENT
         ).values_list('login_id', flat=True)
-    )
+        if login
+    }
 
     # 1. Sync Students
     students = Student.objects.filter(school=school, status=Student.Status.ACTIVE).select_related('school', 'login_profile__user')
     for student in students:
-        if student.admission_no and student.admission_no in existing_student_identifiers:
+        profile = getattr(student, 'login_profile', None)
+        existing_user = profile.user if profile and profile.user else None
+        login_id = ((existing_user.email or existing_user.username).strip().lower() if existing_user else '')
+        if (
+            (student.admission_no and student.admission_no in existing_student_identifiers)
+            or (existing_user and existing_user.pk in existing_student_user_ids)
+            or (login_id and login_id in existing_student_logins)
+        ):
             continue
 
-        profile = getattr(student, 'login_profile', None)
         if profile and profile.user:
             user = profile.user
-            pwd = generate_password(student.name, 'student')
-            user.set_password(pwd)
-            user.must_change_password = True
-            user.save(update_fields=['password', 'must_change_password'])
-
             record_credential(
                 school=school,
                 role='student',
                 name=student.name,
                 login_id=user.email or user.username,
-                plaintext_password=pwd,
+                plaintext_password='[User Managed]',
                 user=user,
                 identifier=student.admission_no,
                 class_name=student.class_name,
                 section=student.section,
                 academic_year=student.academic_year,
                 phone=student.parent_phone,
-                source='sync_auto',
+                source='sync_missing_record',
+                must_change_password=user.must_change_password,
             )
             existing_student_identifiers.add(student.admission_no)
+            existing_student_user_ids.add(user.pk)
+            existing_student_logins.add(login_id)
             synced_students += 1
         else:
             # Create login via SIS helper
@@ -185,21 +203,17 @@ def sync_school_credential_vault(school):
             continue
 
         user = teacher.user
-        pwd = generate_password(user.get_full_name() or user.username, 'teacher')
-        user.set_password(pwd)
-        user.must_change_password = True
-        user.save(update_fields=['password', 'must_change_password'])
-
         record_credential(
             school=school,
             role='teacher',
             name=user.get_full_name() or user.username,
             login_id=user.email,
-            plaintext_password=pwd,
+            plaintext_password='[User Managed]',
             user=user,
             identifier=f"TCH-{teacher.id}",
             phone=teacher.phone,
-            source='sync_auto',
+            source='sync_missing_record',
+            must_change_password=user.must_change_password,
         )
         existing_teacher_logins.add(teacher_login)
         synced_teachers += 1
@@ -221,17 +235,12 @@ def sync_school_credential_vault(school):
         section = linked_student.section if linked_student else ''
         academic_year = linked_student.academic_year if linked_student else ''
 
-        pwd = generate_password(user.get_full_name() or user.username, 'parent')
-        user.set_password(pwd)
-        user.must_change_password = True
-        user.save(update_fields=['password', 'must_change_password'])
-
         record_credential(
             school=school,
             role='parent',
             name=user.get_full_name() or f"Parent of {linked_name}".strip(),
             login_id=user.email,
-            plaintext_password=pwd,
+            plaintext_password='[User Managed]',
             user=user,
             identifier=f"P-{parent_prof.id}",
             class_name=class_name,
@@ -239,7 +248,8 @@ def sync_school_credential_vault(school):
             academic_year=academic_year,
             phone=parent_prof.phone,
             linked_student_name=linked_name,
-            source='sync_auto',
+            source='sync_missing_record',
+            must_change_password=user.must_change_password,
         )
         existing_parent_logins.add(parent_login)
         synced_parents += 1

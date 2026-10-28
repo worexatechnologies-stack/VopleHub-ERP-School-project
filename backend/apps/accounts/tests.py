@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.password_validation import validate_password
 from .credential_generator import create_user_with_credentials, generate_password
+from .credential_vault import sync_school_credential_vault
 
 from apps.accounts.models import CredentialVaultRecord, ParentProfile, StudentProfile, User
 from apps.schools.models import School
@@ -420,7 +421,7 @@ class SchoolWritePermissionTests(TestCase):
                 self.assertEqual(self.client.delete(f'/api/v1/schools/{self.school.id}/').status_code, 403)
 
 
-class TemporaryPasswordMiddlewareTests(TestCase):
+class TemporaryPasswordPolicyTests(TestCase):
     def test_temporary_password_blocks_all_but_change_password_and_logout(self):
         user = User.objects.create_user(
             username='temporary-password-user', email='temporary-password-user@example.com',
@@ -434,6 +435,102 @@ class TemporaryPasswordMiddlewareTests(TestCase):
         user.refresh_from_db()
         self.assertFalse(user.must_change_password)
 
+
+@override_settings(SECURE_SSL_REDIRECT=False)
+class CredentialVaultSyncSafetyTests(TestCase):
+    def setUp(self):
+        self.school = School.objects.create(name='Vault Safety School', code='vault-safety-school')
+
+    def test_sync_does_not_reset_existing_student_teacher_or_parent_passwords(self):
+        student_user = User.objects.create_user(
+            username='vault-student@example.com', email='vault-student@example.com',
+            password='StudentPermanent123!', role=User.Role.STUDENT, school=self.school,
+        )
+        student = Student.objects.create(
+            school=self.school, admission_no='VS-001', name='Vault Student',
+            class_name='5', section='A', roll_no=1, parent_name='Vault Parent',
+            parent_phone='9000000000', parent_email='vault-parent@example.com',
+            dob=date(2015, 1, 1), gender='Other', academic_year='2026-2027',
+        )
+        StudentProfile.objects.create(user=student_user, student=student)
+
+        teacher_user = User.objects.create_user(
+            username='vault-teacher@example.com', email='vault-teacher@example.com',
+            password='TeacherPermanent123!', role=User.Role.TEACHER, school=self.school,
+        )
+        Teacher.objects.create(
+            school=self.school, user=teacher_user,
+            joining_date=date(2026, 1, 1), phone='9111111111',
+        )
+
+        parent_user = User.objects.create_user(
+            username='vault-parent@example.com', email='vault-parent@example.com',
+            password='ParentPermanent123!', role=User.Role.PARENT, school=self.school,
+        )
+        parent = ParentProfile.objects.create(user=parent_user, phone='9000000000')
+        parent.students.add(student)
+
+        result = sync_school_credential_vault(self.school)
+
+        self.assertEqual(result, {'synced': 3, 'students': 1, 'teachers': 1, 'parents': 1})
+        for user, password in (
+            (student_user, 'StudentPermanent123!'),
+            (teacher_user, 'TeacherPermanent123!'),
+            (parent_user, 'ParentPermanent123!'),
+        ):
+            user.refresh_from_db()
+            self.assertTrue(user.check_password(password))
+            self.assertFalse(user.must_change_password)
+            vault_record = CredentialVaultRecord.objects.get(user=user)
+            self.assertEqual(vault_record.plaintext_password, '[User Managed]')
+            self.assertFalse(vault_record.must_change_password)
+
+        second_result = sync_school_credential_vault(self.school)
+        self.assertEqual(second_result['synced'], 0)
+        for user, password in (
+            (student_user, 'StudentPermanent123!'),
+            (teacher_user, 'TeacherPermanent123!'),
+            (parent_user, 'ParentPermanent123!'),
+        ):
+            user.refresh_from_db()
+            self.assertTrue(user.check_password(password))
+
+    def test_super_admin_vault_never_invents_an_admin_password(self):
+        admin_with_legacy_record = User.objects.create_user(
+            username='vault-admin-legacy@example.com', email='vault-admin-legacy@example.com',
+            password='AdminPermanent123!', role=User.Role.SCHOOL_ADMIN, school=self.school,
+        )
+        CredentialVaultRecord.objects.create(
+            school=self.school, user=admin_with_legacy_record,
+            role=CredentialVaultRecord.Role.ADMIN, name='Legacy Admin',
+            login_id=admin_with_legacy_record.email, plaintext_password='Admin@123',
+            source='admin_roster', must_change_password=False,
+        )
+        admin_without_record = User.objects.create_user(
+            username='vault-admin-new@example.com', email='vault-admin-new@example.com',
+            password='OtherAdminPermanent123!', role=User.Role.SCHOOL_ADMIN, school=self.school,
+        )
+        super_admin = User.objects.create_superuser(
+            username='vault-super-admin', email='vault-super-admin@example.com',
+            password='SuperAdminPermanent123!', role=User.Role.SUPER_ADMIN,
+        )
+        client = APIClient()
+        client.force_authenticate(super_admin)
+
+        response = client.get('/api/v1/credential-vault/')
+
+        self.assertEqual(response.status_code, 200)
+        for admin in (admin_with_legacy_record, admin_without_record):
+            record = CredentialVaultRecord.objects.get(user=admin)
+            self.assertEqual(record.plaintext_password, '[User Managed]')
+            self.assertNotEqual(record.plaintext_password, 'Admin@123')
+            admin.refresh_from_db()
+            self.assertTrue(admin.check_password(
+                'AdminPermanent123!' if admin.pk == admin_with_legacy_record.pk else 'OtherAdminPermanent123!'
+            ))
+        self.assertTrue(all(item['password'] == '[User Managed]' for item in response.data))
+
+class TemporaryPasswordMiddlewareTests(TestCase):
     @override_settings(SECURE_SSL_REDIRECT=False)
     def test_school_admin_password_change_clears_vault_temporary_marker(self):
         school = School.objects.create(name='Password Change School', code='password-change-school')
