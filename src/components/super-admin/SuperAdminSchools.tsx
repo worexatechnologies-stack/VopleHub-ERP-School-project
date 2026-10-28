@@ -286,7 +286,7 @@ export default function SuperAdminSchools() {
               Subdomain (URL Slug)
               <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1">
                 <input value={form.subdomain} onChange={(event) => setForm({ ...form, subdomain: event.target.value })} className="w-full bg-transparent text-xs normal-case text-slate-800 outline-none" placeholder="srichaitanya" />
-                <span className="text-[10px] font-semibold text-slate-400">.volpehub.education</span>
+                <span className="text-[10px] font-semibold text-slate-400">.volpehub.in</span>
               </div>
             </label>
 
@@ -366,7 +366,7 @@ export default function SuperAdminSchools() {
                       <span className="rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-600">{school.code}</span>
                       {school.subdomain && (
                         <span className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-0.5 font-mono text-[10px] font-bold text-indigo-700">
-                          {school.subdomain}.volpehub.education
+                          {school.subdomain}.volpehub.in
                         </span>
                       )}
                     </div>

@@ -901,12 +901,12 @@ export default function SuperAdminSystemSettings() {
                       <input
                         disabled
                         type="text"
-                        value="https://api.volpehub.education/payments/razorpay/webhook-handler"
+                        value="https://volpehub.in/api/v1/payments/razorpay/webhook/"
                         className="w-full text-xs bg-slate-100 border border-slate-200 pl-3.5 pr-10 py-2.5 rounded-xl text-slate-500 font-mono"
                       />
                       <button
                         type="button"
-                        onClick={() => handleCopyText('https://api.volpehub.education/payments/razorpay/webhook-handler', 'webhook', 'Webhook URI')}
+                        onClick={() => handleCopyText('https://volpehub.in/api/v1/payments/razorpay/webhook/', 'webhook', 'Webhook URI')}
                         className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-200/60"
                         title="Copy Webhook Endpoint"
                       >

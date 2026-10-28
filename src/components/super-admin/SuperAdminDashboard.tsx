@@ -132,7 +132,7 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
   };
 
   const handleCopySubdomain = async (school: SchoolRecord) => {
-    const url = school.subdomain ? `${school.subdomain}.volpehub.education` : 'default.volpehub.education';
+    const url = school.subdomain ? `${school.subdomain}.volpehub.in` : 'volpehub.in';
     const success = await copyToClipboard(url);
     if (success) {
       setCopiedId(school.id);
@@ -405,7 +405,7 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
           {filteredSchools.length > 0 ? (
             filteredSchools.map((school) => {
               const isCopied = copiedId === school.id;
-              const subdomainUrl = school.subdomain ? `${school.subdomain}.volpehub.education` : 'default.volpehub.education';
+              const subdomainUrl = school.subdomain ? `${school.subdomain}.volpehub.in` : 'volpehub.in';
               const schoolAdmins = admins.filter(a => String(a.schoolId) === String(school.id) || a.schoolName === school.schoolName);
 
               return (

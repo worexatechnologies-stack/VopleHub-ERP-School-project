@@ -21,6 +21,35 @@ SECURE_HSTS_PRELOAD = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 
+# Strict Production Allowed Hosts (Prevent Host Header Injection)
+_configured_hosts = env.list('ALLOWED_HOSTS', default=[
+    'volpehub.in',
+    '.volpehub.in',
+    'www.volpehub.in',
+    'volpehub.education',
+    '.volpehub.education',
+    'www.volpehub.education',
+    'worexa.com',
+    '.worexa.com',
+    'www.worexa.com',
+    'localhost',
+    '127.0.0.1',
+    'api',
+    'web',
+])
+ALLOWED_HOSTS = list(set(_configured_hosts + [
+    'volpehub.in',
+    '.volpehub.in',
+    'www.volpehub.in',
+    'volpehub.education',
+    '.volpehub.education',
+    'www.volpehub.education',
+    'localhost',
+    '127.0.0.1',
+    'api',
+    'web',
+]))
+
 # Strict Production CORS & Cross-Origin Isolation
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True

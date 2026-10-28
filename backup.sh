@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 cd "$(dirname "$0")"
 
 ENV_FILE=""
