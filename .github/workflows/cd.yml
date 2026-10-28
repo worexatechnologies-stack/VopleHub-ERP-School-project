@@ -175,6 +175,7 @@ jobs:
             docker-compose.prod.yml \
             Caddyfile \
             backup.sh \
+            backup-scheduler.sh \
             restore.sh \
             rollback.sh \
             deploy.sh \
@@ -187,7 +188,7 @@ jobs:
             "${SSH_USER}@${SSH_HOST}:/opt/volpehub/docker/postgres/"
 
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            "chmod +x /opt/volpehub/backup.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/deploy.sh /opt/volpehub/docker/postgres/init-app-role.sh"
+            "chmod +x /opt/volpehub/backup.sh /opt/volpehub/backup-scheduler.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/deploy.sh /opt/volpehub/docker/postgres/init-app-role.sh"
 
       - name: Execute atomic production deployment
         env:
