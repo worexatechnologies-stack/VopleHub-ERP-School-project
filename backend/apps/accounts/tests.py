@@ -1,11 +1,12 @@
 from django.core.management import CommandError, call_command
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.password_validation import validate_password
 from .credential_generator import create_user_with_credentials, generate_password
 from .credential_vault import sync_school_credential_vault
+from .human_verification import _valid_turnstile_login_response
 
 from apps.accounts.models import CredentialVaultRecord, ParentProfile, StudentProfile, User
 from apps.schools.models import School
@@ -579,6 +580,17 @@ class TemporaryPasswordMiddlewareTests(TestCase):
             _enforce_vault_temp_password(user)
             user.refresh_from_db()
             self.assertFalse(user.must_change_password, role)
+
+
+class TurnstileLoginResponseTests(TestCase):
+    def test_turnstile_requires_success_login_action_and_matching_host(self):
+        request = RequestFactory().post('/api/v1/auth/login/', HTTP_HOST='volpehub.in')
+        valid = {'success': True, 'action': 'login', 'hostname': 'volpehub.in'}
+
+        self.assertTrue(_valid_turnstile_login_response(valid, request))
+        self.assertFalse(_valid_turnstile_login_response({**valid, 'action': 'signup'}, request))
+        self.assertFalse(_valid_turnstile_login_response({**valid, 'hostname': 'attacker.example'}, request))
+        self.assertFalse(_valid_turnstile_login_response({**valid, 'success': False}, request))
 
 
 @override_settings(SECURE_SSL_REDIRECT=False)

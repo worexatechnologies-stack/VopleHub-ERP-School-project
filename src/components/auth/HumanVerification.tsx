@@ -5,20 +5,30 @@ interface HumanVerificationProps {
   onVerify: (token: string) => void;
   onReset?: () => void;
   hasAttemptedSubmit?: boolean;
+  resetKey?: number;
 }
 
 export default function HumanVerification({
   onVerify,
   onReset,
   hasAttemptedSubmit = false,
+  resetKey = 0,
 }: HumanVerificationProps) {
   const [status, setStatus] = useState<'idle' | 'verifying' | 'verified' | 'error'>('idle');
   const [challengeToken, setChallengeToken] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const clickStartTime = useRef<number>(0);
   const turnstileContainerRef = useRef<HTMLDivElement>(null);
+  const turnstileWidgetIdRef = useRef<string | number | null>(null);
+  const onVerifyRef = useRef(onVerify);
+  const onResetRef = useRef(onReset);
 
   const turnstileSiteKey = (import.meta as any).env?.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY;
+
+  useEffect(() => {
+    onVerifyRef.current = onVerify;
+    onResetRef.current = onReset;
+  }, [onVerify, onReset]);
 
   // Cloudflare Turnstile integration if site key is configured
   useEffect(() => {
@@ -28,16 +38,28 @@ export default function HumanVerification({
       const turnstile = (window as any).turnstile;
       if (turnstile && turnstileContainerRef.current) {
         try {
-          turnstile.render(turnstileContainerRef.current, {
+          turnstileWidgetIdRef.current = turnstile.render(turnstileContainerRef.current, {
             sitekey: turnstileSiteKey,
             theme: 'light',
+            action: 'login',
             callback: (token: string) => {
               setStatus('verified');
-              onVerify(token);
+              onVerifyRef.current(token);
             },
             'error-callback': () => {
               setStatus('error');
               setErrorMessage('Verification failed. Please retry.');
+              onResetRef.current?.();
+            },
+            'expired-callback': () => {
+              setStatus('idle');
+              setErrorMessage('Verification expired. Please verify again.');
+              onResetRef.current?.();
+            },
+            'timeout-callback': () => {
+              setStatus('idle');
+              setErrorMessage('Verification timed out. Please verify again.');
+              onResetRef.current?.();
             },
           });
         } catch {
@@ -56,7 +78,18 @@ export default function HumanVerification({
     } else {
       renderTurnstile();
     }
-  }, [turnstileSiteKey, onVerify]);
+  }, [turnstileSiteKey]);
+
+  useEffect(() => {
+    if (!turnstileSiteKey || resetKey === 0 || typeof window === 'undefined') return;
+    const turnstile = (window as any).turnstile;
+    if (!turnstile || turnstileWidgetIdRef.current === null) return;
+
+    turnstile.reset(turnstileWidgetIdRef.current);
+    setStatus('idle');
+    setErrorMessage(null);
+    onResetRef.current?.();
+  }, [resetKey, turnstileSiteKey]);
 
   // Pre-fetch challenge token from server on component mount
   useEffect(() => {

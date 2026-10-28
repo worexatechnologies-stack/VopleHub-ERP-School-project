@@ -5,6 +5,7 @@ import secrets
 import sys
 import time
 from typing import Tuple, Optional
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.core.cache import cache
@@ -15,6 +16,20 @@ from apps.accounts.auth_utils import _client_ip
 logger = logging.getLogger(__name__)
 
 CHALLENGE_VALIDITY_SECONDS = 300  # 5 minutes
+
+
+def _valid_turnstile_login_response(result: dict, request) -> bool:
+    """Accept only a successful token minted for this login action and host."""
+    if not isinstance(result, dict) or result.get('success') is not True:
+        return False
+
+    expected_hostname = (urlsplit(f"//{request.get_host()}").hostname or '').rstrip('.').lower()
+    token_hostname = str(result.get('hostname') or '').rstrip('.').lower()
+    return bool(
+        expected_hostname
+        and token_hostname == expected_hostname
+        and result.get('action') == 'login'
+    )
 
 
 def generate_challenge_token(request) -> dict:
@@ -70,7 +85,7 @@ def verify_human_token(token_str: Optional[str], request) -> Tuple[bool, Optiona
             )
             with urllib.request.urlopen(req, timeout=5) as response:
                 result = json.loads(response.read().decode('utf-8'))
-                if result.get('success'):
+                if _valid_turnstile_login_response(result, request):
                     return True, None
                 logger.warning('Cloudflare Turnstile verification failed: %s', result)
         except Exception as exc:

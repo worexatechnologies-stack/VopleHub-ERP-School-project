@@ -393,6 +393,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
   const [rememberMe, setRememberMe] = useState(true);
   const [capsLockActive, setCapsLockActive] = useState(false);
   const [humanToken, setHumanToken] = useState<string | null>(null);
+  const [humanVerificationResetKey, setHumanVerificationResetKey] = useState(0);
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
 
   // 3D Parallax tilt state for showcase card
@@ -615,8 +616,10 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
       return;
     }
     setErrorMessage('');
+    let verificationSubmitted = false;
     try {
       const canonicalRequestedRole = roleToKey[activeRole] || activeRole;
+      verificationSubmitted = true;
       const session = await loginMutation({
         email: email.trim().toLowerCase(),
         password,
@@ -684,6 +687,11 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
         msg = error.message;
       }
       setErrorMessage(msg);
+    } finally {
+      if (verificationSubmitted) {
+        setHumanToken(null);
+        setHumanVerificationResetKey((key) => key + 1);
+      }
     }
   };
 
@@ -1010,6 +1018,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
 
                 {/* Human Verification Challenge */}
                 <HumanVerification
+                  resetKey={humanVerificationResetKey}
                   onVerify={(token) => {
                     setHumanToken(token);
                     setErrorMessage('');
