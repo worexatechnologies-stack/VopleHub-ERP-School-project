@@ -20,10 +20,10 @@ def create_teacher_with_login(*, school, data, created_by=None):
             user, credentials = create_user_with_credentials(person=data['name'], role=User.Role.TEACHER, school=school, email=email)
             if password:
                 user.set_password(password)
-                user.must_change_password = False
+                user.must_change_password = True
                 user.save(update_fields=['password', 'must_change_password'])
                 credentials['plaintext_password'] = password
-                credentials['mustChangePassword'] = False
+                credentials['mustChangePassword'] = True
             photo = data.get('photo')
             if photo:
                 photo_bytes, photo_content_type, _ = optimize_raster_image(photo)

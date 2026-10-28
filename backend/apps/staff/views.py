@@ -224,11 +224,20 @@ class TeacherViewSet(TenantScopedViewSet):
         if password and str(password).strip():
             clean_pwd = str(password).strip()
             user.set_password(clean_pwd)
-            user.must_change_password = False
+            user.must_change_password = True
             user.save(update_fields=['password', 'must_change_password'])
             try:
-                from apps.accounts.credential_vault import update_vault_password_for_user
-                update_vault_password_for_user(user, clean_pwd)
+                from apps.accounts.credential_vault import record_credential
+                record_credential(
+                    school=teacher.school,
+                    role='teacher',
+                    name=teacher.user.get_full_name() or teacher.name,
+                    login_id=teacher.user.email,
+                    plaintext_password=clean_pwd,
+                    user=user,
+                    source='admin_update',
+                    must_change_password=True,
+                )
             except Exception:
                 pass
 

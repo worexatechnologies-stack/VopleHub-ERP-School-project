@@ -104,7 +104,7 @@ export async function loginWithApi(
         studentId: data.user.studentId || undefined,
         parentStudentIds: Array.isArray(data.user.parentStudentIds) ? data.user.parentStudentIds : [],
         permissions: Array.isArray(data.user.permissions) ? data.user.permissions : [],
-        mustChangePassword: Boolean(data.user.mustChangePassword),
+        mustChangePassword: Boolean(data.user.mustChangePassword ?? (data.user as any).must_change_password),
       },
     };
   } catch (error) {
@@ -138,7 +138,7 @@ export async function getCurrentUser(): Promise<AuthUser> {
     studentId: data.studentId,
     parentStudentIds: Array.isArray(data.parentStudentIds) ? data.parentStudentIds : [],
     permissions: Array.isArray(data.permissions) ? data.permissions : [],
-    mustChangePassword: Boolean(data.mustChangePassword),
+    mustChangePassword: Boolean(data.mustChangePassword ?? (data as any).must_change_password),
   };
 }
 

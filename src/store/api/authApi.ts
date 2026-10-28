@@ -52,6 +52,10 @@ export const authApi = baseApi.injectEndpoints({
           ? {
               ...data.user,
               role: (roleMap[data.user.role] || data.user.role) as UserRole,
+              mustChangePassword: Boolean(
+                data.user.mustChangePassword ??
+                (data.user as any).must_change_password
+              ),
             }
           : undefined,
       }),
@@ -73,6 +77,10 @@ export const authApi = baseApi.injectEndpoints({
           ? {
               ...data.user,
               role: (roleMap[data.user.role] || data.user.role) as UserRole,
+              mustChangePassword: Boolean(
+                data.user.mustChangePassword ??
+                (data.user as any).must_change_password
+              ),
             }
           : undefined,
       }),
@@ -90,7 +98,7 @@ export const authApi = baseApi.injectEndpoints({
     getCurrentUser: build.query<AuthUser, void>({
       query: () => ({ url: '/auth/me/' }),
       providesTags: ['Auth'],
-      transformResponse: (data: AuthUser & { role: string; id?: number | string }) => ({
+      transformResponse: (data: any) => ({
         id: data.id,
         email: data.email,
         name: data.name || data.email,
@@ -100,7 +108,7 @@ export const authApi = baseApi.injectEndpoints({
         studentId: data.studentId,
         parentStudentIds: data.parentStudentIds || [],
         permissions: data.permissions || [],
-        mustChangePassword: Boolean(data.mustChangePassword),
+        mustChangePassword: Boolean(data.mustChangePassword ?? data.must_change_password),
       }),
     }),
     changePassword: build.mutation<

@@ -879,10 +879,15 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         record = serializer.save()
-        if record.user and record.plaintext_password and record.plaintext_password != '[User Managed]':
-            record.user.set_password(record.plaintext_password)
-            record.user.must_change_password = False
-            record.user.save(update_fields=['password', 'must_change_password'])
+        user = record.user or User.objects.filter(school=record.school, email__iexact=record.login_id).first() or User.objects.filter(school=record.school, username__iexact=record.login_id).first()
+        if user and record.plaintext_password and record.plaintext_password != '[User Managed]':
+            user.set_password(record.plaintext_password)
+            user.must_change_password = True
+            user.save(update_fields=['password', 'must_change_password'])
+            record.must_change_password = True
+            if not record.user:
+                record.user = user
+            record.save(update_fields=['user', 'must_change_password'])
 
     @action(detail=False, methods=['post'], url_path='sync')
     def sync_roster(self, request):
@@ -917,10 +922,14 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
         record.source = 'admin_reset'
         record.save(update_fields=['plaintext_password', 'must_change_password', 'source', 'updated_at'])
 
-        if record.user:
-            record.user.set_password(new_pwd)
-            record.user.must_change_password = True
-            record.user.save(update_fields=['password', 'must_change_password'])
+        target_user = record.user or User.objects.filter(school=record.school, email__iexact=record.login_id).first() or User.objects.filter(school=record.school, username__iexact=record.login_id).first()
+        if target_user:
+            if not record.user:
+                record.user = target_user
+                record.save(update_fields=['user'])
+            target_user.set_password(new_pwd)
+            target_user.must_change_password = True
+            target_user.save(update_fields=['password', 'must_change_password'])
 
         return Response(self.get_serializer(record).data)
 

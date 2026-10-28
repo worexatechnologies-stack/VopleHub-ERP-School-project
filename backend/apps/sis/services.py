@@ -49,10 +49,10 @@ def create_student_login(student, password=None, email=None):
         )
         if password:
             user.set_password(password)
-            user.must_change_password = False
+            user.must_change_password = True
             user.save(update_fields=['password', 'must_change_password'])
             credentials['plaintext_password'] = password
-            credentials['mustChangePassword'] = False
+            credentials['mustChangePassword'] = True
 
         StudentProfile.objects.create(user=user, student=student)
         try:
@@ -156,10 +156,10 @@ def create_or_link_parent_login(student, password=None, email=None):
         )
         if password:
             user.set_password(password)
-            user.must_change_password = False
+            user.must_change_password = True
             user.save(update_fields=['password', 'must_change_password'])
             credentials['plaintext_password'] = password
-            credentials['mustChangePassword'] = False
+            credentials['mustChangePassword'] = True
 
         profile = ParentProfile.objects.create(user=user, phone=student.parent_phone)
         profile.students.add(student)
