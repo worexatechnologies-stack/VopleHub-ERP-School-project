@@ -59,6 +59,30 @@ const baseQueryWithAuth: BaseQueryFn<
 
   const result = await rawBaseQuery(args, api, extraOptions);
 
+  // Hide proxy error pages, server traces, and raw network codes from screens.
+  // Keep the HTTP status so each feature can still make the right decision.
+  if (result.error) {
+    const errorStatus = result.error.status;
+    const rawBody = 'data' in result.error ? result.error.data : undefined;
+    const errorText = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody ?? '');
+    const isServerFailure = typeof errorStatus === 'number' && errorStatus >= 500;
+    const isNetworkFailure = typeof errorStatus === 'string';
+    const isHtmlErrorPage = typeof rawBody === 'string' && /<!doctype\s+html|<html\b|<title>\s*server error/i.test(rawBody);
+    const isTechnicalMessage = /traceback|stack trace|integrityerror|operationalerror|programmingerror|attributeerror|nonetype|<!doctype\s+html|<html\b/i.test(errorText);
+    if (isServerFailure || isNetworkFailure || isHtmlErrorPage || isTechnicalMessage) {
+      const detail = errorStatus === 'TIMEOUT_ERROR'
+        ? 'This is taking longer than usual. Please try again.'
+        : errorStatus === 'PARSING_ERROR'
+          ? 'We could not read the reply. Please refresh and try again.'
+          : isServerFailure || isHtmlErrorPage
+            ? 'Something went wrong. Please try again. If it keeps happening, contact your school office.'
+            : isNetworkFailure
+              ? 'We could not connect. Check your internet connection and try again.'
+              : 'Please check the details and try again.';
+      result.error = { ...result.error, data: { detail } } as FetchBaseQueryError;
+    }
+  }
+
   const isPublicOrAuthEndpoint =
     requestUrl.startsWith('/auth/login/') ||
     requestUrl.startsWith('/auth/verify-otp/') ||

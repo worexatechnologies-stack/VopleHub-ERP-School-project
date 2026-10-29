@@ -1,4 +1,5 @@
 import { getStoredAuthenticatedUser } from '../utils/auth';
+import { getErrorMessage } from '../utils/apiError';
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -59,6 +60,7 @@ import {
   useDeleteTeacherDocumentMutation,
 } from '../store/api/teacherApi';
 import { useResetCredentialsMutation } from '../store/api/authApi';
+import { ListPagination, LoadingState } from './common/QueryStates';
 
 interface TeacherRecord {
   id: string;
@@ -198,6 +200,8 @@ export default function TeacherDirectory() {
   ));
   const [loginUsers, setLoginUsers] = useState<any[]>(loadLoginUsers);
   const [search, setSearch] = useState('');
+  const [teacherPage, setTeacherPage] = useState(1);
+  const TEACHER_PAGE_SIZE = 50;
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Inactive'>('All');
   const [isAdding, setIsAdding] = useState(false);
   const [isExcelImportOpen, setIsExcelImportOpen] = useState(false);
@@ -296,7 +300,7 @@ export default function TeacherDirectory() {
     })
   );
 
-  const { data: serverTeacherRows = [], error: teachersApiError, refetch: refetchTeachers } = useGetTeachersQuery(undefined, { skip: !isServerBacked });
+  const { data: serverTeacherRows = [], isLoading: teachersLoading, isFetching: teachersFetching, error: teachersApiError, refetch: refetchTeachers } = useGetTeachersQuery(undefined, { skip: !isServerBacked });
   const [createTeacherMutation] = useCreateTeacherMutation();
   const [updateTeacherMutation] = useUpdateTeacherMutation();
   const [deleteTeacherMutation] = useDeleteTeacherMutation();
@@ -353,7 +357,7 @@ export default function TeacherDirectory() {
   useEffect(() => {
     if (teachersApiError) {
       setTeacherListError(
-        teachersApiError instanceof Error ? teachersApiError.message : 'Could not load teacher profiles.',
+        getErrorMessage(teachersApiError, 'Teacher profiles could not be loaded. Please try again.'),
       );
     }
   }, [teachersApiError]);
@@ -381,6 +385,9 @@ export default function TeacherDirectory() {
     const matchesStatus = statusFilter === 'All' || teacher.status === statusFilter;
     return matchesSearch && matchesStatus;
   }), [teachers, search, statusFilter]);
+  const teacherPageCount = Math.max(1, Math.ceil(filtered.length / TEACHER_PAGE_SIZE));
+  const visibleTeachers = useMemo(() => filtered.slice((teacherPage - 1) * TEACHER_PAGE_SIZE, teacherPage * TEACHER_PAGE_SIZE), [filtered, teacherPage]);
+  useEffect(() => setTeacherPage(1), [search, statusFilter]);
   const documentsTeacher = teachers.find((teacher) => teacher.id === documentsTeacherId) || null;
 
   const saveTeachers = (next: TeacherRecord[]) => {
@@ -1158,7 +1165,7 @@ export default function TeacherDirectory() {
 
       {teacherListError && (
         <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs font-semibold text-rose-700">
-          Teacher profiles could not be loaded from the school database: {teacherListError}
+          {teacherListError}
         </div>
       )}
 
@@ -1541,9 +1548,11 @@ export default function TeacherDirectory() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filtered.length === 0 ? (
+              {teachersLoading && filtered.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8"><LoadingState message="Loading teacher profiles…" /></td></tr>
+              ) : filtered.length === 0 ? (
                 <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-slate-500">No teacher profiles created yet.</td></tr>
-              ) : filtered.map((teacher) => (
+              ) : visibleTeachers.map((teacher) => (
                 <tr key={teacher.id} className="hover:bg-slate-50">
                   <td className="align-top px-4 py-3">
                     <div className="flex items-center gap-3">
@@ -1700,6 +1709,8 @@ export default function TeacherDirectory() {
             </tbody>
           </table>
         </div>
+        <ListPagination page={teacherPage} pageSize={TEACHER_PAGE_SIZE} total={filtered.length} onPageChange={(next) => setTeacherPage(Math.min(teacherPageCount, Math.max(1, next)))} />
+        {teachersFetching && !teachersLoading && <p role="status" className="px-4 pb-3 text-center text-xs font-semibold text-indigo-600">Refreshing teacher profiles…</p>}
       </div>
 
       {/* Teacher Documents Verification Modal */}

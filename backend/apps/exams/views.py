@@ -1,6 +1,7 @@
 import datetime
 from math import isfinite
 
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -513,6 +514,15 @@ class ExamScheduleViewSet(TenantScopedViewSet):
 
         # Schedule items (Subjects in this exam)
         items = list(schedule.items.all().order_by('order', 'exam_date', 'start_time'))
+        # The marks-entry window depends on schedule/subject metadata, not on
+        # an individual student. Resolve it once per subject instead of
+        # re-running its schedule queries for every student row.
+        subject_windows = {
+            item.subject_name: schedule.check_marks_entry_window(
+                user, item.subject_name, section_name=target_section
+            )
+            for item in items
+        }
 
         # Ensure Exam objects exist for this section and subjects
         for item in items:
@@ -627,7 +637,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         overall_window = schedule.check_marks_entry_window(user, section_name=target_section)
         subjects_payload = []
         for it in items:
-            subject_window = schedule.check_marks_entry_window(user, it.subject_name, section_name=target_section)
+            subject_window = subject_windows[it.subject_name]
             if is_teacher:
                 if not is_section_assigned:
                     is_subject_assigned = False
@@ -662,7 +672,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             student_marks = {}
             for it in items:
                 res = result_map.get((s.id, it.subject_name))
-                subject_window = schedule.check_marks_entry_window(user, it.subject_name, section_name=target_section)
+                subject_window = subject_windows[it.subject_name]
                 is_subject_assigned = (it.subject_name.lower() in teacher_subs_lower) if teacher_subs_lower else True
                 can_edit = is_admin or (is_subject_assigned and subject_window['is_open'])
                 student_marks[it.subject_name] = {
@@ -729,6 +739,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
 
         teacher_subject_names = set()
         teacher_sections = []
+        has_specific_assignments = False
         if is_teacher:
             teacher = Teacher.objects.filter(user=user, school_id=user.school_id, status=Teacher.Status.ACTIVE).first()
             if not teacher:
@@ -768,6 +779,11 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         target_status = request.data.get('status', 'draft')
         entries = request.data.get('entries', [])
 
+        if target_status not in [ExamResult.Status.DRAFT, ExamResult.Status.SUBMITTED]:
+            return Response({'detail': 'Status must be draft or submitted.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(entries, list):
+            return Response({'detail': 'Marks entries must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+
         # Normalize teacher_sections
         normalized_teacher_secs = []
         for s in teacher_sections:
@@ -781,63 +797,144 @@ class ExamScheduleViewSet(TenantScopedViewSet):
         if is_teacher and teacher_sections and section_name.lower() not in [s.lower() for s in teacher_sections]:
             return Response({'detail': f'You are not assigned to Section {section_name}.'}, status=status.HTTP_403_FORBIDDEN)
 
-        # Enforce marks entry window for teachers (3 days after exam completion unless extended)
-        if is_teacher:
-            for entry in entries:
-                sub_name = entry.get('subject_name', '')
-                if not sub_name:
-                    continue
-                window = schedule.check_marks_entry_window(user, sub_name, section_name=section_name)
+        if not entries and target_status == ExamResult.Status.DRAFT:
+            return Response({'detail': 'No changed marks to save.', 'updated': 0})
+
+        schedule_items = {
+            item.subject_name.casefold(): item
+            for item in schedule.items.all()
+            if item.subject_name
+        }
+        if is_teacher and target_status == ExamResult.Status.SUBMITTED:
+            if has_specific_assignments and not teacher_subs_lower:
+                return Response({'detail': f'You are not assigned to enter marks for Section {section_name}.'}, status=status.HTTP_403_FORBIDDEN)
+            submission_items = [
+                item for key, item in schedule_items.items()
+                if not teacher_subs_lower or key in teacher_subs_lower
+            ]
+            if not submission_items:
+                return Response({'detail': 'No assigned subjects are available to submit.'}, status=status.HTTP_403_FORBIDDEN)
+            for item in submission_items:
+                window = schedule.check_marks_entry_window(user, item.subject_name, section_name=section_name)
                 if not window['is_open']:
                     return Response({
-                        'detail': f'Marks entry for {sub_name} (Section {section_name}) is closed: {window["reason"]}'
+                        'detail': f'Marks entry for {item.subject_name} (Section {section_name}) is closed: {window["reason"]}'
+                    }, status=status.HTTP_403_FORBIDDEN)
+        subject_windows = {}
+        normalized_entries = []
+        seen_entries = set()
+        student_ids = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return Response({'detail': 'Each marks entry must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                student_id = int(entry.get('student_id'))
+            except (TypeError, ValueError):
+                return Response({'detail': 'Each marks entry must include a valid student.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            subject_name = str(entry.get('subject_name') or '').strip()
+            subject_key = subject_name.casefold()
+            schedule_item = schedule_items.get(subject_key)
+            if not schedule_item:
+                return Response({'detail': 'A subject in this marks sheet could not be found.'}, status=status.HTTP_400_BAD_REQUEST)
+            if is_teacher and (
+                (has_specific_assignments and subject_key not in teacher_subs_lower)
+                or (teacher_subs_lower and subject_key not in teacher_subs_lower)
+            ):
+                return Response({'detail': f'You are not assigned to enter marks for {schedule_item.subject_name}.'}, status=status.HTTP_403_FORBIDDEN)
+
+            if is_teacher and subject_key not in subject_windows:
+                subject_windows[subject_key] = schedule.check_marks_entry_window(
+                    user, schedule_item.subject_name, section_name=section_name
+                )
+                if not subject_windows[subject_key]['is_open']:
+                    return Response({
+                        'detail': f'Marks entry for {schedule_item.subject_name} (Section {section_name}) is closed: {subject_windows[subject_key]["reason"]}'
                     }, status=status.HTTP_403_FORBIDDEN)
 
-        updated_count = 0
-        for entry in entries:
-            student_id = entry.get('student_id')
-            subject_name = entry.get('subject_name', '')
+            entry_key = (student_id, subject_key)
+            if entry_key in seen_entries:
+                return Response({'detail': 'A student and subject can appear only once in a save request.'}, status=status.HTTP_400_BAD_REQUEST)
+            seen_entries.add(entry_key)
             raw_marks = entry.get('marks_obtained')
-            remarks = entry.get('remarks', '')
-
-            if not student_id or not subject_name:
-                continue
-
-            if is_teacher and teacher_subs_lower and subject_name.lower() not in teacher_subs_lower:
-                continue
-
-            exam = Exam.objects.filter(
-                schedule=schedule,
-                section__iexact=section_name,
-                subject__iexact=subject_name,
-            ).first()
-
-            if not exam:
-                continue
-
-            marks_val = None
+            marks_value = None
             if raw_marks is not None and str(raw_marks).strip() != '':
                 try:
-                    m = float(raw_marks)
-                    if 0 <= m <= exam.max_marks:
-                        marks_val = m
-                except (ValueError, TypeError):
-                    marks_val = None
+                    marks_value = float(raw_marks)
+                except (TypeError, ValueError):
+                    marks_value = None
+                if marks_value is None or not isfinite(marks_value) or marks_value < 0 or marks_value > schedule_item.max_marks:
+                    return Response({
+                        'detail': f'Marks for {schedule_item.subject_name} must be between 0 and {schedule_item.max_marks}.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-            result, _ = ExamResult.objects.get_or_create(
+            normalized_entries.append((student_id, schedule_item, marks_value, str(entry.get('remarks') or '')))
+            student_ids.add(student_id)
+
+        valid_students = set(Student.objects.filter(
+            school_id=schedule.school_id,
+            status=Student.Status.ACTIVE,
+        ).filter(
+            Q(section_record__class_room=schedule.classroom, section_record__name__iexact=section_name)
+            | Q(class_name__iexact=schedule.class_name, section__iexact=section_name)
+        ).filter(id__in=student_ids).values_list('id', flat=True))
+        if valid_students != student_ids:
+            return Response({'detail': 'One or more students do not belong to this school section.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        exam_by_subject = {
+            exam.subject.casefold(): exam
+            for exam in Exam.objects.filter(
+                school_id=schedule.school_id,
+                schedule=schedule,
+                section__iexact=section_name,
+            ).select_related('schedule')
+        }
+        results_to_save = []
+        submitted_at = timezone.now() if target_status == ExamResult.Status.SUBMITTED else None
+        for student_id, item, marks_value, remarks in normalized_entries:
+            exam = exam_by_subject.get(item.subject_name.casefold())
+            if not exam:
+                return Response({'detail': f'The {item.subject_name} exam record is not ready. Refresh the marks sheet and try again.'}, status=status.HTTP_409_CONFLICT)
+            results_to_save.append(ExamResult(
+                school_id=schedule.school_id,
                 exam=exam,
                 student_id=student_id,
-                defaults={'school': schedule.school, 'entered_by': user}
-            )
+                marks_obtained=marks_value,
+                remarks=remarks,
+                status=target_status,
+                entered_by=user,
+                submitted_at=submitted_at,
+            ))
 
-            result.marks_obtained = marks_val
-            result.remarks = remarks or ''
-            result.status = target_status
-            result.entered_by = user
+        with transaction.atomic():
+            ExamResult.objects.bulk_create(
+                results_to_save,
+                batch_size=1000,
+                update_conflicts=True,
+                unique_fields=['exam', 'student'],
+                update_fields=[
+                    'school', 'marks_obtained', 'remarks', 'status',
+                    'entered_by', 'submitted_at', 'entered_at',
+                ],
+            )
             if target_status == ExamResult.Status.SUBMITTED:
-                result.submitted_at = timezone.now()
-            result.save()
-            updated_count += 1
+                submit_subjects = [
+                    item.subject_name for key, item in schedule_items.items()
+                    if not is_teacher or not teacher_subs_lower or key in teacher_subs_lower
+                ]
+                submitted_count = ExamResult.objects.filter(
+                    school_id=schedule.school_id,
+                    exam__schedule=schedule,
+                    exam__section__iexact=section_name,
+                    exam__subject__in=submit_subjects,
+                ).update(
+                    status=ExamResult.Status.SUBMITTED,
+                    entered_by=user,
+                    submitted_at=submitted_at,
+                )
+            else:
+                submitted_count = 0
+        updated_count = max(len(results_to_save), submitted_count)
 
         return Response({
             'detail': f'Marks successfully saved for {updated_count} entries.',

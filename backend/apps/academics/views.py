@@ -1496,7 +1496,10 @@ class HomeworkViewSet(TenantScopedViewSet):
                 student_qs = student_qs.filter(_normalize_class_q(instance.class_name))
 
             if not is_all_classes and instance.section_name and instance.section_name.lower() != 'all':
-                student_qs = student_qs.filter(Q(section__iexact=instance.section_name) | Q(section=''))
+                student_qs = student_qs.filter(
+                    Q(section_record__name__iexact=instance.section_name)
+                    | Q(section__iexact=instance.section_name)
+                )
 
             student_ids = list(student_qs.values_list('id', flat=True))
             if student_ids:

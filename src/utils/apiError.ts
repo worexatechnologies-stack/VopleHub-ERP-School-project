@@ -43,11 +43,23 @@ export function getErrorData(error: unknown): StructuredErrorData | null {
 export function getErrorMessage(error: unknown, fallback = 'Please try again.'): string {
   if (!error) return fallback;
 
+  const status = getErrorStatus(error);
+  if (status !== null && status >= 500) {
+    return 'Something went wrong. Please try again. If it keeps happening, contact your school office.';
+  }
+  if (isFetchBaseQueryError(error) && typeof error.status === 'string') {
+    if (error.status === 'TIMEOUT_ERROR') return 'This is taking longer than usual. Please try again.';
+    if (error.status === 'PARSING_ERROR') return 'We could not read the reply. Please refresh and try again.';
+    return 'We could not connect. Check your internet connection and try again.';
+  }
+
   const data = getErrorData(error);
   if (data) {
     const detail = data.detail ?? data.errors ?? data.message;
     if (typeof detail === 'string' && detail.trim()) {
-      return detail.trim();
+      const message = detail.trim();
+      if (looksTechnical(message)) return fallback;
+      return message;
     }
     if (detail && typeof detail === 'object') {
       return JSON.stringify(detail);
@@ -70,18 +82,20 @@ export function getErrorMessage(error: unknown, fallback = 'Please try again.'):
   }
 
   if (isFetchBaseQueryError(error)) {
-    if ('error' in error && typeof error.error === 'string') return error.error;
-    if (typeof error.status === 'string') return `Network error: ${error.status}`;
-    return `Server error (${error.status}).`;
+    return fallback;
   }
 
   if (error instanceof Error) {
-    return error.message;
+    return looksTechnical(error.message) ? fallback : error.message;
   }
 
   if (typeof error === 'string') {
-    return error;
+    return looksTechnical(error) ? fallback : error;
   }
 
   return fallback;
+}
+
+function looksTechnical(message: string): boolean {
+  return /<!doctype|<html\b|<title>\s*server error|traceback|stack trace|integrityerror|operationalerror|exception:|\b500\b|\b502\b|\b503\b|\b504\b|fetch failed|network error:|failed to fetch/i.test(message);
 }

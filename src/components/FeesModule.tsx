@@ -74,6 +74,7 @@ import {
   loadAcademicStructure,
 } from '../services/academicStructure';
 import { exportFeeInvoicesToExcel } from '../utils/feeInvoiceExport';
+import { ListPagination } from './common/QueryStates';
 
 // ==========================================
 // INTERFACES & MODEL TYPES
@@ -266,6 +267,9 @@ export default function FeesModule({
     || '2026-27';
 
   // ------------------------------------------
+  const [isFeeDataRefreshing, setIsFeeDataRefreshing] = useState(false);
+  const [trackingLedgerPage, setTrackingLedgerPage] = useState(1);
+  const TRACKING_LEDGER_PAGE_SIZE = 100;
   // PERSISTENCE STATE (STORAGE)
   // ------------------------------------------
   const [structures, setStructures] = useState<FeeStructure[]>(() => {
@@ -1097,6 +1101,7 @@ export default function FeesModule({
   // Fetch persistent records from Django DB on mount & listen for real-time fee updates
   useEffect(() => {
     const loadFromDB = () => {
+      setIsFeeDataRefreshing(true);
       fetchFeeStructuresFromDB().then((dbStructures) => {
         if (Array.isArray(dbStructures) && dbStructures.length > 0) {
           const formatted: FeeStructure[] = dbStructures.map((s) => ({
@@ -1168,7 +1173,7 @@ export default function FeesModule({
             return Array.from(map.values());
           });
         }
-      });
+      }).finally(() => setIsFeeDataRefreshing(false));
     };
 
     loadFromDB();
@@ -1451,6 +1456,28 @@ export default function FeesModule({
       };
     }).sort((a, b) => a.sectionTitle.localeCompare(b.sectionTitle, undefined, { numeric: true }));
   }, [studentRecords, structures, selectedTrackingClass, selectedTrackingSection, searchTerm, statusFilter, quarterFilter]);
+
+  const allClassDetailRows = useMemo(
+    () => classDetailSectionGroups.flatMap((group) => group.students.map((row) => ({ ...row, sectionTitle: group.sectionTitle }))),
+    [classDetailSectionGroups],
+  );
+  const trackingLedgerPageCount = Math.max(1, Math.ceil(allClassDetailRows.length / TRACKING_LEDGER_PAGE_SIZE));
+  const pageClassDetailRows = useMemo(
+    () => allClassDetailRows.slice((trackingLedgerPage - 1) * TRACKING_LEDGER_PAGE_SIZE, trackingLedgerPage * TRACKING_LEDGER_PAGE_SIZE),
+    [allClassDetailRows, trackingLedgerPage],
+  );
+  const pageClassDetailGroups = useMemo(() => {
+    const rowsBySection = new Map<string, typeof pageClassDetailRows>();
+    pageClassDetailRows.forEach((row) => {
+      const rows = rowsBySection.get(row.sectionTitle) || [];
+      rows.push(row);
+      rowsBySection.set(row.sectionTitle, rows);
+    });
+    return classDetailSectionGroups
+      .filter((group) => rowsBySection.has(group.sectionTitle))
+      .map((group) => ({ ...group, students: rowsBySection.get(group.sectionTitle) || [] }));
+  }, [classDetailSectionGroups, pageClassDetailRows]);
+  useEffect(() => setTrackingLedgerPage(1), [selectedTrackingClass, selectedTrackingSection, searchTerm, statusFilter, quarterFilter]);
 
 
   // Aggregated Overall School / Class Statistics
@@ -2664,7 +2691,7 @@ export default function FeesModule({
                 </div>
               ) : (
                 <div className="space-y-6">
-                  {classDetailSectionGroups.map(({ sectionTitle, students, totalExpected, totalCollected, totalPending }) => (
+                  {pageClassDetailGroups.map(({ sectionTitle, students, totalExpected, totalCollected, totalPending }) => (
                     <div key={sectionTitle} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden space-y-0">
                       {/* CLASS SECTION HEADER BAR */}
                       <div className="bg-slate-50/90 p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
@@ -2866,6 +2893,8 @@ export default function FeesModule({
                   ))}
                 </div>
               )}
+              <ListPagination page={trackingLedgerPage} pageSize={TRACKING_LEDGER_PAGE_SIZE} total={allClassDetailRows.length} onPageChange={(next) => setTrackingLedgerPage(Math.min(trackingLedgerPageCount, Math.max(1, next)))} />
+              {isFeeDataRefreshing && <p role="status" className="py-2 text-center text-xs font-semibold text-indigo-600">Updating fee records…</p>}
             </div>
           )}
         </div>

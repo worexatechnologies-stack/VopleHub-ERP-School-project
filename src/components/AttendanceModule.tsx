@@ -47,6 +47,7 @@ import {
   useBulkMarkAttendanceMutation,
 } from '../store/api/attendanceApi';
 import { useGetClassesQuery, useGetSectionsQuery } from '../store/api/academicApi';
+import { ListPagination, LoadingState } from './common/QueryStates';
 
 interface AttendanceModuleProps {
   students: Student[];
@@ -163,6 +164,8 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
   const [navStep, setNavStep] = useState<'classes' | 'sections' | 'attendance'>('classes');
   const [selectedClass, setSelectedClass] = useState<string>('');
   const [selectedSection, setSelectedSection] = useState<string>('');
+  const [rosterPage, setRosterPage] = useState(1);
+  const ROSTER_PAGE_SIZE = 100;
 
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>('all');
   const [attendanceDate, setAttendanceDate] = useState(() => formatToISO(new Date()));
@@ -255,7 +258,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     }
   };
 
-  const { data: dateAttendanceData, refetch: refetchAttendance } = useGetAttendanceQuery(
+  const { data: dateAttendanceData, isLoading: attendanceLoading, isFetching: attendanceFetching, refetch: refetchAttendance } = useGetAttendanceQuery(
     { date: currentDateISO },
     { skip: !isServerBacked }
   );
@@ -265,6 +268,16 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
   );
   const [markAttendanceMutation] = useMarkAttendanceMutation();
   const [bulkMarkAttendanceMutation, { isLoading: isBulkMarking }] = useBulkMarkAttendanceMutation();
+
+  const recordsByStudentId = useMemo(() => {
+    const grouped = new Map<number, typeof allDateRecords>();
+    allDateRecords.forEach((record) => {
+      const rows = grouped.get(record.studentId) || [];
+      rows.push(record);
+      grouped.set(record.studentId, rows);
+    });
+    return grouped;
+  }, [allDateRecords]);
 
   const refreshDateRecords = () => {
     if (isServerBacked) refetchAttendance();
@@ -317,7 +330,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     let unmarkedCount = 0;
 
     baseSectionStudents.forEach((student) => {
-      const studentDayRecords = allDateRecords.filter((r) => r.studentId === Number(student.id));
+      const studentDayRecords = recordsByStudentId.get(Number(student.id)) || [];
       const hasAbsent = studentDayRecords.some((r) => r.status === 'Absent');
       const hasLate = studentDayRecords.some((r) => r.status === 'Late');
       const hasHalfDay = studentDayRecords.some((r) => r.status === 'Half-day');
@@ -338,7 +351,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
       presentCount,
       unmarkedCount,
     };
-  }, [baseSectionStudents, allDateRecords]);
+  }, [baseSectionStudents, recordsByStudentId]);
 
   // Filtered students by Search Query and Day-Level Period Status
   const filteredStudents = useMemo(() => {
@@ -347,7 +360,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
         student.name.toLowerCase().includes(search.toLowerCase()) ||
         student.admissionNo.toLowerCase().includes(search.toLowerCase());
 
-      const studentDayRecords = allDateRecords.filter((r) => r.studentId === Number(student.id));
+      const studentDayRecords = recordsByStudentId.get(Number(student.id)) || [];
 
       let matchesStatus = true;
       if (selectedStatusFilter === 'Absent') {
@@ -369,7 +382,11 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
 
       return matchesSearch && matchesStatus;
     });
-  }, [baseSectionStudents, search, allDateRecords, selectedStatusFilter]);
+  }, [baseSectionStudents, search, recordsByStudentId, selectedStatusFilter]);
+
+  const rosterPageCount = Math.max(1, Math.ceil(filteredStudents.length / ROSTER_PAGE_SIZE));
+  const visibleStudents = useMemo(() => filteredStudents.slice((rosterPage - 1) * ROSTER_PAGE_SIZE, rosterPage * ROSTER_PAGE_SIZE), [filteredStudents, rosterPage]);
+  useEffect(() => setRosterPage(1), [search, selectedStatusFilter, selectedClass, selectedSection]);
 
   const activePeriodSummary = useMemo(() => {
     return periodSummaries.find(p => p.period === selectedPeriod) || {
@@ -1074,14 +1091,16 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
             </div>
 
             {/* Simple Student Roster with 7-Period Status Display */}
+            {attendanceLoading && selectedClass && <LoadingState message="Loading today's attendance…" />}
+            {attendanceFetching && !attendanceLoading && <p role="status" className="px-5 py-2 text-center text-xs font-semibold text-indigo-600">Updating attendance…</p>}
             <div className="divide-y divide-slate-100">
               {filteredStudents.length === 0 ? (
                 <div className="p-12 text-center text-xs text-slate-400 font-medium">
                   No students matching search or filter criteria.
                 </div>
               ) : (
-                filteredStudents.map((student) => {
-                  const studentDayRecords = allDateRecords.filter((r) => r.studentId === Number(student.id));
+                visibleStudents.map((student) => {
+                  const studentDayRecords = recordsByStudentId.get(Number(student.id)) || [];
                   const presentCount = studentDayRecords.filter((r) => r.status === 'Present').length;
                   const absentCount = studentDayRecords.filter((r) => r.status === 'Absent').length;
                   const activePeriodRecord = studentDayRecords.find((r) => r.period === selectedPeriod);
@@ -1213,6 +1232,8 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                 })
               )}
             </div>
+
+            <ListPagination page={rosterPage} pageSize={ROSTER_PAGE_SIZE} total={filteredStudents.length} onPageChange={(next) => setRosterPage(Math.min(rosterPageCount, Math.max(1, next)))} />
 
             {/* Sticky Submission Bottom Action Bar */}
             <div className="sticky bottom-4 z-20 mx-3 sm:mx-6 my-4 bg-slate-900/95 backdrop-blur-md text-white p-3.5 sm:px-6 rounded-2xl shadow-2xl border border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-200">

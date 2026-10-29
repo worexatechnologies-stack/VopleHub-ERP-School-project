@@ -53,6 +53,8 @@ import { useGetStudentsQuery } from '../store/api/studentApi';
 import { loadAcademicStructure, AcademicClass, AcademicSection, AcademicSubject } from '../services/academicStructure';
 import { emitNotification } from '../services/notificationBus';
 import { chatSocket } from '../services/chatSocket';
+import { getErrorMessage } from '../utils/apiError';
+import { ListPagination, LoadingState } from './common/QueryStates';
 
 interface HomeworkModuleProps {
   user: AuthUser | null;
@@ -123,6 +125,8 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('All');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Completed' | 'Pending' | 'Submitted'>('All');
   const [searchTerm, setSearchTerm] = useState<string>('');
+  const [homeworkPage, setHomeworkPage] = useState(1);
+  const HOMEWORK_PAGE_SIZE = 24;
 
   // Parent Child Selection (if parent has multiple students)
   const parentChildren = useMemo(() => {
@@ -173,8 +177,8 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
   }, [isStudent, user, allStudents]);
 
   // RTK Query: Fetch Homework
-  const { data: rawHomeworkData = [], isLoading, refetch } = useGetHomeworkQuery(undefined, {
-    pollingInterval: 5000,
+  const { data: rawHomeworkData = [], isLoading, isFetching: homeworkFetching, error: homeworkError, refetch } = useGetHomeworkQuery(undefined, {
+    pollingInterval: 30000,
     refetchOnFocus: true,
     refetchOnReconnect: true,
   });
@@ -368,6 +372,8 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
   // Submissions Tracker Filter Tabs & Search
   const [submissionTab, setSubmissionTab] = useState<'all' | 'submitted' | 'pending' | 'graded'>('all');
   const [submissionSearch, setSubmissionSearch] = useState('');
+  const [submissionPage, setSubmissionPage] = useState(1);
+  const SUBMISSION_PAGE_SIZE = 50;
   const [reminderSentMap, setReminderSentMap] = useState<Record<string, boolean>>({});
 
   // Form State for Create/Edit Homework
@@ -904,6 +910,9 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
     statusFilter,
     searchTerm,
   ]);
+  const homeworkPageCount = Math.max(1, Math.ceil(filteredHomework.length / HOMEWORK_PAGE_SIZE));
+  const visibleHomework = useMemo(() => filteredHomework.slice((homeworkPage - 1) * HOMEWORK_PAGE_SIZE, homeworkPage * HOMEWORK_PAGE_SIZE), [filteredHomework, homeworkPage]);
+  useEffect(() => setHomeworkPage(1), [selectedClassFilter, selectedSectionFilter, selectedSubjectFilter, statusFilter, searchTerm]);
 
   // Aggregate KPI Statistics
   const stats = useMemo(() => {
@@ -1075,6 +1084,9 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       return true;
     });
   }, [fullSubmissionsRoster, submissionTab, submissionSearch]);
+  const submissionPageCount = Math.max(1, Math.ceil(filteredSubmissionsRoster.length / SUBMISSION_PAGE_SIZE));
+  const visibleSubmissionRows = useMemo(() => filteredSubmissionsRoster.slice((submissionPage - 1) * SUBMISSION_PAGE_SIZE, submissionPage * SUBMISSION_PAGE_SIZE), [filteredSubmissionsRoster, submissionPage]);
+  useEffect(() => setSubmissionPage(1), [viewingSubmissionsHw?.id, submissionTab, submissionSearch]);
 
   const submissionRosterStats = useMemo(() => {
     const total = fullSubmissionsRoster.length;
@@ -1439,9 +1451,11 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       )}
 
       {isLoading ? (
-        <div className="bg-white p-12 rounded-3xl border border-slate-200 text-center text-slate-400 font-semibold space-y-2">
-          <BookOpen className="w-8 h-8 animate-pulse text-indigo-400 mx-auto" />
-          <p className="text-sm">Loading homework assignments from database...</p>
+        <LoadingState message="Loading homework…" />
+      ) : homeworkError && homeworkList.length === 0 ? (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm font-semibold text-rose-700">
+          <p>{getErrorMessage(homeworkError, 'Homework could not be loaded. Please try again.')}</p>
+          <button type="button" onClick={() => void refetch()} className="mt-3 rounded-lg bg-white px-4 py-2 text-xs font-bold text-rose-700 shadow-sm">Try again</button>
         </div>
       ) : filteredHomework.length === 0 ? (
         <div className="bg-white p-12 rounded-3xl border border-dashed border-slate-200 text-center space-y-3">
@@ -1466,7 +1480,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {filteredHomework.map((hw) => {
+          {visibleHomework.map((hw) => {
             const dueBadge = getDueBadge(hw.dueDate);
             const subjectStyle = getSubjectColor(hw.subjectName);
 
@@ -1868,6 +1882,8 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
           })}
         </div>
       )}
+      {homeworkFetching && !isLoading && <p role="status" className="text-center text-xs font-semibold text-indigo-600">Checking for new homework…</p>}
+      <ListPagination page={homeworkPage} pageSize={HOMEWORK_PAGE_SIZE} total={filteredHomework.length} onPageChange={(next) => setHomeworkPage(Math.min(homeworkPageCount, Math.max(1, next)))} />
 
       {/* ─────────────────────────────────────────────────────────────────────────── */}
       {/* MODAL 1: ASSIGN / EDIT HOMEWORK (WITH FILE & IMAGE UPLOAD)                 */}
@@ -2616,7 +2632,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {filteredSubmissionsRoster.map((item) => {
+                  {visibleSubmissionRows.map((item) => {
                     const sub = item.submission;
                     const hasSub = !!sub;
                     const isGraded = sub?.marks_obtained !== null && sub?.marks_obtained !== undefined;
@@ -2827,6 +2843,8 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
                 </div>
               )}
             </div>
+
+            <ListPagination page={submissionPage} pageSize={SUBMISSION_PAGE_SIZE} total={filteredSubmissionsRoster.length} onPageChange={(next) => setSubmissionPage(Math.min(submissionPageCount, Math.max(1, next)))} />
 
             {/* Footer */}
             <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between shrink-0">

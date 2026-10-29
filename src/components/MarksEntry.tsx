@@ -139,6 +139,7 @@ export default function MarksEntry({
   const {
     data: sheetData,
     isLoading: sheetLoading,
+    isFetching: sheetFetching,
     refetch: refetchSheet,
   } = useGetMarksSheetQuery(
     {
@@ -431,7 +432,9 @@ export default function MarksEntry({
       for (const subject of sheetData.subjects) {
         if (editableSubjectNames.has(subject.subject_name)) {
           const key = `${student.student_id}-${subject.subject_name}`;
-          const val = localMarks[key] !== undefined ? localMarks[key] : '';
+          const prior = student.marks?.[subject.subject_name]?.marks_obtained;
+          const previousValue = prior === null || prior === undefined ? '' : String(prior);
+          const val = localMarks[key] !== undefined ? localMarks[key] : previousValue;
           
           if (val.trim() !== '') {
             const num = Number(val);
@@ -441,6 +444,8 @@ export default function MarksEntry({
             }
           }
 
+          if (val.trim() === previousValue.trim()) continue;
+
           entries.push({
             student_id: student.student_id,
             subject_name: subject.subject_name,
@@ -448,6 +453,11 @@ export default function MarksEntry({
           });
         }
       }
+    }
+
+    if (status === 'draft' && entries.length === 0) {
+      setSavedMessage('No changed marks to save.');
+      return;
     }
 
     try {
@@ -480,8 +490,7 @@ export default function MarksEntry({
         });
       }
 
-      void refetchSheet();
-      void refetchSchedules();
+      await Promise.all([refetchSheet(), refetchSchedules()]);
     } catch (err: any) {
       setErrorMessage(err?.data?.detail || err?.message || 'Failed to save marks.');
     }
@@ -548,6 +557,16 @@ export default function MarksEntry({
     );
   }, [sheetData, searchQuery]);
 
+  const MARKS_PAGE_SIZE = 100;
+  const [marksPage, setMarksPage] = useState(0);
+  const marksPageCount = Math.max(1, Math.ceil(displayedStudents.length / MARKS_PAGE_SIZE));
+  const pageStart = marksPage * MARKS_PAGE_SIZE;
+  const pagedStudents = displayedStudents.slice(pageStart, pageStart + MARKS_PAGE_SIZE);
+
+  useEffect(() => {
+    setMarksPage(0);
+  }, [searchQuery, selectedSection, selectedScheduleId]);
+
   return (
     <div className="space-y-6 animate-fade-in" id="marks-entry-container">
       {/* Toast Messages */}
@@ -562,6 +581,14 @@ export default function MarksEntry({
         <div className="flex items-center gap-2.5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700 font-bold shadow-xs">
           <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
           <span>{errorMessage}</span>
+        </div>
+      )}
+
+      {sheetFetching && (
+        <div role="status" aria-live="polite" className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/25 backdrop-blur-[1px]">
+          <div className="flex items-center gap-3 rounded-2xl bg-white px-6 py-4 text-sm font-bold text-slate-800 shadow-xl">
+            <RefreshCw className="h-5 w-5 animate-spin text-indigo-600" /> Loading exam marks…
+          </div>
         </div>
       )}
 
@@ -634,7 +661,11 @@ export default function MarksEntry({
                 </p>
               </div>
 
-              {schedules.length === 0 ? (
+              {schedulesLoading ? (
+                <div role="status" className="portal-card flex items-center justify-center gap-3 p-10 text-sm font-semibold text-slate-600">
+                  <RefreshCw className="h-5 w-5 animate-spin text-indigo-600" /> Loading exam schedules…
+                </div>
+              ) : schedules.length === 0 ? (
                 <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-12 text-center text-slate-400">
                   <Award className="mx-auto h-10 w-10 text-slate-300 mb-2" />
                   <p className="text-sm font-bold text-slate-700">No Exam Schedules Found</p>
@@ -955,7 +986,7 @@ export default function MarksEntry({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-medium">
-                      {displayedStudents.map((student) => {
+                      {pagedStudents.map((student) => {
                         let studentTotal = 0;
                         let maxTotal = 0;
 
@@ -1047,7 +1078,7 @@ export default function MarksEntry({
                     className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 transition shadow-2xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <Save className="h-3.5 w-3.5" />
-                    Save Modifications
+                    {isSaving ? 'Saving marks…' : 'Save Modifications'}
                   </button>
 
                   <button
@@ -1580,7 +1611,7 @@ export default function MarksEntry({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-medium">
-                      {displayedStudents.map((student, index) => {
+                      {pagedStudents.map((student, index) => {
                         const studentStats = getStudentTotalStats(student.student_id);
 
                         return (
@@ -1618,14 +1649,14 @@ export default function MarksEntry({
                                     /* Teacher Can Edit this subject */
                                     <div className="relative inline-block">
                                       <input
-                                        id={`teacher-mark-${index}-${sub.subject_name}`}
+                                        id={`teacher-mark-${pageStart + index}-${sub.subject_name}`}
                                         type="number"
                                         min="0"
                                         max={sub.max_marks}
                                         step="0.5"
                                         placeholder="0"
                                         value={currentVal}
-                                        onKeyDown={(e) => handleKeyDown(e, index, sub.subject_name)}
+                                        onKeyDown={(e) => handleKeyDown(e, pageStart + index, sub.subject_name)}
                                         onChange={(e) =>
                                           handleMarkChange(student.student_id, sub.subject_name, e.target.value)
                                         }
@@ -1709,12 +1740,25 @@ export default function MarksEntry({
                     className="rounded-2xl bg-indigo-600 px-5 py-2.5 text-xs font-black text-white hover:bg-indigo-700 shadow-xs shadow-indigo-500/20 transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <Send className="h-3.5 w-3.5" />
-                    Submit Marks to Admin
+                    {isSaving ? 'Submitting marks…' : 'Submit Marks to Admin'}
                   </button>
                 </div>
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {sheetData && displayedStudents.length > MARKS_PAGE_SIZE && (
+        <div className="portal-card flex flex-col gap-3 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs font-semibold text-slate-600">
+            Showing {pageStart + 1}–{Math.min(pageStart + MARKS_PAGE_SIZE, displayedStudents.length)} of {displayedStudents.length} students
+          </p>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setMarksPage((page) => Math.max(0, page - 1))} disabled={marksPage === 0} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 disabled:opacity-40">Previous</button>
+            <span className="text-xs font-bold text-slate-600">Page {marksPage + 1} of {marksPageCount}</span>
+            <button type="button" onClick={() => setMarksPage((page) => Math.min(marksPageCount - 1, page + 1))} disabled={marksPage >= marksPageCount - 1} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 disabled:opacity-40">Next</button>
+          </div>
         </div>
       )}
 

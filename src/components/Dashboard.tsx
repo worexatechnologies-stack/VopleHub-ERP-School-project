@@ -10,7 +10,6 @@ import {
   Plus,
   CheckSquare,
   School,
-  BookOpen,
   FileCheck,
   FileText,
   CheckCircle2,
@@ -421,7 +420,6 @@ export default function Dashboard({
               { label: 'Collect Fee',       icon: CreditCard,    tab: 'fees'           },
               { label: 'Take Attendance',   icon: CheckSquare,   tab: 'attendance'     },
               { label: 'Staff Directory',   icon: UserCheck,     tab: 'teachers'       },
-              { label: 'Class Homework',    icon: BookOpen,      tab: 'homework'       },
             ] as const).map(({ label, icon: Icon, tab }) => (
               <button key={tab} type="button" onClick={() => onNavigateToTab(tab)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 hover:border-indigo-300 text-slate-600 hover:text-indigo-700 text-[11px] font-semibold px-3.5 py-[7px] shadow-xs transition-all duration-150">

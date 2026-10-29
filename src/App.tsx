@@ -1223,7 +1223,6 @@ function AuthenticatedApp() {
           { id: 'teachers', label: 'Teacher Profiles', icon: UserCheck },
           { id: 'passwords', label: 'Password Manager', icon: Key },
           { id: 'academic', label: 'Timetables & Schedules', icon: GraduationCap },
-          { id: 'homework', label: 'Class Homework', icon: BookOpen },
           { id: 'attendance', label: 'Roster Attendance', icon: CheckSquare },
           { id: 'fees', label: 'Fees Invoicing', icon: CreditCard },
           { id: 'staff-fee', label: 'Staff Fee', icon: Wallet },
@@ -1320,46 +1319,6 @@ function AuthenticatedApp() {
     const unsubRead = chatSocket.on('conversation.read', () => fetchUnread());
     const unsubUnread = chatSocket.on('unread_count.updated', () => fetchUnread());
 
-    // Listen to real-time homework events for instant notifications across open tabs
-    const unsubHomework = chatSocket.on('homework.sync', (payload: any) => {
-      const action = payload?.action;
-      const data = payload?.data || {};
-      const title = data?.title || 'Homework';
-      const className = data?.className || '';
-      const subjectName = data?.subjectName || '';
-
-      if (action === 'created') {
-        emitNotification({
-          title: 'New Homework Assigned',
-          message: `${title} for ${className} ${subjectName}`.trim(),
-          tone: 'info',
-          source: 'Homework',
-        });
-      } else if (action === 'submitted') {
-        const studentName = data?.student_name || 'A student';
-        emitNotification({
-          title: 'Homework Submitted',
-          message: `${studentName} submitted work for ${title}`.trim(),
-          tone: 'success',
-          source: 'Homework',
-        });
-      } else if (action === 'graded') {
-        emitNotification({
-          title: 'Homework Graded',
-          message: `Evaluation completed for ${title}`.trim(),
-          tone: 'success',
-          source: 'Homework',
-        });
-      } else if (action === 'deleted') {
-        emitNotification({
-          title: 'Homework Removed',
-          message: 'A homework assignment was removed.',
-          tone: 'warning',
-          source: 'Homework',
-        });
-      }
-    });
-
     const unsubAttendance = chatSocket.on('attendance.sync', (payload: any) => {
       const action = payload?.action;
       if (action === 'bulk_marked') {
@@ -1378,7 +1337,6 @@ function AuthenticatedApp() {
       unsubMsg();
       unsubRead();
       unsubUnread();
-      unsubHomework();
       unsubAttendance();
     };
   }, [user]);
