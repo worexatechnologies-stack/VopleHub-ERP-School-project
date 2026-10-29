@@ -1726,6 +1726,9 @@ class HomeworkViewSet(TenantScopedViewSet):
                 ).first()
                 if not child:
                     return Response({'error': 'Permission denied. You can only submit homework for your own children.'}, status=status.HTTP_403_FORBIDDEN)
+            # The verified child profile is also required by the file storage
+            # helper to associate uploaded bytes with this student's submission.
+            student = child
             student_id = str(child.id)
             student_name = child.name
             admission_no = child.admission_no
