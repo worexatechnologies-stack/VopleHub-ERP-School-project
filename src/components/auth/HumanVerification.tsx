@@ -58,10 +58,14 @@ export default function HumanVerification({
             const code = errorCode == null ? '' : String(errorCode);
             const message = code === '110200'
               ? 'This site is not authorized for the Turnstile widget. Add volpehub.in to its Hostname Management settings.'
+              : code === '400020' || code === '110100' || code === '110110'
+              ? 'Cloudflare rejected this site key. Copy the Site Key from the active Turnstile widget into the CLOUDFLARE_TURNSTILE_SITE_KEY GitHub Actions variable, then redeploy.'
+              : code === '400070'
+              ? 'This Turnstile widget is disabled. Enable the widget in Cloudflare and reload this page.'
+              : code === '400021'
+              ? 'This site key is for a different Cloudflare region. Use the Site Key from the widget configured for this site.'
               : code === '200500'
               ? 'Cloudflare’s challenge could not load. Allow challenges.cloudflare.com and retry.'
-              : code === '110100' || code === '110110'
-              ? 'The Turnstile site key is invalid. Check the widget key configured for this site.'
               : 'Cloudflare verification failed. Please retry.';
             setErrorMessage(code ? `${message} (code ${code})` : message);
             onResetRef.current?.();
