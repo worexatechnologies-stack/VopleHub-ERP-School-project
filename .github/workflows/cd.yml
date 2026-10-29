@@ -192,6 +192,26 @@ jobs:
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
             "chmod +x /opt/volpehub/backup.sh /opt/volpehub/backup-scheduler.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/deploy.sh /opt/volpehub/docker/postgres/init-app-role.sh"
 
+      - name: Install Turnstile secret on VPS
+        env:
+          CLOUDFLARE_TURNSTILE_SECRET_KEY: ${{ secrets.CLOUDFLARE_TURNSTILE_SECRET_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set +x
+          if [ -z "$CLOUDFLARE_TURNSTILE_SECRET_KEY" ]; then
+            echo "CLOUDFLARE_TURNSTILE_SECRET_KEY is missing from GitHub Actions secrets." >&2
+            exit 1
+          fi
+
+          scp -i ~/.ssh/deploy_key \
+            .github/scripts/install_turnstile_secret.py \
+            "${SSH_USER}@${SSH_HOST}:/tmp/volpehub-install-turnstile-secret.py"
+
+          printf '%s' "$CLOUDFLARE_TURNSTILE_SECRET_KEY" | \
+            ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
+              'python3 /tmp/volpehub-install-turnstile-secret.py; result=$?; rm -f /tmp/volpehub-install-turnstile-secret.py; exit "$result"'
+
       - name: Execute atomic production deployment
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
