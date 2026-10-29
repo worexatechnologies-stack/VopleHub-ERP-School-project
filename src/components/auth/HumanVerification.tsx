@@ -53,10 +53,19 @@ export default function HumanVerification({
             setStatus('verified');
             onVerifyRef.current(token);
           },
-          'error-callback': () => {
+          'error-callback': (errorCode?: number | string) => {
             setStatus('error');
-            setErrorMessage('Verification failed. Please retry.');
+            const code = errorCode == null ? '' : String(errorCode);
+            const message = code === '110200'
+              ? 'This site is not authorized for the Turnstile widget. Add volpehub.in to its Hostname Management settings.'
+              : code === '200500'
+              ? 'Cloudflare’s challenge could not load. Allow challenges.cloudflare.com and retry.'
+              : code === '110100' || code === '110110'
+              ? 'The Turnstile site key is invalid. Check the widget key configured for this site.'
+              : 'Cloudflare verification failed. Please retry.';
+            setErrorMessage(code ? `${message} (code ${code})` : message);
             onResetRef.current?.();
+            return true;
           },
           'expired-callback': () => {
             setStatus('idle');
@@ -185,7 +194,24 @@ export default function HumanVerification({
           <p className="text-xs font-semibold text-emerald-700" role="status">Cloudflare security check complete.</p>
         )}
         {errorMessage && (
-          <p className="text-center text-xs text-rose-600" role="alert">{errorMessage}</p>
+          <div className="flex flex-col items-center gap-1" role="alert">
+            <p className="text-center text-xs text-rose-600">{errorMessage}</p>
+            {turnstileReady && (
+              <button
+                type="button"
+                onClick={() => {
+                  const turnstile = (window as any).turnstile;
+                  if (turnstile && turnstileWidgetIdRef.current !== null) {
+                    setErrorMessage(null);
+                    turnstile.reset(turnstileWidgetIdRef.current);
+                  }
+                }}
+                className="text-xs font-semibold text-indigo-700 underline underline-offset-2"
+              >
+                Retry verification
+              </button>
+            )}
+          </div>
         )}
       </div>
     );
