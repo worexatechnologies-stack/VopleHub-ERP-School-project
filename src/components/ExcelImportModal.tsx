@@ -126,6 +126,7 @@ export default function ExcelImportModal({
 
   const [importResult, setImportResult] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState('');
+  const [serverErrorPopup, setServerErrorPopup] = useState<{ message: string; status: number | null } | null>(null);
 
   const activeColumnsDef = entityType === 'students' ? STUDENT_COLUMNS : TEACHER_COLUMNS;
   const fileInputId = useId();
@@ -255,7 +256,8 @@ export default function ExcelImportModal({
     );
   };
 
-  const CHUNK_SIZE = 1000;
+  // Queued import API enforces a 500-record maximum per request.
+  const CHUNK_SIZE = 500;
 
   const handleExecuteImport = async (startBatchIndex = 0) => {
     const rowsToImport = validatedRows.filter((r) => r.included && r.isValid).map((r) => r.data);
@@ -361,6 +363,7 @@ export default function ExcelImportModal({
         status: err.status,
       });
       setErrorMessage(msg);
+      setServerErrorPopup({ message: msg, status: typeof err.status === 'number' ? err.status : null });
       setImportProgress((prev) => ({ ...prev, inProgress: false }));
     } finally {
       setImportProgress((prev) => ({ ...prev, inProgress: false }));
@@ -1261,6 +1264,39 @@ export default function ExcelImportModal({
             </div>
           )}
         </div>
+
+        {serverErrorPopup && (
+          <div className="fixed inset-0 z-[10001] grid place-items-center p-4 bg-slate-950/55 backdrop-blur-sm" onClick={() => setServerErrorPopup(null)}>
+            <section
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="import-error-title"
+              aria-describedby="import-error-message"
+              className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-rose-100"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-start gap-3">
+                <div className="rounded-xl bg-rose-50 p-2 text-rose-600"><AlertTriangle className="h-5 w-5" /></div>
+                <div className="min-w-0 flex-1">
+                  <h3 id="import-error-title" className="text-base font-bold text-slate-900">Import failed</h3>
+                  {serverErrorPopup.status !== null && (
+                    <p className="mt-1 text-xs font-semibold text-rose-700">Server returned HTTP {serverErrorPopup.status}</p>
+                  )}
+                  <p id="import-error-message" className="mt-3 whitespace-pre-wrap break-words text-sm text-slate-700">{serverErrorPopup.message}</p>
+                </div>
+                <button type="button" aria-label="Close error message" onClick={() => setServerErrorPopup(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="mt-6 flex justify-end gap-2">
+                <button type="button" onClick={() => setServerErrorPopup(null)} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Close</button>
+                {failedBatch && (
+                  <button type="button" onClick={() => { setServerErrorPopup(null); handleRetryFailedBatch(); }} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">Retry Batch</button>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
 
         {/* Modal Bottom Footer Actions */}
         <div className="px-5 py-2.5 sm:px-6 sm:py-3 border-t border-slate-100 bg-white flex items-center justify-between shrink-0">

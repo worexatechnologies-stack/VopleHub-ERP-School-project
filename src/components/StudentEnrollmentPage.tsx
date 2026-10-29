@@ -78,6 +78,7 @@ export default function StudentEnrollmentPage() {
 
   // UI state
   const [formError, setFormError] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<{ message: string; status: number | null } | null>(null);
   const [submissionResult, setSubmissionResult] = useState<SubmitEnrollmentResponse | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
@@ -247,9 +248,9 @@ export default function StudentEnrollmentPage() {
       setSubmissionResult(res);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err: any) {
-      setFormError(
-        err?.data?.detail || err?.message || 'Failed to submit admission details. Please try again.'
-      );
+      const detail = err?.data?.detail || err?.data?.message || err?.message;
+      const message = Array.isArray(detail) ? detail.join(' ') : typeof detail === 'string' ? detail : 'Failed to submit admission details. Please try again.';
+      setSubmissionError({ message, status: typeof err?.status === 'number' ? err.status : null });
     }
   };
 
@@ -1069,6 +1070,24 @@ export default function StudentEnrollmentPage() {
           </div>
         </form>
       </main>
+      {submissionError && (
+        <div className="fixed inset-0 z-[10000] grid place-items-center bg-slate-950/55 p-4 backdrop-blur-sm" onClick={() => setSubmissionError(null)}>
+          <section role="alertdialog" aria-modal="true" aria-labelledby="enrollment-error-title" aria-describedby="enrollment-error-message" className="w-full max-w-md rounded-2xl border border-rose-100 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl bg-rose-50 p-2 text-rose-600"><AlertTriangle className="h-5 w-5" /></div>
+              <div className="min-w-0 flex-1">
+                <h2 id="enrollment-error-title" className="text-base font-bold text-slate-900">Submission failed</h2>
+                {submissionError.status !== null && <p className="mt-1 text-xs font-semibold text-rose-700">Server returned HTTP {submissionError.status}</p>}
+                <p id="enrollment-error-message" className="mt-3 whitespace-pre-wrap break-words text-sm text-slate-700">{submissionError.message}</p>
+              </div>
+              <button type="button" aria-label="Close error message" onClick={() => setSubmissionError(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="mt-6 flex justify-end">
+              <button type="button" onClick={() => setSubmissionError(null)} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">Close</button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
