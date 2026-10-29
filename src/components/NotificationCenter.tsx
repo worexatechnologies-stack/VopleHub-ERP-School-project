@@ -31,9 +31,13 @@ interface NotificationCenterProps {
   onNavigateToTab?: (tabId: string) => void;
 }
 
-function isUserFacingItem(item: AppNotification): boolean {
+function isUserFacingItem(item: AppNotification, userRole?: string): boolean {
   if (!item || !item.message) return false;
   const content = `${item.title || ''} ${item.message || ''}`.toLowerCase();
+  // Homework work is assigned to students and parents, while submissions go
+  // to the responsible teacher. Admins should not see those day-to-day alerts,
+  // including older local notifications kept in this browser.
+  if (userRole === 'School Admin' && content.includes('homework')) return false;
   if (
     content.includes('authenticated via jwt') ||
     content.includes('[authentication]') ||
@@ -47,13 +51,13 @@ function isUserFacingItem(item: AppNotification): boolean {
   return true;
 }
 
-function loadNotifications(userId?: number | string | null): AppNotification[] {
+function loadNotifications(userId?: number | string | null, userRole?: string): AppNotification[] {
   try {
     const key = getStorageKey(userId);
     const saved = localStorage.getItem(key);
     const parsed = saved ? JSON.parse(saved) : [];
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isUserFacingItem);
+    return parsed.filter((item) => isUserFacingItem(item, userRole));
   } catch {
     return [];
   }
@@ -61,7 +65,7 @@ function loadNotifications(userId?: number | string | null): AppNotification[] {
 
 export default function NotificationCenter({ logs = [], isGlass = false, is3D = false, onNavigateToTab }: NotificationCenterProps) {
   const currentUser = useAppSelector((state) => state.auth.user);
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => loadNotifications(currentUser?.id));
+  const [notifications, setNotifications] = useState<AppNotification[]>(() => loadNotifications(currentUser?.id, currentUser?.role));
   const [isOpen, setIsOpen] = useState(false);
 
   // Reload scoped notifications and reset tracking whenever the logged-in user changes
@@ -69,7 +73,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
     knownServerIds.current.clear();
     isInitialSync.current = true;
     if (currentUser?.id) {
-      setNotifications(loadNotifications(currentUser.id));
+      setNotifications(loadNotifications(currentUser.id, currentUser.role));
     } else {
       setNotifications([]);
     }
@@ -141,6 +145,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
       ? []
       : serverNotifications.filter((n) => {
           if (knownServerIds.current.has(n.id)) return false;
+          if (!isUserFacingItem({ title: n.title || '', message: n.body || '' } as AppNotification, currentUser?.role)) return false;
           // Crucial: The sender must NEVER receive incoming notification alerts for their own message or notice!
           if (currentUser?.id && n.senderId && String(n.senderId) === String(currentUser.id)) return false;
           if (currentUser?.id && n.recipientId && String(n.recipientId) !== String(currentUser.id)) return false;
@@ -200,7 +205,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
           related: rel,
         };
       })
-      .filter(isUserFacingItem);
+      .filter((item) => isUserFacingItem(item, currentUser?.role));
 
     // Merge into local state
     setNotifications((prev) => {
@@ -234,22 +239,22 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
         });
       });
     }
-  }, [serverNotifications, currentUser?.id]);
+  }, [serverNotifications, currentUser?.id, currentUser?.role]);
 
   const unreadCount = useMemo(() => notifications.filter((item) => !item.read).length, [notifications]);
 
   useEffect(() => {
     if (currentUser?.id) {
       const key = getStorageKey(currentUser.id);
-      localStorage.setItem(key, JSON.stringify(notifications.filter(isUserFacingItem).slice(0, 60)));
+      localStorage.setItem(key, JSON.stringify(notifications.filter((item) => isUserFacingItem(item, currentUser.role)).slice(0, 60)));
     }
-  }, [notifications, currentUser?.id]);
+  }, [notifications, currentUser?.id, currentUser?.role]);
 
   // Listen to in-app & server notification events
   useEffect(() => {
     const onNotification = (event: Event) => {
       const item = (event as CustomEvent<AppNotification>).detail;
-      if (!item || !isUserFacingItem(item)) return;
+      if (!item || !isUserFacingItem(item, currentUser?.role)) return;
 
       setNotifications((prev) => [item, ...prev.filter((p) => p.id !== item.id)].slice(0, 100));
       setToast(item);
@@ -272,7 +277,7 @@ export default function NotificationCenter({ logs = [], isGlass = false, is3D = 
 
     window.addEventListener(NOTIFICATION_EVENT, onNotification);
     return () => window.removeEventListener(NOTIFICATION_EVENT, onNotification);
-  }, [soundEnabled]);
+  }, [soundEnabled, currentUser?.role]);
 
   const handleToggleSound = () => {
     const nextState = !soundEnabled;

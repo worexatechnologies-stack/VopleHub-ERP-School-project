@@ -278,7 +278,7 @@ class NotificationListView(APIView):
                 Q(channel='teacher-to-admin', school_id=request.user.school_id)
             ).exclude(
                 channel__in=['teacher-to-parents', 'teacher-to-students', 'school-to-parents', 'school-to-teachers']
-            ).exclude(status='Acknowledged')
+            ).exclude(category='Homework').exclude(status='Acknowledged')
             # For chat messages, ensure recipient is strictly this admin
             received_qs = received_qs.filter(
                 ~Q(channel='chat') | Q(recipient=request.user)

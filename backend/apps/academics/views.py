@@ -1820,12 +1820,13 @@ class HomeworkViewSet(TenantScopedViewSet):
 
         # Notify teacher that a student/parent submitted homework
         try:
-            if instance.teacher and getattr(instance.teacher, 'user', None):
+            teacher_user = getattr(instance.teacher, 'user', None) if instance.teacher else None
+            if teacher_user and teacher_user.role == User.Role.TEACHER:
                 from apps.notifications.services import create_notification
                 submitter_label = f"{student_name} ({submitted_by})" if submitted_by else student_name
                 create_notification(
                     school=instance.school,
-                    recipient=instance.teacher.user,
+                    recipient=teacher_user,
                     title=f"Homework Submitted: {instance.subject_name}",
                     body=f"{submitter_label} submitted homework '{instance.title}' for Class {instance.class_name}.",
                     category="Homework",
