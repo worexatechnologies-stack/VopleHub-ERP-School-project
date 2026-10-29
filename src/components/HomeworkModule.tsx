@@ -719,18 +719,24 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       refetch();
     } catch (err: any) {
       console.error('Failed to save homework:', err);
-      const dataMessage = typeof err?.data === 'string'
-        ? err.data
+      const responseBody = typeof err?.data === 'string' ? err.data : '';
+      const isHtmlErrorPage = /<!doctype\s+html|<html\b|<title>\s*Server Error/i.test(responseBody);
+      const dataMessage = typeof err?.data === 'string' && !isHtmlErrorPage
+        ? err.data.trim()
         : err?.data?.detail ||
           (err?.data && typeof err.data === 'object' ? Object.values(err.data).flat().join(' ') : null);
       const errorMsg = dataMessage ||
         (err?.status === 'FETCH_ERROR'
           ? `Could not reach the server${err?.error ? `: ${err.error}` : '. Check your connection and try again.'}`
           : err?.status === 'PARSING_ERROR'
-          ? `The server returned an unreadable response (HTTP ${err.originalStatus}). Refresh the homework list before retrying.`
+          ? isHtmlErrorPage && err.originalStatus >= 500
+            ? `The server encountered an error (HTTP ${err.originalStatus}). Refresh the homework list before trying again; the homework may already have been saved.`
+            : `The server returned an unreadable response (HTTP ${err.originalStatus}). Refresh the homework list before trying again.`
           : err?.message ||
             (typeof err?.status === 'number'
-              ? `The server could not save this homework (HTTP ${err.status}). Please retry.`
+              ? err.status >= 500
+                ? `The server encountered an error (HTTP ${err.status}). Refresh the homework list before trying again; the homework may already have been saved.`
+                : `The server could not save this homework (HTTP ${err.status}). Please check the form and try again.`
               : 'Failed to save homework. Please try again.'));
       alert(errorMsg);
     }
