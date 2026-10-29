@@ -53,6 +53,12 @@ def update_env_file(env_path: Path, secret: bytes) -> None:
 
 def main() -> int:
     secret = sys.stdin.buffer.read()
+    # A pasted Actions secret can accidentally include the final newline from
+    # a copied line. Remove only that one terminator; reject embedded lines.
+    if secret.endswith(b"\r\n"):
+        secret = secret[:-2]
+    elif secret.endswith((b"\n", b"\r")):
+        secret = secret[:-1]
     if not secret or b"\n" in secret or b"\r" in secret or b"\0" in secret:
         print("Turnstile secret input is empty or contains invalid characters.", file=sys.stderr)
         return 1
