@@ -108,3 +108,19 @@ class Homework(models.Model):
     def __str__(self):
         return f"{self.subject_name} - {self.title} (Class {self.class_name})"
 
+
+class HomeworkFileAttachment(models.Model):
+    """Homework files stored as raw bytes in the database, never base64 text."""
+
+    homework = models.ForeignKey(Homework, on_delete=models.CASCADE, related_name='file_attachments')
+    school = models.ForeignKey('schools.School', on_delete=models.CASCADE, related_name='homework_attachments')
+    submission_student_id = models.CharField(max_length=64, blank=True, default='')
+    file_name = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=128, default='application/octet-stream')
+    file_size = models.PositiveIntegerField(default=0)
+    file_data = models.BinaryField(editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+

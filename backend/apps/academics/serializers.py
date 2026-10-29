@@ -355,29 +355,54 @@ class HomeworkSerializer(TenantCreateSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        file_rows = list(instance.file_attachments.all())
+
+        def attachment_payload(attachment):
+            return {
+                'id': attachment.pk,
+                'name': attachment.file_name,
+                'url': f'/api/v1/homework/{instance.pk}/attachments/{attachment.pk}/?view=1',
+                'type': attachment.content_type,
+                'size': attachment.file_size,
+            }
+
+        assignment_files = [attachment_payload(item) for item in file_rows if not item.submission_student_id]
+        if assignment_files:
+            legacy_metadata = [
+                item for item in data.get('attachments', [])
+                if isinstance(item, dict)
+                and not (isinstance(item.get('url'), str) and item['url'].startswith('data:'))
+            ]
+            data['attachments'] = [*legacy_metadata, *assignment_files]
         request = self.context.get('request')
         user = getattr(request, 'user', None)
-        if not user or user.role not in ['student', 'parent']:
-            return data
-
-        if user.role == 'student':
-            from apps.sis.models import Student
-            profile = getattr(user, 'student_profile', None)
-            allowed_student_ids = set(
-                str(student_id)
-                for student_id in Student.objects.filter(
-                    pk=profile.student_id, school_id=instance.school_id,
-                ).values_list('pk', flat=True)
-            ) if profile and profile.student_id else set()
-        else:
-            profile = getattr(user, 'parent_profile', None)
-            allowed_student_ids = {
-                str(student_id)
-                for student_id in profile.students.filter(school_id=instance.school_id).values_list('pk', flat=True)
-            } if profile else set()
-        data['submissions'] = [
-            submission for submission in data.get('submissions', [])
-            if isinstance(submission, dict) and str(submission.get('student_id')) in allowed_student_ids
-        ]
+        if user and user.role in ['student', 'parent']:
+            if user.role == 'student':
+                from apps.sis.models import Student
+                profile = getattr(user, 'student_profile', None)
+                allowed_student_ids = set(
+                    str(student_id)
+                    for student_id in Student.objects.filter(
+                        pk=profile.student_id, school_id=instance.school_id,
+                    ).values_list('pk', flat=True)
+                ) if profile and profile.student_id else set()
+            else:
+                profile = getattr(user, 'parent_profile', None)
+                allowed_student_ids = {
+                    str(student_id)
+                    for student_id in profile.students.filter(school_id=instance.school_id).values_list('pk', flat=True)
+                } if profile else set()
+            data['submissions'] = [
+                submission for submission in data.get('submissions', [])
+                if isinstance(submission, dict) and str(submission.get('student_id')) in allowed_student_ids
+            ]
+        for submission in data['submissions']:
+            submission_files = [
+                attachment_payload(item) for item in file_rows
+                if item.submission_student_id
+                and str(item.submission_student_id) == str(submission.get('student_id'))
+            ]
+            if submission_files:
+                submission['attachments'] = submission_files
         return data
 

@@ -1,6 +1,8 @@
 from datetime import date, time
+import base64
 from unittest.mock import patch
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -10,7 +12,7 @@ from apps.schools.models import School
 from apps.sis.models import AcademicHistory, Student
 from apps.staff.models import Teacher
 
-from .models import AcademicYear, Class, Section, Subject, Homework
+from .models import AcademicYear, Class, Section, Subject, Homework, HomeworkFileAttachment
 
 
 class AcademicTenantAccessTests(TestCase):
@@ -560,11 +562,11 @@ class HomeworkNotificationFanoutTests(TestCase):
             parent_phone='9000000088', parent_email='homework-parent@example.com',
             dob=date(2012, 1, 1), gender='Female', academic_year='2026-27',
         )
-        student_user = User.objects.create_user(
+        self.student_user = User.objects.create_user(
             username='homework-student', email='homework-student@example.com', password='StrongPass123!',
             role=User.Role.STUDENT, school=self.school,
         )
-        StudentProfile.objects.create(user=student_user, student=self.student)
+        StudentProfile.objects.create(user=self.student_user, student=self.student)
         parent_user = User.objects.create_user(
             username='homework-parent', email='homework-parent@example.com', password='StrongPass123!',
             role=User.Role.PARENT, school=self.school,
@@ -595,12 +597,13 @@ class HomeworkNotificationFanoutTests(TestCase):
             self.assertEqual(len(call.kwargs['recipient_ids']), 1)
 
     @patch('apps.notifications.tasks.fanout_notification_task.delay')
-    def test_create_homework_keeps_base64_file_in_attachments_not_legacy_url(self, fanout):
+    def test_create_homework_migrates_legacy_base64_attachment_to_database_bytes(self, fanout):
+        file_bytes = b'\x89PNG\r\n\x1a\n' + (b'\x00' * 500)
         attachment = {
             'name': 'worksheet.png',
             'type': 'image/png',
-            'size': 480,
-            'url': f'data:image/png;base64,{"a" * 600}',
+            'size': len(file_bytes),
+            'url': f'data:image/png;base64,{base64.b64encode(file_bytes).decode("ascii")}',
         }
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.post('/api/v1/homework/', {
@@ -618,4 +621,58 @@ class HomeworkNotificationFanoutTests(TestCase):
         self.assertEqual(response.status_code, 201, response.data)
         homework = Homework.objects.get(school=self.school, title='Worksheet Homework')
         self.assertEqual(homework.attachment_url, '')
-        self.assertEqual(homework.attachments, [attachment])
+        self.assertEqual(homework.attachments, [])
+        saved_file = homework.file_attachments.get(submission_student_id='')
+        self.assertEqual(bytes(saved_file.file_data), file_bytes)
+        self.assertIn(f'/attachments/{saved_file.pk}/', response.data['attachments'][0]['url'])
+
+    @patch('apps.notifications.tasks.fanout_notification_task.delay')
+    def test_create_homework_accepts_multipart_file_and_stores_raw_bytes(self, fanout):
+        file_bytes = b'%PDF-1.7\nHomework file bytes\n'
+        uploaded = SimpleUploadedFile('worksheet.pdf', file_bytes, content_type='application/pdf')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post('/api/v1/homework/', {
+                'title': 'PDF Homework',
+                'description': 'Complete the attached PDF.',
+                'className': 'Grade 8',
+                'sectionName': 'A',
+                'subjectName': 'Mathematics',
+                'dueDate': '2026-11-30',
+                'attachmentIds': '[]',
+                'attachments': [uploaded],
+            }, format='multipart')
+
+        self.assertEqual(response.status_code, 201, response.data)
+        homework = Homework.objects.get(school=self.school, title='PDF Homework')
+        saved_file = homework.file_attachments.get(submission_student_id='')
+        self.assertEqual(bytes(saved_file.file_data), file_bytes)
+        download = self.client.get(f'/api/v1/homework/{homework.pk}/attachments/{saved_file.pk}/')
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b''.join(download.streaming_content), file_bytes)
+
+    def test_student_submission_stores_uploaded_file_bytes(self):
+        homework = Homework.objects.create(
+            school=self.school,
+            class_name='Grade 8',
+            section_name='A',
+            subject_name='Mathematics',
+            title='Submission Upload Test',
+            description='Attach the completed work.',
+            due_date=date(2026, 11, 30),
+        )
+        file_bytes = b'%PDF-1.7\nStudent submission bytes\n'
+        uploaded = SimpleUploadedFile('completed-work.pdf', file_bytes, content_type='application/pdf')
+        self.client.force_authenticate(self.student_user)
+        response = self.client.post(f'/api/v1/homework/{homework.pk}/submit/', {
+            'student_id': str(self.student.pk),
+            'submission_text': 'Completed.',
+            'attachments': [uploaded],
+        }, format='multipart')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        saved_file = HomeworkFileAttachment.objects.get(
+            homework=homework, submission_student_id=str(self.student.pk),
+        )
+        self.assertEqual(bytes(saved_file.file_data), file_bytes)
+        returned = response.data['homework']['submissions'][0]['attachments'][0]
+        self.assertIn(f'/attachments/{saved_file.pk}/', returned['url'])

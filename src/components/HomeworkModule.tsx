@@ -71,79 +71,20 @@ const formatFileSize = (bytes?: number): string => {
 // Utility: Check if an attachment is an image
 const isImageAttachment = (att?: HomeworkAttachment): boolean => {
   if (!att) return false;
-  if (att.type && att.type.startsWith('image/')) return true;
-  if (att.url && att.url.startsWith('data:image/')) return true;
+  if (att.type && ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp'].includes(att.type)) return true;
+  if (att.url && /^data:image\/(jpeg|png|webp|gif|bmp);/i.test(att.url)) return true;
   const ext = (att.name || '').split('.').pop()?.toLowerCase();
   return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'].includes(ext || '');
 };
 
-// Utility: Compress & convert File to Base64 (resizes large camera photos on canvas)
+// Keep the browser File object so the API sends raw multipart bytes, not base64 text.
 const readFileAsAttachment = (file: File): Promise<HomeworkAttachment> => {
-  return new Promise((resolve) => {
-    if (file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const img = new Image();
-        img.onload = () => {
-          const MAX_DIM = 1600;
-          let { width, height } = img;
-          if (width > MAX_DIM || height > MAX_DIM) {
-            if (width > height) {
-              height = Math.round((height * MAX_DIM) / width);
-              width = MAX_DIM;
-            } else {
-              width = Math.round((width * MAX_DIM) / height);
-              height = MAX_DIM;
-            }
-          }
-          const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, width, height);
-            const quality = 0.85;
-            const dataUrl = canvas.toDataURL('image/jpeg', quality);
-            // approximate size from base64 length
-            const approxSize = Math.round((dataUrl.length * 3) / 4);
-            resolve({
-              name: file.name,
-              url: dataUrl,
-              type: 'image/jpeg',
-              size: approxSize,
-            });
-            return;
-          }
-          resolve({
-            name: file.name,
-            url: reader.result as string,
-            type: file.type || 'image/jpeg',
-            size: file.size,
-          });
-        };
-        img.onerror = () => {
-          resolve({
-            name: file.name,
-            url: reader.result as string,
-            type: file.type,
-            size: file.size,
-          });
-        };
-        img.src = e.target?.result as string;
-      };
-      reader.readAsDataURL(file);
-    } else {
-      const reader = new FileReader();
-      reader.onload = () => {
-        resolve({
-          name: file.name,
-          url: reader.result as string,
-          type: file.type || 'application/octet-stream',
-          size: file.size,
-        });
-      };
-      reader.readAsDataURL(file);
-    }
+  return Promise.resolve({
+    name: file.name,
+    url: URL.createObjectURL(file),
+    type: file.type || 'application/octet-stream',
+    size: file.size,
+    file,
   });
 };
 
@@ -654,7 +595,9 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
     const primaryUrl = formAttachments.length > 0 ? formAttachments[0].url : formAttachmentUrl.trim();
     // File data is sent once in `attachments`. `attachmentUrl` is only the
     // legacy short URL field (max 500 chars), never a base64 data URL.
-    const legacyAttachmentUrl = primaryUrl.length <= 500 ? primaryUrl : '';
+    const legacyAttachmentUrl = formAttachments.length === 0 && primaryUrl.length <= 500
+      ? primaryUrl
+      : '';
 
     try {
       const assignedTeacherId = isAdmin

@@ -1,10 +1,12 @@
 import { baseApi } from './baseApi';
 
 export interface HomeworkAttachment {
+  id?: number;
   name: string;
   url: string;
   type?: string;
   size?: number;
+  file?: File;
 }
 
 export interface HomeworkSubmission {
@@ -80,6 +82,22 @@ export interface GradeSubmissionPayload {
   teacherFeedback?: string;
 }
 
+const homeworkFormData = (payload: CreateHomeworkPayload): FormData => {
+  const body = new FormData();
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === 'attachments' || value === undefined || value === null) continue;
+    body.append(key, String(value));
+  }
+  if (payload.attachments !== undefined) {
+    const attachments = payload.attachments;
+    body.append('attachmentIds', JSON.stringify(attachments.filter((item) => item.id).map((item) => item.id)));
+    attachments.forEach((item) => {
+      if (item.file) body.append('attachments', item.file, item.file.name);
+    });
+  }
+  return body;
+};
+
 export const homeworkApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
     getHomework: build.query<
@@ -107,10 +125,10 @@ export const homeworkApi = baseApi.injectEndpoints({
     }),
 
     createHomework: build.mutation<HomeworkRecord, CreateHomeworkPayload>({
-      query: (body) => ({
+      query: (payload) => ({
         url: '/homework/',
         method: 'POST',
-        body,
+        body: homeworkFormData(payload),
       }),
       invalidatesTags: [{ type: 'Homework', id: 'LIST' }, 'Notification'],
     }),
@@ -119,7 +137,7 @@ export const homeworkApi = baseApi.injectEndpoints({
       query: ({ id, data }) => ({
         url: `/homework/${id}/`,
         method: 'PATCH',
-        body: data,
+        body: homeworkFormData(data as CreateHomeworkPayload),
       }),
       invalidatesTags: (_res, _err, { id }) => [{ type: 'Homework', id }, { type: 'Homework', id: 'LIST' }],
     }),
@@ -139,13 +157,17 @@ export const homeworkApi = baseApi.injectEndpoints({
       query: ({ homeworkId, ...body }) => ({
         url: `/homework/${homeworkId}/submit/`,
         method: 'POST',
-        body: {
-          student_id: body.studentId,
-          student_name: body.studentName,
-          admission_no: body.admissionNo,
-          submission_text: body.submissionText,
-          attachments: body.attachments || [],
-        },
+        body: (() => {
+          const form = new FormData();
+          if (body.studentId) form.append('student_id', body.studentId);
+          if (body.studentName) form.append('student_name', body.studentName);
+          if (body.admissionNo) form.append('admission_no', body.admissionNo);
+          form.append('submission_text', body.submissionText);
+          (body.attachments || []).forEach((attachment) => {
+            if (attachment.file) form.append('attachments', attachment.file, attachment.file.name);
+          });
+          return form;
+        })(),
       }),
       invalidatesTags: (_res, _err, { homeworkId }) => [{ type: 'Homework', id: homeworkId }],
     }),

@@ -1,7 +1,15 @@
 from itertools import islice
+import base64
+import binascii
+import json
+from io import BytesIO
+from pathlib import Path
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.http import FileResponse, Http404
+from django.db.models import Prefetch, Q
 from django.db.models.deletion import ProtectedError, RestrictedError
 from rest_framework import permissions, serializers, status
 from rest_framework.decorators import action
@@ -11,7 +19,7 @@ from apps.accounts.models import User
 from apps.common.tenancy import TenantScopedViewSet
 from apps.common.fast_cache import fast_cache_response, bump_cache_version
 
-from .models import AcademicYear, Class, Section, Subject, Homework
+from .models import AcademicYear, Class, Section, Subject, Homework, HomeworkFileAttachment
 from .serializers import AcademicYearSerializer, ClassSerializer, SectionSerializer, SubjectSerializer, HomeworkSerializer
 
 
@@ -1081,10 +1089,124 @@ class HomeworkPermission(permissions.BasePermission):
         return False
 
 
+def _legacy_homework_file_uploads(attachments):
+    """Decode pre-multipart data URLs into temporary byte uploads for migration."""
+    uploads = []
+    for attachment in attachments or []:
+        if not isinstance(attachment, dict):
+            continue
+        url = attachment.get('url')
+        if not isinstance(url, str) or not url.startswith('data:'):
+            continue
+        header, separator, encoded = url.partition(',')
+        if not separator or ';base64' not in header:
+            raise serializers.ValidationError({'attachments': 'A legacy attachment is malformed.'})
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise serializers.ValidationError({'attachments': 'A legacy attachment is not valid base64 data.'}) from exc
+        filename = Path(str(attachment.get('name') or 'attachment.bin')).name
+        content_type = header[5:].split(';', 1)[0].lower()
+        # Old browser code converted all images to JPEG while keeping the old
+        # filename. Align the temporary extension with the actual byte format.
+        if content_type == 'image/jpeg' and Path(filename).suffix.lower() not in {'.jpg', '.jpeg'}:
+            filename = f'{Path(filename).stem}.jpg'
+        uploads.append(SimpleUploadedFile(filename, content, content_type=content_type))
+    return uploads
+
+
+def _homework_file_payload(item, homework_id):
+    return {
+        'id': item.pk,
+        'name': item.file_name,
+        'url': f'/api/v1/homework/{homework_id}/attachments/{item.pk}/?view=1',
+        'type': item.content_type,
+        'size': item.file_size,
+    }
+
+
+def _request_attachment_ids(request):
+    raw_ids = request.data.get('attachmentIds')
+    if raw_ids is None:
+        return None
+    if isinstance(raw_ids, list):
+        return raw_ids
+    try:
+        value = json.loads(raw_ids or '[]')
+    except (TypeError, ValueError) as exc:
+        raise serializers.ValidationError({'attachmentIds': 'Attachment IDs must be a JSON list.'}) from exc
+    if not isinstance(value, list):
+        raise serializers.ValidationError({'attachmentIds': 'Attachment IDs must be a JSON list.'})
+    return value
+
+
+def _store_homework_attachments(homework, request, *, student=None, keep_ids=None, legacy=None):
+    """Persist multipart or legacy files as raw bytes and return DB metadata."""
+    from .homework_files import save_homework_uploads
+
+    legacy = list(legacy if legacy is not None else (homework.attachments or []))
+    old_inline_uploads = _legacy_homework_file_uploads(legacy)
+    uploads = list(request.FILES.getlist('attachments')) + old_inline_uploads
+
+    try:
+        if student is None and keep_ids is not None:
+            keep_ids = {int(value) for value in keep_ids if str(value).isdigit()}
+            HomeworkFileAttachment.objects.filter(
+                homework=homework, submission_student_id='',
+            ).exclude(pk__in=keep_ids).delete()
+        if student is not None:
+            HomeworkFileAttachment.objects.filter(
+                homework=homework, submission_student_id=str(student.pk),
+            ).delete()
+        created = save_homework_uploads(homework, uploads, student=student)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError({'attachments': exc.messages}) from exc
+
+    # Strip legacy data URLs from the JSON column. Ordinary external links stay
+    # as metadata, while uploaded file bytes live only in BinaryField rows.
+    metadata = [
+        item for item in legacy
+        if isinstance(item, dict)
+        and not (isinstance(item.get('url'), str) and item['url'].startswith('data:'))
+        and not (isinstance(item.get('id'), int) and '/attachments/' in str(item.get('url') or ''))
+    ]
+    if student is None:
+        homework.attachments = metadata
+        homework.save(update_fields=['attachments'])
+    return [*metadata, *[_homework_file_payload(item, homework.pk) for item in created]]
+
+
 class HomeworkViewSet(TenantScopedViewSet):
-    queryset = Homework.objects.select_related('teacher', 'teacher__user', 'class_room', 'section', 'subject').order_by('-due_date', '-created_at')
+    queryset = Homework.objects.select_related(
+        'teacher', 'teacher__user', 'class_room', 'section', 'subject'
+    ).prefetch_related(
+        Prefetch(
+            'file_attachments',
+            queryset=HomeworkFileAttachment.objects.defer('file_data'),
+        )
+    ).order_by('-due_date', '-created_at')
     serializer_class = HomeworkSerializer
     permission_classes = [HomeworkPermission]
+
+    def get_serializer(self, *args, **kwargs):
+        # Files arrive in request.FILES for multipart. They are persisted as
+        # bytes separately from the JSON metadata serializer field.
+        data = kwargs.get('data')
+        if data is not None:
+            data = data.copy()
+            data.pop('attachmentIds', None)
+            if getattr(self.request, 'FILES', None):
+                data.pop('attachments', None)
+            kwargs['data'] = data
+        return super().get_serializer(*args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        with transaction.atomic():
+            return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
 
     def get_queryset(self):
         user = self.request.user
@@ -1336,6 +1458,13 @@ class HomeworkViewSet(TenantScopedViewSet):
                 subject=resolved_subject or serializer.validated_data.get('subject'),
             )
 
+        _store_homework_attachments(
+            instance,
+            self.request,
+            keep_ids=_request_attachment_ids(self.request),
+            legacy=instance.attachments,
+        )
+
         # Real-time WebSocket Broadcast across the entire school via Redis Channels
         try:
             from apps.common.realtime import broadcast_sync_event
@@ -1447,6 +1576,12 @@ class HomeworkViewSet(TenantScopedViewSet):
         # Admin: Full management across all classes
         if user.role in [User.Role.SUPER_ADMIN, User.Role.SCHOOL_ADMIN]:
             saved_instance = serializer.save()
+            _store_homework_attachments(
+                saved_instance,
+                self.request,
+                keep_ids=_request_attachment_ids(self.request),
+                legacy=saved_instance.attachments,
+            )
             try:
                 from apps.common.realtime import broadcast_sync_event
                 broadcast_sync_event(
@@ -1465,6 +1600,12 @@ class HomeworkViewSet(TenantScopedViewSet):
             teacher = _active_teacher_profile(user)
             if teacher and instance.teacher_id == teacher.id:
                 saved_instance = serializer.save()
+                _store_homework_attachments(
+                    saved_instance,
+                    self.request,
+                    keep_ids=_request_attachment_ids(self.request),
+                    legacy=saved_instance.attachments,
+                )
                 try:
                     from apps.common.realtime import broadcast_sync_event
                     broadcast_sync_event(
@@ -1514,7 +1655,45 @@ class HomeworkViewSet(TenantScopedViewSet):
 
         raise PermissionDenied("You do not have permission to remove homework.")
 
+    @action(detail=True, methods=['get'], url_path=r'attachments/(?P<attachment_id>[^/.]+)')
+    def download_attachment(self, request, pk=None, attachment_id=None):
+        homework = self.get_object()
+        attachment = HomeworkFileAttachment.objects.filter(
+            homework=homework, school_id=homework.school_id, pk=attachment_id,
+        ).first()
+        if not attachment:
+            raise Http404
+
+        user = request.user
+        if attachment.submission_student_id and user.role == User.Role.STUDENT:
+            profile = getattr(user, 'student_profile', None)
+            if not profile or str(profile.student_id) != attachment.submission_student_id:
+                raise Http404
+        elif attachment.submission_student_id and user.role == User.Role.PARENT:
+            from apps.accounts.models import ParentProfile
+            profile = getattr(user, 'parent_profile', None) or ParentProfile.objects.filter(user=user).first()
+            if not profile or not profile.students.filter(pk=attachment.submission_student_id).exists():
+                raise Http404
+
+        inline_image = (
+            request.query_params.get('view') == '1'
+            and attachment.content_type in {
+                'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp',
+            }
+        )
+        response = FileResponse(
+            BytesIO(bytes(attachment.file_data)),
+            as_attachment=not inline_image,
+            filename=attachment.file_name,
+            content_type=attachment.content_type,
+        )
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        response['X-Frame-Options'] = 'SAMEORIGIN'
+        return response
+
     @action(detail=True, methods=['post'], url_path='submit')
+    @transaction.atomic
     def submit_homework(self, request, pk=None):
         instance = self.get_object()
         user = request.user
@@ -1525,7 +1704,8 @@ class HomeworkViewSet(TenantScopedViewSet):
         student_name = request.data.get('student_name')
         admission_no = request.data.get('admission_no', '')
         submission_text = request.data.get('submission_text', 'Marked as completed')
-        attachments = request.data.get('attachments', [])
+        uploaded_attachments = request.FILES.getlist('attachments')
+        attachments = [] if uploaded_attachments else request.data.get('attachments', [])
 
         submitted_by = ''
         if user.role == User.Role.PARENT:
@@ -1584,6 +1764,13 @@ class HomeworkViewSet(TenantScopedViewSet):
         if not student_id:
             student_id = str(user.id)
             student_name = student_name or user.get_full_name() or user.username
+
+        attachments = _store_homework_attachments(
+            instance,
+            request,
+            student=student,
+            legacy=attachments,
+        )
 
         submissions = list(instance.submissions or [])
         existing = next((s for s in submissions if str(s.get('student_id')) == str(student_id)), None)
