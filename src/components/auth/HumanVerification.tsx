@@ -15,6 +15,7 @@ export default function HumanVerification({
   resetKey = 0,
 }: HumanVerificationProps) {
   const [status, setStatus] = useState<'idle' | 'verifying' | 'verified' | 'error'>('idle');
+  const [turnstileReady, setTurnstileReady] = useState(false);
   const [challengeToken, setChallengeToken] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const clickStartTime = useRef<number>(0);
@@ -36,35 +37,39 @@ export default function HumanVerification({
 
     const renderTurnstile = () => {
       const turnstile = (window as any).turnstile;
-      if (turnstile && turnstileContainerRef.current) {
-        try {
-          turnstileWidgetIdRef.current = turnstile.render(turnstileContainerRef.current, {
-            sitekey: turnstileSiteKey,
-            theme: 'light',
-            action: 'login',
-            callback: (token: string) => {
-              setStatus('verified');
-              onVerifyRef.current(token);
-            },
-            'error-callback': () => {
-              setStatus('error');
-              setErrorMessage('Verification failed. Please retry.');
-              onResetRef.current?.();
-            },
-            'expired-callback': () => {
-              setStatus('idle');
-              setErrorMessage('Verification expired. Please verify again.');
-              onResetRef.current?.();
-            },
-            'timeout-callback': () => {
-              setStatus('idle');
-              setErrorMessage('Verification timed out. Please verify again.');
-              onResetRef.current?.();
-            },
-          });
-        } catch {
-          // Fall back to built-in Shield
-        }
+      if (!turnstile || !turnstileContainerRef.current) {
+        setErrorMessage('Cloudflare verification is unavailable. Please reload this page.');
+        return;
+      }
+
+      try {
+        turnstileWidgetIdRef.current = turnstile.render(turnstileContainerRef.current, {
+          sitekey: turnstileSiteKey,
+          theme: 'light',
+          action: 'login',
+          callback: (token: string) => {
+            setStatus('verified');
+            onVerifyRef.current(token);
+          },
+          'error-callback': () => {
+            setStatus('error');
+            setErrorMessage('Verification failed. Please retry.');
+            onResetRef.current?.();
+          },
+          'expired-callback': () => {
+            setStatus('idle');
+            setErrorMessage('Verification expired. Please verify again.');
+            onResetRef.current?.();
+          },
+          'timeout-callback': () => {
+            setStatus('idle');
+            setErrorMessage('Verification timed out. Please verify again.');
+            onResetRef.current?.();
+          },
+        });
+        setTurnstileReady(true);
+      } catch {
+        setErrorMessage('Cloudflare verification could not start. Please reload this page.');
       }
     };
 
@@ -74,7 +79,10 @@ export default function HumanVerification({
       script.async = true;
       script.defer = true;
       script.onload = renderTurnstile;
-      document.body.appendChild(script);
+      script.onerror = () => {
+        setErrorMessage('Cloudflare verification did not load. Check your connection and reload the page.');
+      };
+      document.head.appendChild(script);
     } else {
       renderTurnstile();
     }
@@ -163,8 +171,14 @@ export default function HumanVerification({
 
   if (turnstileSiteKey) {
     return (
-      <div className="my-2.5 flex justify-center">
+      <div className="my-2.5 flex min-h-[66px] flex-col items-center justify-center gap-1">
         <div ref={turnstileContainerRef} id="cf-turnstile-wrapper" />
+        {!turnstileReady && !errorMessage && (
+          <p className="text-xs text-slate-500" role="status">Loading Cloudflare verification…</p>
+        )}
+        {errorMessage && (
+          <p className="text-center text-xs text-rose-600" role="alert">{errorMessage}</p>
+        )}
       </div>
     );
   }
