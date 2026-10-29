@@ -652,6 +652,9 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
     // Use primary attachment name/url if available
     const primaryName = formAttachments.length > 0 ? formAttachments[0].name : formAttachmentName.trim();
     const primaryUrl = formAttachments.length > 0 ? formAttachments[0].url : formAttachmentUrl.trim();
+    // File data is sent once in `attachments`. `attachmentUrl` is only the
+    // legacy short URL field (max 500 chars), never a base64 data URL.
+    const legacyAttachmentUrl = primaryUrl.length <= 500 ? primaryUrl : '';
 
     try {
       const assignedTeacherId = isAdmin
@@ -675,7 +678,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
             teacherId: assignedTeacherId,
             teacherName: assignedTeacherName,
             attachmentName: primaryName,
-            attachmentUrl: primaryUrl,
+            attachmentUrl: legacyAttachmentUrl,
             attachments: formAttachments,
           },
         }).unwrap();
@@ -700,7 +703,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
           teacherId: assignedTeacherId,
           teacherName: assignedTeacherName,
           attachmentName: primaryName,
-          attachmentUrl: primaryUrl,
+          attachmentUrl: legacyAttachmentUrl,
           attachments: formAttachments,
           status: 'Active',
         }).unwrap();

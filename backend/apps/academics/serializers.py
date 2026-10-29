@@ -237,7 +237,13 @@ class HomeworkSerializer(TenantCreateSerializer):
     maxMarks = serializers.IntegerField(source='max_marks', required=False, default=20)
     teacherName = serializers.CharField(source='teacher_name', required=False, allow_blank=True, default='')
     attachmentName = serializers.CharField(source='attachment_name', required=False, allow_blank=True, default='')
-    attachmentUrl = serializers.CharField(source='attachment_url', required=False, allow_blank=True, default='')
+    # Older clients send the first file's data URL in this legacy field as
+    # well as in `attachments`. Accept that larger duplicate long enough to
+    # normalize it away; the actual file stays in the JSON attachments field.
+    attachmentUrl = serializers.CharField(
+        source='attachment_url', required=False, allow_blank=True, default='',
+        max_length=22 * 1024 * 1024,
+    )
     attachments = serializers.JSONField(required=False, default=list)
     schoolId = serializers.PrimaryKeyRelatedField(
         source='school', queryset=School.objects.all(), required=False,
@@ -249,6 +255,13 @@ class HomeworkSerializer(TenantCreateSerializer):
         if obj.created_at:
             return obj.created_at.date().isoformat()
         return None
+
+    def validate_attachmentUrl(self, value):
+        # `attachment_url` is a 500-character compatibility field. Base64 file
+        # data belongs only in `attachments`; do not pass it to the DB column.
+        if len(value) > 500:
+            return ''
+        return value
 
     teacherId = serializers.PrimaryKeyRelatedField(
         source='teacher', queryset=Teacher.objects.all(), required=False, allow_null=True

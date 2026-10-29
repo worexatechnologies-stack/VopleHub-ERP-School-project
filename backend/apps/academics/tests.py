@@ -593,3 +593,29 @@ class HomeworkNotificationFanoutTests(TestCase):
             self.assertNotIn('studentIds', call.kwargs['related'])
             self.assertEqual(call.kwargs['related']['targetClass'], 'all')
             self.assertEqual(len(call.kwargs['recipient_ids']), 1)
+
+    @patch('apps.notifications.tasks.fanout_notification_task.delay')
+    def test_create_homework_keeps_base64_file_in_attachments_not_legacy_url(self, fanout):
+        attachment = {
+            'name': 'worksheet.png',
+            'type': 'image/png',
+            'size': 480,
+            'url': f'data:image/png;base64,{"a" * 600}',
+        }
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post('/api/v1/homework/', {
+                'title': 'Worksheet Homework',
+                'description': 'Complete the attached worksheet.',
+                'className': 'Grade 8',
+                'sectionName': 'A',
+                'subjectName': 'Mathematics',
+                'dueDate': '2026-11-30',
+                'attachmentName': attachment['name'],
+                'attachmentUrl': attachment['url'],
+                'attachments': [attachment],
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.data)
+        homework = Homework.objects.get(school=self.school, title='Worksheet Homework')
+        self.assertEqual(homework.attachment_url, '')
+        self.assertEqual(homework.attachments, [attachment])
