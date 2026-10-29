@@ -358,6 +358,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
   const [submitModalHw, setSubmitModalHw] = useState<HomeworkRecord | null>(null);
   const [submitChildId, setSubmitChildId] = useState<string>('');
   const [submissionText, setSubmissionText] = useState('');
+  const [submitError, setSubmitError] = useState('');
 
   // File Upload States
   const [formAttachments, setFormAttachments] = useState<HomeworkAttachment[]>([]);
@@ -546,14 +547,37 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
   // File Upload Handlers
   const handleUploadFiles = async (files: File[], target: 'form' | 'submit') => {
     if (!files || files.length === 0) return;
+    const existing = target === 'submit' ? submitAttachments : formAttachments;
+    const allowedExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt']);
+    const validFiles: File[] = [];
+    for (const file of files) {
+      const extension = `.${file.name.split('.').pop()?.toLowerCase() || ''}`;
+      if (!allowedExtensions.has(extension)) {
+        alert(`"${file.name}" is not a supported file. Choose a JPG, PNG, WEBP, PDF, Word, Excel, or text file.`);
+        continue;
+      }
+      if (file.size > 15 * 1024 * 1024) {
+        alert(`File "${file.name}" is larger than 15 MB. Choose a smaller file.`);
+        continue;
+      }
+      validFiles.push(file);
+    }
+    if (!validFiles.length) return;
+    if (existing.length + validFiles.length > 10) {
+      alert('You can attach up to 10 files at a time. Remove a file before adding more.');
+      return;
+    }
+    const attachedBytes = existing.reduce((total, attachment) => total + (attachment.size ?? 0), 0);
+    const addedBytes = validFiles.reduce((total, file) => total + file.size, 0);
+    if (attachedBytes + addedBytes > 30 * 1024 * 1024) {
+      alert('Your files are larger than the 30 MB total limit. Remove a file or choose smaller ones.');
+      return;
+    }
     setIsProcessingUpload(true);
+    if (target === 'submit') setSubmitError('');
     try {
       const uploaded: HomeworkAttachment[] = [];
-      for (const file of files) {
-        if (file.size > 15 * 1024 * 1024) {
-          alert(`File "${file.name}" exceeds the 15MB size limit. Please upload a smaller file.`);
-          continue;
-        }
+      for (const file of validFiles) {
         const att = await readFileAsAttachment(file);
         uploaded.push(att);
       }
@@ -720,6 +744,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
     setSubmitModalHw(hw);
     setSubmissionText('');
     setSubmitAttachments([]);
+    setSubmitError('');
     if (isParent) {
       const child = targetStudent || activeChild || parentChildren[0];
       setSubmitChildId(child ? child.id : '');
@@ -768,10 +793,11 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       setSubmitModalHw(null);
       setSubmissionText('');
       setSubmitAttachments([]);
+      setSubmitError('');
       refetch();
     } catch (err) {
       console.error('Failed to submit homework:', err);
-      alert('Failed to submit homework. Please try again.');
+      setSubmitError(getErrorMessage(err, 'We could not send your homework. Please check your connection and try again.'));
     }
   };
 
@@ -2409,7 +2435,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
                       ref={submitFileInputRef}
                       type="file"
                       multiple
-                      accept="image/*,application/pdf,.doc,.docx"
+                      accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.pdf,.doc,.docx,.xls,.xlsx,.txt"
                       className="hidden"
                       onChange={(e) => {
                         if (e.target.files && e.target.files.length > 0) {
@@ -2428,6 +2454,7 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
                   </div>
 
                   {/* Attached submission files list */}
+                  {submitError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs font-semibold text-rose-800">{submitError}</div>}
                   {submitAttachments.length > 0 && (
                     <div className="space-y-1.5 pt-1">
                       <div className="flex items-center justify-between text-[11px] font-bold text-slate-500 px-1">

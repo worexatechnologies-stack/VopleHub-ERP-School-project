@@ -790,7 +790,7 @@ export default function AdmissionsModule({
         >
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-              Active 24h Links
+              Active Links
             </span>
             <span className="p-2 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-100">
               <LinkIcon className="w-4 h-4" />
@@ -802,7 +802,7 @@ export default function AdmissionsModule({
               ⏱ 24-Hr Window
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-1">Shareable candidate portals</p>
+          <p className="text-[11px] text-slate-400 mt-1">Links that can be used right now</p>
         </div>
       </div>
 
@@ -841,7 +841,7 @@ export default function AdmissionsModule({
             }`}
           >
             <LinkIcon className="w-4 h-4" />
-            <span>24-Hour Self-Enrollment Links</span>
+            <span>All Self-Enrollment Links</span>
             <span
               className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
                 activeTab === 'links' ? 'bg-indigo-700 text-indigo-100' : 'bg-slate-200 text-slate-700'

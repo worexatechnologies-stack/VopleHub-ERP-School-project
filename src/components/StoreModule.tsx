@@ -296,6 +296,16 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
           {isAdmin && (
             <button
               type="button"
+              onClick={() => { setActiveView('inventory'); resetProductForm(); }}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-3.5 text-xs font-black text-white shadow-sm transition hover:bg-indigo-700"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Add store item</span>
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              type="button"
               onClick={handleExportToExcel}
               title="Export complete store orders ledger, sales tally, and stock inventory to Excel (.xlsx)"
               className="inline-flex h-10 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 text-xs font-bold text-emerald-800 shadow-xs transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95 cursor-pointer"
@@ -401,7 +411,7 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
       </section>}
 
       {activeView === 'store' && <div>
-          {isLoading ? <div className="portal-card p-10 text-center text-sm font-semibold text-slate-400">Loading store items...</div> : productGroups.length === 0 ? <div className="portal-card p-10 text-center text-sm font-semibold text-slate-400">No store items are available yet.</div> : <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{productGroups.map(({ key, product, variants }) => {
+          {isLoading ? <div className="portal-card p-10 text-center text-sm font-semibold text-slate-400">Loading store items...</div> : productGroups.length === 0 ? <div className="portal-card flex flex-col items-center gap-3 p-10 text-center"><Package className="h-10 w-10 text-indigo-300" /><p className="text-sm font-semibold text-slate-500">No store items are available yet.</p>{isAdmin && <button type="button" onClick={() => { setActiveView('inventory'); resetProductForm(); }} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-black text-white hover:bg-indigo-700"><Plus className="h-4 w-4" />Add the first item</button>}</div> : <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{productGroups.map(({ key, product, variants }) => {
             const tone = getStoreItemTone(product.name, product.category);
             const selected = variants.find((variant) => variant.id === selectedVariants[key]) || variants.find((variant) => variant.availableStock > 0) || variants[0];
             const inCart = cart[selected.id] || 0;
