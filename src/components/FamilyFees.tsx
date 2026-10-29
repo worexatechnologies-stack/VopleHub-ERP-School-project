@@ -80,14 +80,11 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
 
   const loadStudentSummaries = async (wardsList: { id: string | number }[]) => {
     if (!wardsList || wardsList.length === 0) return;
-    const summariesMap: Record<string, StudentFeeSummaryResponse> = {};
-    for (const w of wardsList) {
-      if (!w.id) continue;
-      const s = await fetchStudentFeeSummaryFromDB(w.id);
-      if (s) {
-        summariesMap[String(w.id)] = s;
-      }
-    }
+    const entries = await Promise.all(wardsList.filter((ward) => ward.id).map(async (ward) => {
+      const summary = await fetchStudentFeeSummaryFromDB(ward.id);
+      return summary ? [String(ward.id), summary] as const : null;
+    }));
+    const summariesMap = Object.fromEntries(entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null));
     setDbSummaries((prev) => ({ ...prev, ...summariesMap }));
   };
 
@@ -213,11 +210,22 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
         }
       }
     };
+    const refreshSummaries = () => {
+      if (document.visibilityState === 'visible' && apiWards.length > 0) {
+        void loadStudentSummaries(apiWards);
+      }
+    };
+    const refreshTimer = window.setInterval(refreshSummaries, 30000);
     window.addEventListener('storage', handleSync);
     window.addEventListener('erp_fees_updated', handleSync);
+    window.addEventListener('focus', refreshSummaries);
+    document.addEventListener('visibilitychange', refreshSummaries);
     return () => {
+      window.clearInterval(refreshTimer);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('erp_fees_updated', handleSync);
+      window.removeEventListener('focus', refreshSummaries);
+      document.removeEventListener('visibilitychange', refreshSummaries);
     };
   }, [apiWards, studentRecords]);
 
@@ -502,32 +510,39 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
     setIsProcessingPayment(true);
 
     try {
-      const receiptNo = `RCPT-2026-${Math.floor(Math.random() * 899 + 100)}`;
       const gatewayName = selectedGateway === 'Card' ? 'Credit/Debit Card' : (selectedGateway === 'NetBanking' ? 'Net Banking' : selectedGateway);
-      const newPayment: StudentPayment = {
-        id: `p-online-${Date.now()}`,
-        paymentDate: new Date().toISOString().split('T')[0],
-        amountPaid: amount,
-        paymentMethod: gatewayName,
-        transactionId: `TXN-UPI-${Math.floor(Math.random() * 89999 + 10000)}`,
-        receiptNo,
-        category: selectedQuarter ? selectedQuarter.name : 'School Fee Payment',
-        installmentType: selectedQuarter ? selectedQuarter.quarter : 'Custom',
-      };
-
-      // Direct backend DB transaction
       const dbResult = await recordStudentPaymentInDB({
         studentId: selectedPayWard.id,
         amountPaid: amount,
         paymentMethod: gatewayName,
-        category: newPayment.category,
-        installmentType: newPayment.installmentType,
+        category: selectedQuarter ? selectedQuarter.name : 'School Fee Payment',
+        installmentType: selectedQuarter ? selectedQuarter.quarter : 'Custom',
         quarterId: selectedQuarter?.id ? Number(selectedQuarter.id) : undefined,
       });
 
-      if (dbResult && dbResult.summary) {
-        setDbSummaries((prev) => ({ ...prev, [String(selectedPayWard.id)]: dbResult.summary }));
+      if (!dbResult?.summary || !dbResult.payment) {
+        alert('No payment was processed or recorded. Online fee checkout is not connected for this school. Please contact the school office to confirm or record your payment.');
+        return;
       }
+
+      const savedPayment = dbResult.summary.payments.find(
+        (payment) => String(payment.id) === String(dbResult.payment.id)
+      ) || dbResult.summary.payments[0];
+      if (!savedPayment) {
+        alert('The payment could not be verified. Please contact the school office before trying again.');
+        return;
+      }
+      const newPayment: StudentPayment = {
+        id: `p-${savedPayment.id}`,
+        paymentDate: savedPayment.paymentDate,
+        amountPaid: savedPayment.amountPaid,
+        paymentMethod: savedPayment.paymentMethod as any,
+        transactionId: savedPayment.transactionId,
+        receiptNo: savedPayment.receiptNo,
+        category: savedPayment.category,
+        installmentType: savedPayment.installmentType,
+      };
+      setDbSummaries((prev) => ({ ...prev, [String(selectedPayWard.id)]: dbResult.summary }));
 
       // Update student record in localStorage
       const saved = localStorage.getItem('erp_individual_fees');
@@ -569,12 +584,11 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
       setStudentRecords(updatedRecords);
       localStorage.setItem('erp_individual_fees', JSON.stringify(updatedRecords));
 
-      setIsProcessingPayment(false);
       setIsPayModalOpen(false);
 
       emitNotification({
         title: 'Payment Successful',
-        message: `Online payment of ₹${amount.toLocaleString('en-IN')} for ${selectedPayWard.name} recorded. Receipt: ${receiptNo}`,
+        message: `Payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} for ${selectedPayWard.name} was recorded. Receipt: ${newPayment.receiptNo}`,
         tone: 'success',
         source: 'fees',
       });
@@ -585,11 +599,12 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
 
       window.dispatchEvent(new Event('erp_fees_updated'));
 
-      alert(`Payment of ₹${amount.toLocaleString('en-IN')} successfully processed and stored in database!\nReceipt No: ${receiptNo}`);
+      alert(`Payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} was recorded.\nReceipt No: ${newPayment.receiptNo}`);
     } catch (err) {
-      setIsProcessingPayment(false);
       console.error('Payment processing failed:', err);
-      alert('Payment could not be processed. Please try again.');
+      alert('Payment was not confirmed or recorded. Please contact the school office before retrying.');
+    } finally {
+      setIsProcessingPayment(false);
     }
   };
 

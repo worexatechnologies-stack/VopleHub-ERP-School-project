@@ -578,6 +578,7 @@ export default function FeesModule({
 
   // Fee Structure Creator Modal State
   const [isStructureModalOpen, setIsStructureModalOpen] = useState(false);
+  const [isSavingStructure, setIsSavingStructure] = useState(false);
   const [editingStructureId, setEditingStructureId] = useState<string | null>(null);
   const [structureForm, setStructureForm] = useState<{
     name: string;
@@ -649,6 +650,7 @@ export default function FeesModule({
   // Save structure and assign to matching student records
   const handleSaveStructure = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingStructure) return;
     if (!structureForm.name.trim()) {
       alert('Please enter a structure name.');
       return;
@@ -672,68 +674,40 @@ export default function FeesModule({
       quarters: structureForm.quarters,
     };
 
-    let dbSaved: any = null;
-    if (editingStructureId && !editingStructureId.startsWith('fs-')) {
-      dbSaved = await updateFeeStructureInDB(editingStructureId, payload);
-    } else {
-      dbSaved = await createFeeStructureInDB(payload);
-    }
+    setIsSavingStructure(true);
+    try {
+      const dbSaved: any = editingStructureId && !editingStructureId.startsWith('fs-')
+        ? await updateFeeStructureInDB(editingStructureId, payload)
+        : await createFeeStructureInDB(payload);
 
-    // Refresh DB fee structures
-    const dbStructures = await fetchFeeStructuresFromDB();
-    if (Array.isArray(dbStructures) && dbStructures.length > 0) {
-      const formatted: FeeStructure[] = dbStructures.map((s) => ({
-        id: String(s.id),
-        name: s.name,
-        academicYear: s.academic_year,
-        academicYearId: s.academic_year_id,
-        level: s.level as any,
-        targetClass: s.target_class || undefined,
-        targetClassId: s.target_class_id || undefined,
-        targetSection: s.target_section || undefined,
-        targetSectionId: s.target_section_id || undefined,
-        targetStudentId: s.target_student_id || undefined,
-        items: s.items || [],
-        quarters: s.quarters || (s.quarter_records ? s.quarter_records.map((q: any) => ({
-          id: q.id,
-          quarter: q.quarter_code || `Q${q.quarter_number}`,
-          name: q.quarter_name,
-          amount: Number(q.assigned_amount),
-          paidAmount: Number(q.paid_amount),
-          remainingAmount: Number(q.remaining_amount),
-          paymentStatus: q.payment_status,
-          dueDate: q.due_date || ''
-        })) : []),
-      }));
-      setStructures(formatted);
-      localStorage.setItem('erp_fee_structures', JSON.stringify(formatted));
-    } else {
-      let updatedStructures: FeeStructure[];
-      const newId = (dbSaved && dbSaved.id) ? String(dbSaved.id) : (editingStructureId || `fs-${Date.now()}`);
-      const newStructure: FeeStructure = {
-        id: newId,
-        name: structureForm.name,
-        academicYear: structureForm.academicYear,
-        academicYearId: structureForm.academicYearId,
-        level: structureForm.level,
-        targetClass: structureForm.targetClass,
-        targetClassId: structureForm.targetClassId,
-        targetSection: structureForm.targetSection,
-        targetSectionId: structureForm.targetSectionId,
-        targetStudentId: structureForm.targetStudentId,
-        items: structureForm.items,
-        quarters: dbSaved?.quarters || structureForm.quarters,
-      };
-
-      if (editingStructureId) {
-        updatedStructures = structures.map((s) => (s.id === editingStructureId ? newStructure : s));
-      } else {
-        updatedStructures = [newStructure, ...structures];
+      if (!dbSaved) {
+        alert('Could not save the fee structure. Please check your connection and try again.');
+        return;
       }
 
-      setStructures(updatedStructures);
-      localStorage.setItem('erp_fee_structures', JSON.stringify(updatedStructures));
-    }
+      // Use the saved response immediately. The server queues class assignment
+      // work in the background, so a full list refetch here only delays the UI.
+      const newStructure: FeeStructure = {
+        id: String(dbSaved.id),
+        name: dbSaved.name || structureForm.name,
+        academicYear: dbSaved.academic_year || structureForm.academicYear,
+        academicYearId: dbSaved.academic_year_id || structureForm.academicYearId,
+        level: (dbSaved.level || structureForm.level) as any,
+        targetClass: dbSaved.target_class || structureForm.targetClass,
+        targetClassId: dbSaved.target_class_id || structureForm.targetClassId,
+        targetSection: dbSaved.target_section || structureForm.targetSection,
+        targetSectionId: dbSaved.target_section_id || structureForm.targetSectionId,
+        targetStudentId: dbSaved.target_student_id || structureForm.targetStudentId,
+        items: dbSaved.items || structureForm.items,
+        quarters: dbSaved.quarters || structureForm.quarters,
+      };
+      setStructures((current) => {
+        const next = current.some((item) => item.id === newStructure.id)
+          ? current.map((item) => item.id === newStructure.id ? newStructure : item)
+          : [newStructure, ...current];
+        localStorage.setItem('erp_fee_structures', JSON.stringify(next));
+        return next;
+      });
 
     // Auto assign/update corresponding student records
     setStudentRecords((current) =>
@@ -770,13 +744,16 @@ export default function FeesModule({
     onAddLog(`[Fees Management] Created/Updated fee structure "${structureForm.name}" with total ₹${structureFormTotal.toLocaleString('en-IN')}`);
     emitNotification({
       title: 'Fee Structure Saved',
-      message: `Fee structure "${structureForm.name}" (Total: ₹${structureFormTotal.toLocaleString('en-IN')}) assigned to students and stored in database.`,
+      message: `Fee structure "${structureForm.name}" (Total: ₹${structureFormTotal.toLocaleString('en-IN')}) saved. Student fee records are syncing in the background.`,
       tone: 'success',
       source: 'fees',
     });
 
     window.dispatchEvent(new Event('erp_fees_updated'));
     setIsStructureModalOpen(false);
+    } finally {
+      setIsSavingStructure(false);
+    }
   };
 
   // Delete structure
@@ -996,20 +973,10 @@ export default function FeesModule({
       const payDate = paymentDateInput || new Date().toISOString().split('T')[0];
       const category = paymentCategoryInput || cashCategoryInput || 'Tuition Fee';
 
-      const newPayment: StudentPayment = {
-        id: `p-${Date.now()}`,
-        paymentDate: payDate,
-        amountPaid: amount,
-        paymentMethod: txnMethod as any,
-        transactionId: txnId,
-        receiptNo,
-        category,
-        installmentType: `${txnMethod} Payment`,
-      };
-
       // Persist to backend PostgreSQL DB
+      let paymentResult: any = null;
       if (selectedRecord.studentId) {
-        await recordStudentPaymentInDB({
+        paymentResult = await recordStudentPaymentInDB({
           studentId: selectedRecord.studentId,
           amountPaid: amount,
           paymentMethod: txnMethod,
@@ -1017,13 +984,32 @@ export default function FeesModule({
           installmentType: `${txnMethod} Payment`,
         });
       } else if (selectedRecord.id && !isNaN(Number(selectedRecord.id))) {
-        await recordFeePaymentInDB(Number(selectedRecord.id), {
+        paymentResult = await recordFeePaymentInDB(Number(selectedRecord.id), {
           amount_paid: amount,
           payment_method: txnMethod,
           category,
           installment_type: `${txnMethod} Payment`,
         });
       }
+      if (!paymentResult?.payment || !paymentResult?.summary) {
+        throw new Error('The server did not confirm this payment. No payment was recorded.');
+      }
+      const persistedPayment = paymentResult.summary.payments.find(
+        (payment: any) => String(payment.id) === String(paymentResult.payment.id)
+      ) || paymentResult.summary.payments[0];
+      if (!persistedPayment) {
+        throw new Error('The server saved no payment receipt. Please check the fee record before retrying.');
+      }
+      const newPayment: StudentPayment = {
+        id: `p-${persistedPayment.id}`,
+        paymentDate: persistedPayment.paymentDate || payDate,
+        amountPaid: Number(persistedPayment.amountPaid ?? amount),
+        paymentMethod: (persistedPayment.paymentMethod || txnMethod) as any,
+        transactionId: persistedPayment.transactionId || txnId,
+        receiptNo: persistedPayment.receiptNo || receiptNo,
+        category: persistedPayment.category || category,
+        installmentType: persistedPayment.installmentType || `${txnMethod} Payment`,
+      };
 
       const updated = studentRecords.map((r) => {
         if (r.studentId === selectedRecord.studentId) {
@@ -1041,10 +1027,10 @@ export default function FeesModule({
       setSelectedRecord(newRecord);
       setIsCashPaymentModalOpen(false);
 
-      onAddLog(`[Fees Collection] Recorded ${txnMethod} payment of ₹${amount.toLocaleString('en-IN')} for ${selectedRecord.studentName}. Receipt: ${receiptNo}`);
+      onAddLog(`[Fees Collection] Recorded ${txnMethod} payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} for ${selectedRecord.studentName}. Receipt: ${newPayment.receiptNo}`);
       emitNotification({
         title: 'Payment Saved to Database',
-        message: `Recorded ${txnMethod} payment of ₹${amount.toLocaleString('en-IN')} from ${selectedRecord.studentName}. Receipt: ${receiptNo}`,
+        message: `Recorded ${txnMethod} payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} from ${selectedRecord.studentName}. Receipt: ${newPayment.receiptNo}`,
         tone: 'success',
         source: 'fees',
       });
@@ -1713,7 +1699,6 @@ export default function FeesModule({
   const [paymentOption, setPaymentOption] = useState<'full' | 'half' | 'quarter' | 'custom'>('full');
   const [customAmountInput, setCustomAmountInput] = useState<number>(10000);
   const [selectedGateway, setSelectedGateway] = useState<'UPI' | 'Razorpay' | 'Card' | 'NetBanking'>('UPI');
-  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
   // Compute payment payable amount based on selection
   const selectedPayableAmount = useMemo(() => {
@@ -1737,48 +1722,7 @@ export default function FeesModule({
       alert('Your fee balance is already paid in full!');
       return;
     }
-
-    setIsProcessingPayment(true);
-
-    setTimeout(() => {
-      const receiptNo = `RCPT-2026-${Math.floor(Math.random() * 899 + 100)}`;
-      const gatewayName = selectedGateway === 'Card' ? 'Credit/Debit Card' : (selectedGateway === 'NetBanking' ? 'Net Banking' : selectedGateway);
-      const newPayment: StudentPayment = {
-        id: `p-online-${Date.now()}`,
-        paymentDate: new Date().toISOString().split('T')[0],
-        amountPaid: selectedPayableAmount,
-        paymentMethod: gatewayName as any,
-        transactionId: `TXN-ONLINE-${Math.floor(Math.random() * 89999 + 10000)}`,
-        receiptNo,
-        category: 'Tuition & Academic Fees',
-        installmentType: paymentOption.toUpperCase(),
-      };
-
-      const updated = studentRecords.map((r) => {
-        if (r.studentId === activeStudentFeeRecord.studentId) {
-          return {
-            ...r,
-            paymentHistory: [newPayment, ...r.paymentHistory],
-          };
-        }
-        return r;
-      });
-
-      setStudentRecords(updated);
-      setIsProcessingPayment(false);
-
-      onAddLog(`[Fees Checkout] ONLINE PAYMENT SUCCESS: Received ₹${selectedPayableAmount.toLocaleString('en-IN')} from ${activeStudentFeeRecord.studentName} via ${selectedGateway}. Receipt: ${receiptNo}`);
-      emitNotification({
-        title: 'Payment Successful',
-        message: `₹${selectedPayableAmount.toLocaleString('en-IN')} paid successfully via ${selectedGateway}. Receipt No: ${receiptNo}`,
-        tone: 'success',
-        source: 'fees',
-      });
-
-      // Auto view receipt
-      setViewingReceipt(newPayment);
-      setViewingReceiptRecord(updated.find((r) => r.studentId === activeStudentFeeRecord.studentId) || activeStudentFeeRecord);
-    }, 1200);
+    alert(`Online fee checkout is not connected for this school. No payment was charged or recorded. Please contact the school office to arrange payment by ${selectedGateway}.`);
   };
 
   // =========================================================================
@@ -2116,19 +2060,11 @@ export default function FeesModule({
 
                     <button
                       type="button"
-                      disabled={isProcessingPayment || selectedPayableAmount <= 0}
+                      disabled={selectedPayableAmount <= 0}
                       onClick={handleStudentPayNow}
                       className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-black text-sm rounded-xl shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2"
                     >
-                      {isProcessingPayment ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" /> Processing Payment...
-                        </>
-                      ) : (
-                        <>
-                          Pay ₹{selectedPayableAmount.toLocaleString('en-IN')} Now <ArrowRight className="w-4 h-4" />
-                        </>
-                      )}
+                      Pay ₹{selectedPayableAmount.toLocaleString('en-IN')} Now <ArrowRight className="w-4 h-4" />
                     </button>
                   </div>
                 </>
@@ -4058,9 +3994,10 @@ export default function FeesModule({
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingStructure}
                   className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold rounded-xl shadow-xs cursor-pointer"
                 >
-                  Save & Assign Structure
+                  {isSavingStructure ? 'Saving fee structure…' : 'Save & Assign Structure'}
                 </button>
               </div>
             </div>

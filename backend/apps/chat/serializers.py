@@ -253,6 +253,16 @@ class ConversationSerializer(serializers.ModelSerializer):
 
     def get_lastMessage(self, obj) -> dict | None:
         request = self.context.get('request')
+        if hasattr(obj, 'last_message_id_for_request'):
+            if not obj.last_message_id_for_request:
+                return None
+            last_msg = getattr(obj, '_last_message_for_request', None)
+            if last_msg is None:
+                last_msg = DirectMessage.objects.filter(
+                    pk=obj.last_message_id_for_request
+                ).select_related('sender', 'recipient').prefetch_related('attachments').first()
+            return DirectMessageSerializer(last_msg, context=self.context).data if last_msg else None
+
         # Optimized: check prefetched messages first
         if hasattr(obj, '_prefetched_objects_cache') and 'messages' in obj._prefetched_objects_cache:
             all_msgs = obj.messages.all()
@@ -269,6 +279,8 @@ class ConversationSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request or not request.user:
             return 0
+        if hasattr(obj, 'unread_count_for_request'):
+            return obj.unread_count_for_request
         user_id = request.user.id
 
         # Use prefetched messages if available
@@ -281,12 +293,14 @@ class ConversationSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request or not request.user:
             return False
-        p = obj.participants.filter(user_id=request.user.id).first()
+        participants = getattr(obj, '_prefetched_objects_cache', {}).get('participants')
+        p = next((participant for participant in participants if participant.user_id == request.user.id), None) if participants is not None else obj.participants.filter(user_id=request.user.id).first()
         return bool(p and p.is_muted)
 
     def get_isArchived(self, obj) -> bool:
         request = self.context.get('request')
         if not request or not request.user:
             return False
-        p = obj.participants.filter(user_id=request.user.id).first()
+        participants = getattr(obj, '_prefetched_objects_cache', {}).get('participants')
+        p = next((participant for participant in participants if participant.user_id == request.user.id), None) if participants is not None else obj.participants.filter(user_id=request.user.id).first()
         return bool(p and p.is_archived)

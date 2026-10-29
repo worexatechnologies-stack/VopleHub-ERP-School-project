@@ -10,6 +10,7 @@ from apps.sis.models import Student
 from apps.sis.access import teacher_student_queryset
 from apps.accounts.models import User
 from apps.academics.models import Subject
+from apps.staff.models import Teacher
 from apps.timetable.models import TimetableSlot
 from apps.common.tenancy import TenantScopedViewSet
 from apps.notifications.views import create_rows
@@ -76,7 +77,11 @@ def check_teacher_period_permission(user, student, attendance_date, period, subj
         return False, None, None, None
 
     teacher = getattr(user, 'teacher_profile', None)
-    if not teacher:
+    if (
+        not teacher
+        or teacher.school_id != user.school_id
+        or teacher.status != Teacher.Status.ACTIVE
+    ):
         return False, None, None, None
 
     # Determine day of week
@@ -96,39 +101,35 @@ def check_teacher_period_permission(user, student, attendance_date, period, subj
         slot = TimetableSlot.objects.filter(
             school_id=user.school_id,
             section=student.section_record,
+            academic_year__starts_on__lte=date_obj,
+            academic_year__ends_on__gte=date_obj,
             day=day_of_week,
             period=period,
         ).order_by('-published', '-id').select_related('subject', 'teacher', 'teacher__user').first()
 
     if slot:
-        # Timetable slot exists! Verify that slot teacher matches authenticated teacher
-        if slot.teacher_id != teacher.id and user.role == User.Role.TEACHER:
+        # A timetable slot is the exact authority for a scheduled period.
+        # Neither section membership nor teaching the same subject elsewhere
+        # allows a teacher to mark another teacher's period.
+        if slot.teacher_id != teacher.id or (subject_id and str(slot.subject_id) != str(subject_id)):
             return False, slot, slot.subject, slot.teacher
         return True, slot, slot.subject, slot.teacher
 
-    # Fallback if no timetable slot configured for this day/period: verify section membership
-    permitted = teacher_student_queryset(
-        teacher,
-        Student.objects.filter(school_id=user.school_id),
-        school_id=user.school_id,
-    )
-    if not permitted.filter(pk=student.pk).exists() and user.role == User.Role.TEACHER:
+    # Without a timetable slot, only an exact teacher + section + subject
+    # assignment can authorize attendance. Section-only access is too broad.
+    if not student.section_record_id or not subject_id:
         return False, None, None, None
 
-    subj = Subject.objects.filter(school_id=user.school_id, pk=subject_id).first() if subject_id else None
-    if not subj and student.section_record and teacher:
-        from apps.staff.models import TeacherTeachingAssignment
-        assign = TeacherTeachingAssignment.objects.filter(
-            school_id=user.school_id,
-            teacher=teacher,
-            section=student.section_record,
-        ).select_related('subject').first()
-        if assign:
-            subj = assign.subject
-    if not subj and teacher:
-        subj = teacher.subject_records.first()
-
-    return True, None, subj, teacher
+    from apps.staff.models import TeacherTeachingAssignment
+    assignment = TeacherTeachingAssignment.objects.filter(
+        school_id=user.school_id,
+        teacher=teacher,
+        section_id=student.section_record_id,
+        subject_id=subject_id,
+    ).select_related('subject').first()
+    if not assignment:
+        return False, None, None, None
+    return True, None, assignment.subject, teacher
 
 
 def get_teacher_display_name(teacher):
@@ -218,7 +219,13 @@ class AttendanceViewSet(TenantScopedViewSet):
         try:
             period = int(request.data.get('period', 1))
         except (ValueError, TypeError):
-            period = 1
+            return Response({'detail': 'Enter a valid attendance period.'}, status=status.HTTP_400_BAD_REQUEST)
+        if period < 1 or period > 6:
+            return Response({'detail': 'Attendance period must be between 1 and 6.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            date_obj = datetime.strptime(attendance_date, '%Y-%m-%d').date()
+        except (TypeError, ValueError):
+            return Response({'detail': 'Enter a valid attendance date.'}, status=status.HTTP_400_BAD_REQUEST)
         attendance_status = request.data.get('status')
         subject_id = request.data.get('subjectId')
         reason = request.data.get('reason', '')
@@ -242,19 +249,13 @@ class AttendanceViewSet(TenantScopedViewSet):
             user, student, attendance_date, period, subject_id
         )
         if not allowed:
-            assigned_name = get_teacher_display_name(slot.teacher) if slot and slot.teacher else 'another teacher'
-            subj_name = slot.subject.name if slot and slot.subject else 'this subject'
             return Response(
-                {'detail': f'You are not authorized to mark attendance for {assigned_name}\'s {subj_name} class in Period {period}.'},
+                {'detail': 'You can mark attendance only for your assigned subject periods. No changes were saved.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
         # Calculate weekday string
-        try:
-            date_obj = datetime.strptime(attendance_date, '%Y-%m-%d').date()
-            day_str = date_obj.strftime('%A')
-        except Exception:
-            day_str = ''
+        day_str = date_obj.strftime('%A')
 
         # 3. Capture old status for Audit Trail
         existing_record = AttendanceRecord.objects.filter(student=student, date=attendance_date, period=period).first()
@@ -356,8 +357,8 @@ class AttendanceViewSet(TenantScopedViewSet):
         try:
             date_obj = datetime.strptime(attendance_date, '%Y-%m-%d').date()
             day_str = date_obj.strftime('%A')
-        except Exception:
-            day_str = ''
+        except (TypeError, ValueError):
+            return Response({'detail': 'Enter a valid attendance date.'}, status=status.HTTP_400_BAD_REQUEST)
 
         student_ids = data.get('studentIds') or []
         periods = data.get('periods') or [1, 2, 3, 4, 5, 6]
@@ -374,27 +375,77 @@ class AttendanceViewSet(TenantScopedViewSet):
         else:
             return Response({'detail': 'studentIds or items required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        unique_student_ids = list({int(it['studentId']) for it in work_items if it.get('studentId')})
+        try:
+            normalized_items = []
+            seen_slots = set()
+            for item in work_items:
+                student_id = int(item.get('studentId'))
+                period = int(item.get('period', 1))
+                attendance_status = item.get('status', AttendanceRecord.Status.PRESENT)
+                if period < 1 or period > 6:
+                    raise ValueError
+                if attendance_status not in AttendanceRecord.Status.values:
+                    return Response(
+                        {'detail': f'status must be one of {list(AttendanceRecord.Status.values)}.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                key = (student_id, period)
+                if key in seen_slots:
+                    return Response({'detail': 'Each student period can appear only once.'}, status=status.HTTP_400_BAD_REQUEST)
+                seen_slots.add(key)
+                normalized_items.append({
+                    'studentId': student_id,
+                    'period': period,
+                    'status': attendance_status,
+                    'subjectId': item.get('subjectId'),
+                })
+        except (TypeError, ValueError, AttributeError):
+            return Response({'detail': 'Provide a valid student and period for each attendance item.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not normalized_items:
+            return Response({'detail': 'Provide at least one attendance item.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        unique_student_ids = list({it['studentId'] for it in normalized_items})
         students_by_id = {
             s.id: s for s in Student.objects.filter(school_id=user.school_id, id__in=unique_student_ids).select_related('section_record')
         }
 
+        if len(students_by_id) != len(unique_student_ids):
+            return Response({'detail': 'One or more students could not be found in your school. No changes were saved.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate the whole batch before writing any records. A mixed batch
+        # must not partially mark periods assigned to other teachers.
+        for item in normalized_items:
+            student = students_by_id[item['studentId']]
+            allowed, _slot, _subject, _subject_teacher = check_teacher_period_permission(
+                user, student, attendance_date, item['period'], item['subjectId']
+            )
+            if not allowed:
+                return Response(
+                    {'detail': 'You can mark attendance only for your assigned subject periods. No changes were saved.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
         updated_count = 0
         attendance_notifications = {}
         with transaction.atomic():
-            for it in work_items:
-                s_id = int(it.get('studentId'))
-                p = int(it.get('period', 1))
-                st = it.get('status', AttendanceRecord.Status.PRESENT)
+            for it in normalized_items:
+                s_id = it['studentId']
+                p = it['period']
+                st = it['status']
                 student = students_by_id.get(s_id)
-                if not student:
-                    continue
 
                 allowed, slot, subject, subject_teacher = check_teacher_period_permission(
-                    user, student, attendance_date, p, it.get('subjectId')
+                    user, student, attendance_date, p, it['subjectId']
                 )
+                # Recheck inside the write transaction in case the timetable
+                # assignment changed after batch validation.
                 if not allowed:
-                    continue
+                    transaction.set_rollback(True)
+                    return Response(
+                        {'detail': 'Your timetable assignment changed. No changes were saved; refresh and try again.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
                 final_subject = subject or (slot.subject if slot else None)
                 final_teacher = subject_teacher or (slot.teacher if slot else getattr(user, 'teacher_profile', None))
@@ -553,12 +604,16 @@ class AttendanceViewSet(TenantScopedViewSet):
             slots = TimetableSlot.objects.filter(
                 school_id=user.school_id,
                 section=students_qs.first().section_record,
+                academic_year__starts_on__lte=date_obj,
+                academic_year__ends_on__gte=date_obj,
                 day=day_of_week,
             ).order_by('-published', '-id').select_related('subject', 'teacher', 'teacher__user')
 
             teacher_profile = getattr(user, 'teacher_profile', None)
+            processed_periods = set()
             for s in slots:
-                if s.period in period_data:
+                if s.period in period_data and s.period not in processed_periods:
+                    processed_periods.add(s.period)
                     period_data[s.period]['timeLabel'] = s.time_label or f'Period {s.period}'
                     period_data[s.period]['subjectId'] = s.subject_id
                     period_data[s.period]['subjectName'] = s.subject.name if s.subject else f'Period {s.period}'

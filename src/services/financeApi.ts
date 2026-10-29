@@ -138,7 +138,10 @@ export const fetchStudentFeeSummaryFromDB = async (
   try {
     const res = await store
       .dispatch(
-        financeApi.endpoints.getStudentFeeSummary.initiate({ studentId, academicYear })
+        financeApi.endpoints.getStudentFeeSummary.initiate(
+          { studentId, academicYear },
+          { forceRefetch: true }
+        )
       )
       .unwrap();
     return res || null;

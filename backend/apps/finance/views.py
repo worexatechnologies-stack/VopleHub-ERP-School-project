@@ -1,5 +1,6 @@
 from rest_framework import viewsets, permissions, status
 from django.conf import settings
+from django.db import transaction
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -541,97 +542,22 @@ class FeeStructureViewSet(TenantScopedViewSet):
         user = self.request.user
         school = getattr(user, 'school', None)
         instance = serializer.save(school=school) if school else serializer.save()
-        self._sync_fee_structure_to_students(instance)
+        if instance.school_id:
+            from .tasks import enqueue_fee_structure_sync
+            enqueue_fee_structure_sync(instance.pk, instance.school_id)
         if school:
             cache.delete(f"school_revenue_{school.id}_{getattr(instance, 'academic_year', '') or 'all'}")
             cache.delete(f"school_revenue_{school.id}_all")
 
     def perform_update(self, serializer):
         instance = serializer.save()
-        self._sync_fee_structure_to_students(instance)
+        if instance.school_id:
+            from .tasks import enqueue_fee_structure_sync
+            enqueue_fee_structure_sync(instance.pk, instance.school_id)
         school_id = getattr(instance, 'school_id', None)
         if school_id:
             cache.delete(f"school_revenue_{school_id}_{getattr(instance, 'academic_year', '') or 'all'}")
             cache.delete(f"school_revenue_{school_id}_all")
-
-    def _sync_fee_structure_to_students(self, instance):
-        """Syncs newly created or updated FeeStructure to all matching students in the school."""
-        try:
-            school_id = instance.school_id
-            if not school_id:
-                return
-            students_qs = Student.objects.filter(school_id=school_id)
-            if instance.level == 'class':
-                if instance.target_class_ref_id:
-                    students_qs = students_qs.filter(
-                        Q(section_record__class_room_id=instance.target_class_ref_id)
-                        | Q(class_name__iexact=instance.target_class_ref.name)
-                    )
-                elif instance.target_class:
-                    clean_cls = re.sub(r'(class|cls)', '', instance.target_class, flags=re.IGNORECASE).strip(' -_')
-                    students_qs = students_qs.filter(
-                        Q(class_name__iexact=instance.target_class) |
-                        Q(class_name__iexact=f"Class {clean_cls}") |
-                        Q(class_name__iexact=clean_cls) |
-                        Q(class_name__icontains=clean_cls)
-                    )
-            elif instance.level == 'section':
-                if instance.target_section_ref_id:
-                    students_qs = students_qs.filter(section_record_id=instance.target_section_ref_id)
-                elif instance.target_section:
-                    clean_cls = re.sub(r'(class|cls)', '', instance.target_class or '', flags=re.IGNORECASE).strip(' -_')
-                    students_qs = students_qs.filter(
-                        Q(section__iexact=instance.target_section),
-                        (Q(class_name__iexact=clean_cls) if clean_cls else Q(pk__isnull=False))
-                    )
-            elif instance.level == 'student':
-                if instance.target_student_ref_id:
-                    students_qs = students_qs.filter(pk=instance.target_student_ref_id)
-                elif instance.target_student_id:
-                    students_qs = students_qs.filter(Q(pk=instance.target_student_id) if str(instance.target_student_id).isdigit() else Q(admission_no=instance.target_student_id))
-
-            for st in students_qs:
-                rec, _ = StudentFeeRecord.objects.get_or_create(
-                    school_id=school_id,
-                    student=st,
-                    defaults={
-                        'student_id_str': str(st.id),
-                        'student_name': st.name,
-                        'admission_no': st.admission_no,
-                        'class_name': st.class_name,
-                        'section_name': st.section,
-                        'academic_year': instance.academic_year or st.academic_year or '2026-2027',
-                    }
-                )
-                summary = get_student_fee_summary(st)
-                if summary:
-                    Student.objects.filter(pk=st.pk).update(
-                        fee_total=summary.get('totalFees', 0),
-                        fee_paid=summary.get('totalPaid', 0)
-                    )
-            # Keep the sync deterministic for legacy rows that may have been
-            # created without a class/section link.
-            if instance.level == 'class' and instance.target_class_ref_id:
-                matching_students = Student.objects.filter(school_id=school_id).filter(
-                    Q(section_record__class_room_id=instance.target_class_ref_id)
-                    | Q(class_name__iexact=instance.target_class_ref.name)
-                )
-            else:
-                matching_students = Student.objects.none()
-            missing = matching_students.exclude(fee_records__school_id=school_id)
-            for st in missing:
-                StudentFeeRecord.objects.get_or_create(
-                    school_id=school_id,
-                    student=st,
-                    defaults={
-                        'student_id_str': str(st.id), 'student_name': st.name,
-                        'admission_no': st.admission_no, 'class_name': st.class_name,
-                        'section_name': st.section, 'academic_year': st.academic_year or '2026-2027',
-                    },
-                )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Failed to auto-sync fee structure to students: %s", e)
 
     @action(detail=False, methods=['get'], url_path='resolve')
     def resolve(self, request):
@@ -978,6 +904,7 @@ class FeeStructureViewSet(TenantScopedViewSet):
         return Response(response_data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], url_path='record-student-payment')
+    @transaction.atomic
     def record_student_payment(self, request):
         """Records an actual payment transaction in the database for a student."""
         user = request.user
@@ -1076,6 +1003,37 @@ class FeeStructureViewSet(TenantScopedViewSet):
         fee_rec.save()
 
         summary = get_student_fee_summary(student)
+
+        try:
+            from apps.notifications.services import notify_school_admins, notify_student_and_parents
+            notify_student_and_parents(
+                student,
+                title='Fee Payment Recorded',
+                body=f'₹{amount_paid} fee payment recorded for {student.name}. Receipt: {payment_obj.receipt_no}.',
+                category='Finance',
+                channel='fee-alert',
+                sender=user,
+                related={
+                    'receiptNo': payment_obj.receipt_no,
+                    'amount': float(payment_obj.amount_paid),
+                    'paymentMethod': payment_obj.payment_method,
+                    'studentId': student.id,
+                },
+            )
+            notify_school_admins(
+                student.school,
+                title='Fee Collection Recorded',
+                body=f'₹{amount_paid} received for {student.name} ({student.class_name}-{student.section}). Receipt: {payment_obj.receipt_no}.',
+                category='Finance',
+                channel='fee-alert',
+                sender=user,
+                related={
+                    'receiptNo': payment_obj.receipt_no,
+                    'amount': float(payment_obj.amount_paid),
+                },
+            )
+        except Exception:
+            pass
 
         if student.school_id:
             cache.delete(f"school_revenue_{student.school_id}_{student.academic_year or 'all'}")
@@ -1293,6 +1251,7 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
         return Response({'status': 'success', 'created_count': created}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='record-payment')
+    @transaction.atomic
     def record_payment(self, request, pk=None):
         record = self.get_object()
         amount_paid = request.data.get('amount_paid')
@@ -1329,7 +1288,10 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
 
         quarter_obj = None
         if quarter_id and str(quarter_id).isdigit():
-            quarter_obj = FeeQuarter.objects.filter(pk=quarter_id, school_id=record.school_id).first()
+            quarter_obj = FeeQuarter.objects.filter(
+                pk=quarter_id,
+                fee_structure__school_id=record.school_id,
+            ).first()
 
         # Create FeePayment instance
         payment_obj = FeePayment.objects.create(
@@ -1381,6 +1343,16 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
             )
         except Exception:
             pass
+
+        summary = get_student_fee_summary(record.student) if record.student else None
+        if summary and record.student_id:
+            Student.objects.filter(pk=record.student_id).update(
+                fee_total=summary.get('totalFees', 0),
+                fee_paid=summary.get('totalPaid', 0),
+            )
+        if record.school_id:
+            cache.delete(f"school_revenue_{record.school_id}_{record.academic_year or 'all'}")
+            cache.delete(f"school_revenue_{record.school_id}_all")
 
         return Response({
             'message': 'Payment recorded successfully',

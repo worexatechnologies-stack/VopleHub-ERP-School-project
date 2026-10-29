@@ -228,6 +228,25 @@ const roleCopy: Record<string, { title: string; subtitle: string; channel: strin
   },
 };
 
+function getChatFailureMessage(error: any): string {
+  const status = error?.status ?? error?.originalStatus;
+  const raw = typeof error?.data === 'string'
+    ? error.data
+    : error?.data?.detail || error?.data?.message || error?.error || error?.message || '';
+  const text = typeof raw === 'string' ? raw : '';
+
+  if (
+    [520, 521, 522, 523, 524, 502, 503, 504].includes(Number(status)) ||
+    /cloudflare|origin web server|<!doctype html|<html[\s>]/i.test(text)
+  ) {
+    return 'Chat is temporarily unavailable. Please try again in a moment.';
+  }
+  if (status === 'FETCH_ERROR' || status === 'PARSING_ERROR') {
+    return 'Could not reach the chat service. Check your connection and try again.';
+  }
+  return text || 'Could not open this chat. Please try again.';
+}
+
 type BroadcastTarget = {
   endpoint: string;
   label: string;
@@ -610,6 +629,7 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
   const [notifications, setNotifications] = useState<ApiNotification[]>([]);
   const [inboxLoading, setInboxLoading] = useState(true);
   const [inboxError, setInboxError] = useState('');
+  const lastChatErrorNotificationRef = useRef<{ message: string; at: number } | null>(null);
   const [requestFilter, setRequestFilter] = useState<'all' | 'requests' | 'urgent' | 'general'>('all');
 
   // ── Teacher Leave Request Modal / Form State ──────────────────────────────
@@ -1444,13 +1464,13 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
       setChatMessages(msgs as any);
       void loadConversations();
     } catch (err: any) {
-      const detail =
-        err?.data?.detail ||
-        err?.data?.message ||
-        err?.error ||
-        err?.message ||
-        'Could not open private chat channel.';
-      emitNotification({ title: 'Chat Error', message: detail, tone: 'danger', source: 'communication' });
+      const detail = getChatFailureMessage(err);
+      const previous = lastChatErrorNotificationRef.current;
+      const now = Date.now();
+      if (!previous || previous.message !== detail || now - previous.at > 15000) {
+        lastChatErrorNotificationRef.current = { message: detail, at: now };
+        emitNotification({ title: 'Chat Error', message: detail, tone: 'danger', source: 'communication' });
+      }
     } finally {
       setChatLoading(false);
     }
@@ -1646,19 +1666,6 @@ export default function CommunicationModule({ user, isGlass = false, onNavigateT
     ) {
       initialAutoSelectDone.current = true;
       void handleSelectConversation(conversations[0]);
-    } else if (
-      !initialAutoSelectDone.current &&
-      typeof window !== 'undefined' &&
-      window.innerWidth >= 1024 &&
-      !selectedContact &&
-      !selectedConversationId &&
-      effectiveContacts.length > 0 &&
-      activeSubTab === 'chats' &&
-      !pendingChatRef.current &&
-      conversations.length === 0
-    ) {
-      initialAutoSelectDone.current = true;
-      void handleSelectContact(effectiveContacts[0]);
     }
   }, [effectiveContacts.length, conversations, activeSubTab, openChatWith, selectedConversationId, selectedContact, handleSelectConversation]);
 

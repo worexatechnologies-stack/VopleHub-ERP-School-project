@@ -168,6 +168,9 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
   const [attendanceDate, setAttendanceDate] = useState(() => formatToISO(new Date()));
   const [selectedPeriod, setSelectedPeriod] = useState<number>(1);
   const [search, setSearch] = useState('');
+  const authenticatedUser = getStoredAuthenticatedUser();
+  const isServerBacked = Boolean(authenticatedUser);
+  const isTeacher = authenticatedUser?.role === 'Teacher';
 
   const todayISO = useMemo(() => formatToISO(new Date()), []);
   const currentDateISO = useMemo(() => normalizeToISO(attendanceDate), [attendanceDate]);
@@ -220,6 +223,9 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
 
   // Period matrix summaries from backend (7 Periods)
   const [periodSummaries, setPeriodSummaries] = useState<PeriodSummary[]>([]);
+  const canMarkSelectedPeriod = !isServerBacked || !isTeacher || Boolean(
+    periodSummaries.find((summary) => summary.period === selectedPeriod)?.isEditable
+  );
 
   // All attendance records for the selected date
   const [allDateRecords, setAllDateRecords] = useState<{ id: number; studentId: number; period: number; status: AttendanceStatus }[]>([]);
@@ -249,7 +255,6 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     }
   };
 
-  const isServerBacked = Boolean(getStoredAuthenticatedUser());
   const { data: dateAttendanceData, refetch: refetchAttendance } = useGetAttendanceQuery(
     { date: currentDateISO },
     { skip: !isServerBacked }
@@ -285,9 +290,14 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
 
   useEffect(() => {
     if (reportData) {
-      setPeriodSummaries(reportData as PeriodSummary[]);
+      const summaries = reportData as PeriodSummary[];
+      setPeriodSummaries(summaries);
+      if (isTeacher && !summaries.some((summary) => summary.period === selectedPeriod && summary.isEditable)) {
+        const firstEditable = summaries.find((summary) => summary.isEditable);
+        if (firstEditable) setSelectedPeriod(firstEditable.period);
+      }
     }
-  }, [reportData]);
+  }, [reportData, isTeacher, selectedPeriod]);
 
   // Base roster of students in Class & Section
   const baseSectionStudents = useMemo(() => {
@@ -374,13 +384,17 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
       lateCount: 0,
       halfDayCount: 0,
       totalStudents: baseSectionStudents.length,
-      isEditable: true,
+      isEditable: !isServerBacked || !isTeacher,
     };
-  }, [periodSummaries, selectedPeriod, baseSectionStudents.length]);
+  }, [periodSummaries, selectedPeriod, baseSectionStudents.length, isServerBacked, isTeacher]);
 
   // Attendance update handler for a specific period
   const handleMarkPeriodStatus = (studentId: string, periodNumber: number, status: AttendanceStatus) => {
+    const pSummary = periodSummaries.find(p => p.period === periodNumber) || activePeriodSummary;
+    if (isServerBacked && isTeacher && !pSummary.isEditable) return;
+
     const previousStatus = records[studentId];
+    const previousDateRecords = allDateRecords;
     if (periodNumber === selectedPeriod) {
       setRecords(prev => ({ ...prev, [studentId]: status }));
     }
@@ -398,7 +412,6 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     });
 
     if (isServerBacked) {
-      const pSummary = periodSummaries.find(p => p.period === periodNumber) || activePeriodSummary;
       markAttendanceMutation({
         studentId: Number(studentId),
         date: currentDateISO,
@@ -415,11 +428,14 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
           if (periodNumber === selectedPeriod) {
             setRecords((prev) => ({ ...prev, [studentId]: previousStatus }));
           }
-          const errorMessage = err?.data?.detail || err?.message || 'Attendance could not be saved.';
+          setAllDateRecords(previousDateRecords);
+          const errorMessage = err?.status === 403
+            ? 'You can mark attendance only for your assigned subject periods.'
+            : 'Attendance could not be saved. Please try again.';
           emitNotification({
-            title: 'Action Failed',
+            title: 'Attendance not saved',
             message: errorMessage,
-            tone: 'danger',
+            tone: 'warning',
             source: 'attendance',
           });
         });
@@ -439,22 +455,50 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
     }
   };
 
-  // Quick Action: Mark all students for the active period as Present
-  const handleMarkAllPresent = () => {
-    baseSectionStudents.forEach((student) => {
-      handleMarkPeriodStatus(student.id, selectedPeriod, 'Present');
-    });
-    emitNotification({
-      title: 'Roll Call Saved',
-      message: `Marked all ${baseSectionStudents.length} students as Present for Period ${selectedPeriod}.`,
-      tone: 'success',
-      source: 'attendance',
-    });
+  // Save a class roll call with one atomic API request.
+  const handleMarkAllForSelectedPeriod = async (status: AttendanceStatus) => {
+    if (baseSectionStudents.length === 0 || !canMarkSelectedPeriod) return;
+    const items = baseSectionStudents.map((student) => ({
+      studentId: Number(student.id),
+      period: selectedPeriod,
+      subjectId: activePeriodSummary.subjectId ?? undefined,
+      status,
+    }));
+    try {
+      if (isServerBacked) {
+        await bulkMarkAttendanceMutation({ date: currentDateISO, items }).unwrap();
+        fetchReport();
+        refreshDateRecords();
+      } else {
+        setAllDateRecords((previous) => {
+          const updated = previous.filter((record) => record.period !== selectedPeriod || !items.some((item) => item.studentId === record.studentId));
+          return [...updated, ...items.map((item) => ({ id: Date.now() + Math.random(), studentId: item.studentId, period: item.period, status: item.status }))];
+        });
+        setRecords(Object.fromEntries(items.map((item) => [String(item.studentId), item.status])));
+      }
+      emitNotification({
+        title: 'Attendance saved',
+        message: `Marked ${baseSectionStudents.length} students ${status.toLowerCase()} for Period ${selectedPeriod}.`,
+        tone: 'success',
+        source: 'attendance',
+      });
+    } catch (err: any) {
+      emitNotification({
+        title: 'Attendance not saved',
+        message: err?.status === 403
+          ? 'You can mark attendance only for your assigned subject periods. No changes were saved.'
+          : 'Attendance could not be saved. Please try again.',
+        tone: 'warning',
+        source: 'attendance',
+      });
+    }
   };
+
+  const handleMarkAllPresent = () => handleMarkAllForSelectedPeriod('Present');
 
   // Quick Action: Mark all students in section for FULL DAY (All 6 Periods) as Present
   const handleMarkFullDayPresent = async () => {
-    if (baseSectionStudents.length === 0) return;
+    if (baseSectionStudents.length === 0 || (isServerBacked && isTeacher)) return;
     const periods = [1, 2, 3, 4, 5, 6];
 
     // Optimistically update all date records
@@ -513,6 +557,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
 
   // Quick Action: Mark a single student for FULL DAY (All 6 Periods) as Present
   const handleMarkStudentFullDay = async (studentId: string, status: AttendanceStatus = 'Present') => {
+    if (isServerBacked && isTeacher) return;
     const sNum = Number(studentId);
     const periods = [1, 2, 3, 4, 5, 6];
 
@@ -562,67 +607,22 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
   };
 
   // Quick Action: Mark all students for the active period as Absent
-  const handleMarkAllAbsent = () => {
-    baseSectionStudents.forEach((student) => {
-      handleMarkPeriodStatus(student.id, selectedPeriod, 'Absent');
-    });
-  };
+  const handleMarkAllAbsent = () => handleMarkAllForSelectedPeriod('Absent');
 
   // Submit Attendance Action: Save records and return to sections
   const [isSubmittingAttendance, setIsSubmittingAttendance] = useState(false);
 
   const handleSubmitAttendance = async () => {
-    if (baseSectionStudents.length === 0) return;
+    if (baseSectionStudents.length === 0 || !canMarkSelectedPeriod) return;
     setIsSubmittingAttendance(true);
 
     try {
-      const studentIdSet = new Set(baseSectionStudents.map((s) => Number(s.id)));
-      const existingDateRecords = allDateRecords.filter((r) => studentIdSet.has(r.studentId));
-
-      const recordMap = new Map<string, AttendanceStatus>();
-      existingDateRecords.forEach((r) => {
-        recordMap.set(`${r.studentId}_${r.period}`, r.status);
-      });
-
-      // Ensure active selectedPeriod is filled for all students (defaulting unmarked to Present)
-      baseSectionStudents.forEach((s) => {
-        const key = `${s.id}_${selectedPeriod}`;
-        const activeStatus = records[s.id] || recordMap.get(key) || 'Present';
-        recordMap.set(key, activeStatus as AttendanceStatus);
-      });
-
-      const itemsToSubmit = Array.from(recordMap.entries()).map(([key, st]) => {
-        const [sId, pNum] = key.split('_');
-        return {
-          studentId: Number(sId),
-          period: Number(pNum),
-          status: st,
-        };
-      });
-
-      // Optimistically update local state
-      setAllDateRecords((prev) => {
-        const remaining = prev.filter(
-          (r) => !(studentIdSet.has(r.studentId) && r.period === selectedPeriod)
-        );
-        const newEntries = itemsToSubmit
-          .filter((item) => item.period === selectedPeriod)
-          .map((item) => ({
-            id: Date.now() + Math.random(),
-            studentId: item.studentId,
-            period: item.period,
-            status: item.status,
-          }));
-        return [...remaining, ...newEntries];
-      });
-
-      setRecords((prev) => {
-        const next = { ...prev };
-        baseSectionStudents.forEach((s) => {
-          if (!next[s.id]) next[s.id] = 'Present';
-        });
-        return next;
-      });
+      const itemsToSubmit = baseSectionStudents.map((student) => ({
+        studentId: Number(student.id),
+        period: selectedPeriod,
+        subjectId: activePeriodSummary.subjectId ?? undefined,
+        status: records[student.id] || allDateRecords.find((record) => record.studentId === Number(student.id) && record.period === selectedPeriod)?.status || 'Present' as AttendanceStatus,
+      }));
 
       if (isServerBacked) {
         await bulkMarkAttendanceMutation({
@@ -631,7 +631,13 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
         }).unwrap();
         fetchReport();
         refreshDateRecords();
+      } else {
+        setAllDateRecords((prev) => {
+          const remaining = prev.filter((record) => !(record.period === selectedPeriod && itemsToSubmit.some((item) => item.studentId === record.studentId)));
+          return [...remaining, ...itemsToSubmit.map((item) => ({ id: Date.now() + Math.random(), studentId: item.studentId, period: item.period, status: item.status }))];
+        });
       }
+      setRecords((prev) => ({ ...prev, ...Object.fromEntries(itemsToSubmit.map((item) => [String(item.studentId), item.status])) }));
 
       // Log notices for students: Present, Absent, and Late
       const pSummary = periodSummaries.find((p) => p.period === selectedPeriod) || activePeriodSummary;
@@ -666,11 +672,12 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
         setNavStep('sections');
       }, 350);
     } catch (err: any) {
-      const msg = err?.data?.detail || err?.message || 'Failed to submit attendance.';
       emitNotification({
-        title: 'Submission Failed',
-        message: msg,
-        tone: 'danger',
+        title: 'Attendance not saved',
+        message: err?.status === 403
+          ? 'You can mark attendance only for your assigned subject periods. No changes were saved.'
+          : 'Attendance could not be submitted. Please try again.',
+        tone: 'warning',
         source: 'attendance',
       });
     } finally {
@@ -940,6 +947,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
               {[1, 2, 3, 4, 5, 6].map((pNum) => {
                 const summary = periodSummaries.find((p) => p.period === pNum);
                 const isSelected = selectedPeriod === pNum;
+                const canEditPeriod = !isServerBacked || !isTeacher || Boolean(summary?.isEditable);
                 const pPresent = summary ? summary.presentCount : 0;
                 const pAbsent = summary ? summary.absentCount : 0;
 
@@ -947,7 +955,9 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                   <button
                     key={pNum}
                     onClick={() => setSelectedPeriod(pNum)}
-                    className={`p-3 rounded-xl border text-left transition-all ${
+                    disabled={!canEditPeriod}
+                    title={canEditPeriod ? `Select Period ${pNum}` : 'This period is assigned to another teacher.'}
+                    className={`p-3 rounded-xl border text-left transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                       isSelected
                         ? 'bg-indigo-600 border-indigo-600 text-white shadow-md ring-2 ring-indigo-300 scale-102'
                         : 'bg-slate-50 border-slate-200 text-slate-800 hover:bg-white hover:border-indigo-300'
@@ -955,9 +965,13 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                   >
                     <div className="flex items-center justify-between text-[10px] font-black uppercase">
                       <span>P{pNum}</span>
-                      <span className={`font-mono ${isSelected ? 'text-indigo-200' : 'text-slate-400'}`}>
-                        {DEFAULT_PERIOD_TIMES[pNum - 1].split(' ')[0]}
-                      </span>
+                      {canEditPeriod ? (
+                        <span className={`font-mono ${isSelected ? 'text-indigo-200' : 'text-slate-400'}`}>
+                          {DEFAULT_PERIOD_TIMES[pNum - 1].split(' ')[0]}
+                        </span>
+                      ) : (
+                        <Lock className="h-3 w-3" aria-label="Assigned to another teacher" />
+                      )}
                     </div>
 
                     <p className="text-xs font-black truncate mt-1">
@@ -978,6 +992,11 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
 
           {/* Main Attendance Content */}
           <div className="portal-card overflow-hidden">
+            {isServerBacked && isTeacher && (
+              <div className="px-4 py-2.5 border-b border-indigo-100 bg-indigo-50 text-xs font-semibold text-indigo-800">
+                You can mark attendance only for periods assigned to your subject. Locked periods belong to another teacher.
+              </div>
+            )}
             {/* Top Toolbar */}
             <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
               {/* Search */}
@@ -1019,16 +1038,16 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={handleMarkFullDayPresent}
-                  disabled={isBulkMarking || isSubmittingAttendance || baseSectionStudents.length === 0}
+                  disabled={isBulkMarking || isSubmittingAttendance || baseSectionStudents.length === 0 || (isServerBacked && isTeacher)}
                   className="px-3.5 py-1.5 rounded-xl text-xs font-black bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:to-teal-800 text-white shadow-sm hover:shadow active:scale-95 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
-                  title="Mark all students in this class as Present for all 6 periods today"
+                  title={isTeacher ? 'Full day attendance can only be marked by a school admin.' : 'Mark all students in this class as Present for all 6 periods today'}
                 >
                   <CheckCheck className="w-3.5 h-3.5 text-emerald-100" />
                   Full Day Present
                 </button>
                 <button
                   onClick={handleMarkAllPresent}
-                  disabled={isSubmittingAttendance}
+                  disabled={isSubmittingAttendance || isBulkMarking || !canMarkSelectedPeriod}
                   className="px-3 py-1.5 rounded-xl text-xs font-black bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
                   <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
@@ -1036,7 +1055,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                 </button>
                 <button
                   onClick={handleMarkAllAbsent}
-                  disabled={isSubmittingAttendance}
+                  disabled={isSubmittingAttendance || isBulkMarking || !canMarkSelectedPeriod}
                   className="px-3 py-1.5 rounded-xl text-xs font-black bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
                   <XCircle className="w-3.5 h-3.5 text-rose-600" />
@@ -1044,7 +1063,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                 </button>
                 <button
                   onClick={handleSubmitAttendance}
-                  disabled={isSubmittingAttendance || isBulkMarking || baseSectionStudents.length === 0}
+                  disabled={isSubmittingAttendance || isBulkMarking || baseSectionStudents.length === 0 || !canMarkSelectedPeriod}
                   className="px-4 py-1.5 rounded-xl text-xs font-black bg-gradient-to-r from-indigo-600 via-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 active:scale-95 text-white shadow-md shadow-indigo-500/25 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
                   title="Submit attendance records and return to sections"
                 >
@@ -1097,17 +1116,19 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                             const rec = studentDayRecords.find((r) => r.period === pNum);
                             const pStatus = rec?.status;
                             const isCurrent = selectedPeriod === pNum;
+                            const canEditPeriod = !isServerBacked || !isTeacher || Boolean(periodSummaries.find((summary) => summary.period === pNum)?.isEditable);
 
                             return (
                               <button
                                 key={pNum}
+                                disabled={!canEditPeriod}
                                 onClick={() => {
                                   // Toggle status on click: Present -> Absent -> Late -> Present
                                   const nextStatus: AttendanceStatus =
                                     pStatus === 'Present' ? 'Absent' : pStatus === 'Absent' ? 'Late' : 'Present';
                                   handleMarkPeriodStatus(student.id, pNum, nextStatus);
                                 }}
-                                className={`px-2 py-1 rounded-lg text-[10px] font-black transition-all flex items-center gap-1 border ${
+                                className={`px-2 py-1 rounded-lg text-[10px] font-black transition-all flex items-center gap-1 border disabled:opacity-40 disabled:cursor-not-allowed ${
                                   pStatus === 'Present'
                                     ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
                                     : pStatus === 'Absent'
@@ -1116,7 +1137,7 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                                         ? 'bg-amber-50 border-amber-300 text-amber-700'
                                         : 'bg-slate-100 border-slate-200 text-slate-400 hover:bg-slate-200'
                                 } ${isCurrent ? 'ring-2 ring-indigo-500 scale-105' : ''}`}
-                                title={`Period ${pNum}: Click to toggle status`}
+                                title={canEditPeriod ? `Period ${pNum}: Click to toggle status` : `Period ${pNum} is assigned to another teacher`}
                               >
                                 <span>P{pNum}:</span>
                                 <span>{pStatus ? pStatus.charAt(0) : '—'}</span>
@@ -1142,15 +1163,17 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => handleMarkStudentFullDay(student.id, 'Present')}
-                            className="px-2 py-1 rounded-lg text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 hover:border-emerald-300 transition flex items-center gap-1 mr-1 cursor-pointer"
-                            title={`Mark ${student.name} Present for all 6 periods today`}
+                            disabled={isServerBacked && isTeacher}
+                            className="px-2 py-1 rounded-lg text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 hover:border-emerald-300 transition flex items-center gap-1 mr-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                            title={isTeacher ? 'Full day attendance can only be marked by a school admin.' : `Mark ${student.name} Present for all 6 periods today`}
                           >
                             <Check className="w-3 h-3 text-emerald-600" />
                             Full Day
                           </button>
                           <button
                             onClick={() => handleMarkPeriodStatus(student.id, selectedPeriod, 'Present')}
-                            className={`p-1.5 rounded-lg border transition ${
+                            disabled={!canMarkSelectedPeriod}
+                            className={`p-1.5 rounded-lg border transition disabled:opacity-40 disabled:cursor-not-allowed ${
                               activeStatus === 'Present'
                                 ? 'bg-emerald-600 border-emerald-600 text-white shadow-xs'
                                 : 'bg-white border-slate-200 text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'
@@ -1161,7 +1184,8 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                           </button>
                           <button
                             onClick={() => handleMarkPeriodStatus(student.id, selectedPeriod, 'Absent')}
-                            className={`p-1.5 rounded-lg border transition ${
+                            disabled={!canMarkSelectedPeriod}
+                            className={`p-1.5 rounded-lg border transition disabled:opacity-40 disabled:cursor-not-allowed ${
                               activeStatus === 'Absent'
                                 ? 'bg-rose-600 border-rose-600 text-white shadow-xs'
                                 : 'bg-white border-slate-200 text-slate-500 hover:bg-rose-50 hover:text-rose-700'
@@ -1172,7 +1196,8 @@ export default function AttendanceModule({ students }: AttendanceModuleProps) {
                           </button>
                           <button
                             onClick={() => handleMarkPeriodStatus(student.id, selectedPeriod, 'Late')}
-                            className={`p-1.5 rounded-lg border transition ${
+                            disabled={!canMarkSelectedPeriod}
+                            className={`p-1.5 rounded-lg border transition disabled:opacity-40 disabled:cursor-not-allowed ${
                               activeStatus === 'Late'
                                 ? 'bg-amber-600 border-amber-600 text-white shadow-xs'
                                 : 'bg-white border-slate-200 text-slate-500 hover:bg-amber-50 hover:text-amber-700'

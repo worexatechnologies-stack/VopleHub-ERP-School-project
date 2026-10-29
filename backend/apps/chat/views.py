@@ -1,6 +1,6 @@
 import uuid
 from django.db import transaction
-from django.db.models import Q, Prefetch, Max
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import permissions, status
@@ -411,12 +411,21 @@ class ConversationListView(APIView):
             school=request.user.school,
         ).select_related(
             'participant1', 'participant2', 'school', 'student'
-        ).prefetch_related(
-            'participants',
-            Prefetch(
+        ).prefetch_related('participants').annotate(
+            unread_count_for_request=Count(
                 'messages',
-                queryset=DirectMessage.objects.select_related('sender', 'recipient').prefetch_related('attachments').order_by('-created_at')
-            )
+                filter=Q(
+                    messages__recipient_id=request.user.id,
+                    messages__read_at__isnull=True,
+                    messages__is_deleted=False,
+                ),
+                distinct=True,
+            ),
+            last_message_id_for_request=Subquery(
+                DirectMessage.objects.filter(conversation_id=OuterRef('pk'))
+                .order_by('-created_at', '-pk')
+                .values('pk')[:1]
+            ),
         )
 
         # Apply strict role filters
@@ -475,6 +484,15 @@ class ConversationListView(APIView):
                 c for c in conversations
                 if c.get_other_participant(request.user).id in allowed_partner_ids
             ]
+
+        if conversations:
+            last_message_ids = [c.last_message_id_for_request for c in conversations if c.last_message_id_for_request]
+            last_messages = DirectMessage.objects.filter(pk__in=last_message_ids).select_related(
+                'sender', 'recipient'
+            ).prefetch_related('attachments')
+            last_message_map = {message.pk: message for message in last_messages}
+            for conversation in conversations:
+                conversation._last_message_for_request = last_message_map.get(conversation.last_message_id_for_request)
 
         serializer = ConversationSerializer(conversations, many=True, context={'request': request})
         return Response(serializer.data)
