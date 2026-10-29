@@ -3,12 +3,14 @@ import re
 import secrets
 from io import BytesIO
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 
 logger = logging.getLogger(__name__)
 from django.db.models import Prefetch, Count, Avg, Sum, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.http import FileResponse, Http404, HttpResponse
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -21,7 +23,7 @@ from rest_framework.authentication import SessionAuthentication
 from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema
 from apps.accounts.models import ParentProfile, User, StudentProfile
 from apps.accounts.credential_generator import generate_login_id, generate_password
-from apps.common.tenancy import TenantScopedViewSet
+from apps.common.tenancy import TenantScopedViewSet, tenant_rls_context
 from apps.common.fast_cache import fast_cache_response, bump_cache_version
 from apps.common.import_queue import CanManageSchoolImports, import_status_key, queue_import_batch
 from apps.common.storage import sanitize_filename
@@ -1934,9 +1936,36 @@ class SubmitEnrollmentApplicationView(APIView):
                 'detail': 'Please provide all mandatory fields: Student Name, Class, Date of Birth, Parent Name, Parent Phone, and Parent Email.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        app_no = f'APP-{timezone.now().year}-{secrets.randbelow(89999) + 10000}'
+        field_limits = {
+            'Student Name': (name, 160),
+            'Class': (class_name, 40),
+            'Section': (section, 40),
+            'Gender': (gender, 32),
+            'Blood Group': (blood_group, 16),
+            'Parent Name': (parent_name, 160),
+            'Parent Phone': (parent_phone, 30),
+            'Parent Email': (parent_email, 254),
+            'Aadhaar Number': (aadhaar_no, 32),
+        }
+        for label, (value, maximum) in field_limits.items():
+            if len(value) > maximum:
+                return Response(
+                    {'detail': f'{label} must be {maximum} characters or fewer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if parse_date(dob) is None:
+            return Response({'detail': 'Enter a valid date of birth.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_email(parent_email)
+        except DjangoValidationError:
+            return Response({'detail': 'Enter a valid parent email address.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        from apps.common.storage import save_file, enrollment_photo_key, enrollment_document_key
+        from apps.common.storage import (
+            delete_file,
+            save_file,
+            enrollment_photo_key,
+            enrollment_document_key,
+        )
 
         photo_file = request.FILES.get('photo')
         doc_file = request.FILES.get('document')
@@ -1951,75 +1980,124 @@ class SubmitEnrollmentApplicationView(APIView):
         photo_data = None
         photo_key = ''
         photo_content_type = ''
-        if photo_file:
-            photo_bytes, photo_content_type, _ = optimize_raster_image(photo_file)
-            photo_key = enrollment_photo_key(link.school_id, app_no)
-            save_file(photo_bytes, photo_key)
-            photo_data = photo_bytes
-
         document_data = None
         document_key = ''
         document_size = 0
         document_name = ''
         document_content_type = ''
+        if photo_file:
+            try:
+                photo_data, photo_content_type, _ = optimize_raster_image(photo_file)
+            except DjangoValidationError as exc:
+                return Response({'detail': exc.messages}, status=status.HTTP_400_BAD_REQUEST)
         document_category = str(request.data.get('documentCategory') or request.data.get('document_category') or 'Birth Certificate').strip()
+        if len(document_category) > 64:
+            return Response({'detail': 'Document category must be 64 characters or fewer.'}, status=status.HTTP_400_BAD_REQUEST)
         if doc_file:
             doc_bytes = doc_file.read()
             document_size = len(doc_bytes)
             document_name = sanitize_filename(doc_file.name)[:255]
             document_content_type = detected_content_type(doc_file)
-            document_key = enrollment_document_key(link.school_id, app_no, document_name)
-            save_file(doc_bytes, document_key)
             document_data = doc_bytes
 
-        # Generate prospective credentials
-        login_id = generate_login_id(name.split()[0], User.Role.STUDENT, link.school)
-        plaintext_password = generate_password(name, User.Role.STUDENT)
-
-        with transaction.atomic():
-            # Create provisional user (inactive until admin approves)
-            user = User(
-                username=login_id,
-                email=login_id,
-                first_name=name,
-                role=User.Role.STUDENT,
-                school=link.school,
-                is_active=False,
-                must_change_password=True,
+        storage_id = secrets.token_hex(16)
+        try:
+            if photo_data:
+                photo_key = save_file(photo_data, enrollment_photo_key(link.school_id, storage_id))
+            if document_data:
+                document_key = save_file(
+                    document_data,
+                    enrollment_document_key(link.school_id, storage_id, document_name),
+                )
+        except Exception:
+            if photo_key:
+                delete_file(photo_key)
+            if document_key:
+                delete_file(document_key)
+            logger.exception('Enrollment attachment storage failed (school %s)', link.school_id)
+            return Response(
+                {'detail': 'We could not save the uploaded files. Please retry without attachments or contact the school.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-            user.set_password(plaintext_password)
-            user.save()
 
-            application = EnrollmentApplication.objects.create(
-                school=link.school,
-                link=link,
-                application_no=app_no,
-                name=name,
-                class_name=class_name,
-                section=section,
-                dob=dob,
-                gender=gender,
-                blood_group=blood_group,
-                parent_name=parent_name,
-                parent_phone=parent_phone,
-                parent_email=parent_email,
-                address=address,
-                aadhaar_no=aadhaar_no,
-                medical_conditions=medical_conditions,
-                photo_key=photo_key,
-                photo_data=photo_data,
-                photo_content_type=photo_content_type,
-                document_key=document_key,
-                document_size=document_size,
-                document_data=document_data,
-                document_name=document_name,
-                document_content_type=document_content_type,
-                document_category=document_category,
-                academic_year=link.academic_year,
-                user=user,
-                provisional_username=login_id.split('@')[0],
-                provisional_email=login_id,
-                status=EnrollmentApplication.Status.PENDING,
+        application = None
+        login_id = ''
+        plaintext_password = ''
+        try:
+            # Anonymous submissions have no middleware-selected tenant. Apply the
+            # trusted tenant from the validated one-time enrollment token.
+            with tenant_rls_context(link.school_id):
+                for attempt in range(5):
+                    app_no = f'APP-{timezone.now().year}-{secrets.randbelow(89999) + 10000}'
+                    login_id = generate_login_id(name[:40].split()[0], User.Role.STUDENT, link.school)
+                    plaintext_password = generate_password(name, User.Role.STUDENT)
+                    try:
+                        with transaction.atomic():
+                            user = User(
+                                username=login_id,
+                                email=login_id,
+                                first_name=name[:150],
+                                role=User.Role.STUDENT,
+                                school=link.school,
+                                is_active=False,
+                                must_change_password=True,
+                            )
+                            user.set_password(plaintext_password)
+                            user.save()
+
+                            application = EnrollmentApplication.objects.create(
+                                school=link.school,
+                                link=link,
+                                application_no=app_no,
+                                name=name,
+                                class_name=class_name,
+                                section=section,
+                                dob=parse_date(dob),
+                                gender=gender,
+                                blood_group=blood_group,
+                                parent_name=parent_name,
+                                parent_phone=parent_phone,
+                                parent_email=parent_email,
+                                address=address,
+                                aadhaar_no=aadhaar_no,
+                                medical_conditions=medical_conditions,
+                                photo_key=photo_key,
+                                photo_data=photo_data,
+                                photo_content_type=photo_content_type,
+                                document_key=document_key,
+                                document_size=document_size,
+                                document_data=document_data,
+                                document_name=document_name,
+                                document_content_type=document_content_type,
+                                document_category=document_category,
+                                academic_year=link.academic_year,
+                                user=user,
+                                provisional_username=login_id.split('@')[0],
+                                provisional_email=login_id,
+                                status=EnrollmentApplication.Status.PENDING,
+                            )
+                        break
+                    except IntegrityError:
+                        if attempt == 4:
+                            raise
+                        # A simultaneous submission may have claimed the same
+                        # generated login ID or application number.
+                        continue
+        except Exception as exc:
+            if photo_key:
+                delete_file(photo_key)
+            if document_key:
+                delete_file(document_key)
+            reference = secrets.token_hex(6)
+            logger.exception('Enrollment application creation failed (school %s, ref %s)', link.school_id, reference)
+            if isinstance(exc, IntegrityError):
+                return Response(
+                    {'detail': f'We could not reserve unique enrollment credentials. Please retry. Reference: {reference}'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            return Response(
+                {'detail': f'Enrollment could not be saved due to a server problem. Please retry or contact the school. Reference: {reference}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         # Notify school admin of new admission application
