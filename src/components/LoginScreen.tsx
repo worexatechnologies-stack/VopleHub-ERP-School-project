@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowRight, BookOpen, CheckCircle2, Eye, EyeOff,
   GraduationCap, LayoutDashboard, LockKeyhole, Mail,
@@ -392,7 +392,9 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
   const [suggestedRole, setSuggestedRole] = useState<PortalRole | null>(null);
   const [rememberMe, setRememberMe] = useState(true);
   const [capsLockActive, setCapsLockActive] = useState(false);
-  const [humanToken, setHumanToken] = useState<string | null>(null);
+  // Keep Turnstile's token synchronously available to form submission. The
+  // widget callback and a rapid submit can happen before React commits state.
+  const humanTokenRef = useRef<string | null>(null);
   const [humanVerificationResetKey, setHumanVerificationResetKey] = useState(0);
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
 
@@ -583,7 +585,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
     setSuggestedRole(null);
     setEmail('');
     setPassword('');
-    setHumanToken(null);
+    humanTokenRef.current = null;
     setHasAttemptedSubmit(false);
     setMfaSession(null);
     setOtpDigits(['', '', '', '', '', '']);
@@ -610,7 +612,8 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
       setErrorMessage('Please enter your email and password.');
       return;
     }
-    if (!humanToken) {
+    const activeHumanToken = humanTokenRef.current;
+    if (!activeHumanToken) {
       setHasAttemptedSubmit(true);
       setErrorMessage('Please complete human verification to sign in.');
       return;
@@ -624,7 +627,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
         email: email.trim().toLowerCase(),
         password,
         role: canonicalRequestedRole,
-        human_verification_token: humanToken,
+        human_verification_token: activeHumanToken,
       }).unwrap();
 
       // Multi-Factor Authentication Challenge: Non-Superadmin roles enter OTP verification
@@ -689,7 +692,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
       setErrorMessage(msg);
     } finally {
       if (verificationSubmitted) {
-        setHumanToken(null);
+        humanTokenRef.current = null;
         setHumanVerificationResetKey((key) => key + 1);
       }
     }
@@ -1020,10 +1023,12 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
                 <HumanVerification
                   resetKey={humanVerificationResetKey}
                   onVerify={(token) => {
-                    setHumanToken(token);
+                    humanTokenRef.current = token;
                     setErrorMessage('');
                   }}
-                  onReset={() => setHumanToken(null)}
+                  onReset={() => {
+                    humanTokenRef.current = null;
+                  }}
                   hasAttemptedSubmit={hasAttemptedSubmit}
                 />
 
