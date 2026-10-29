@@ -46,6 +46,8 @@ export default function HumanVerification({
         turnstileWidgetIdRef.current = turnstile.render(turnstileContainerRef.current, {
           sitekey: turnstileSiteKey,
           theme: 'light',
+          size: 'normal',
+          appearance: 'always',
           action: 'login',
           callback: (token: string) => {
             setStatus('verified');
@@ -171,10 +173,16 @@ export default function HumanVerification({
 
   if (turnstileSiteKey) {
     return (
-      <div className="my-2.5 flex min-h-[66px] flex-col items-center justify-center gap-1">
-        <div ref={turnstileContainerRef} id="cf-turnstile-wrapper" />
+      <div className="my-2.5 flex min-h-[72px] flex-col items-center justify-center gap-1 rounded-xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
+        <div ref={turnstileContainerRef} id="cf-turnstile-wrapper" className="grid min-h-[65px] min-w-[300px] place-items-center" />
         {!turnstileReady && !errorMessage && (
-          <p className="text-xs text-slate-500" role="status">Loading Cloudflare verification…</p>
+          <p className="text-xs text-slate-500" role="status">Loading Cloudflare security check…</p>
+        )}
+        {turnstileReady && status !== 'verified' && !errorMessage && (
+          <p className="text-xs text-slate-500" role="status">Cloudflare security check is running.</p>
+        )}
+        {status === 'verified' && (
+          <p className="text-xs font-semibold text-emerald-700" role="status">Cloudflare security check complete.</p>
         )}
         {errorMessage && (
           <p className="text-center text-xs text-rose-600" role="alert">{errorMessage}</p>

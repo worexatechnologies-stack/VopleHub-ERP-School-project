@@ -1528,16 +1528,16 @@ export default function TeacherDirectory() {
           </select>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+          <table className="w-full min-w-[1280px] table-fixed text-left text-sm">
             <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
               <tr>
-                <th className="px-4 py-3">Teacher</th>
-                <th className="px-4 py-3">Subjects</th>
-                <th className="px-4 py-3">Assigned Sections</th>
-                <th className="px-4 py-3">Login Details</th>
-                <th className="px-4 py-3">Qualification</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3 text-right">Actions</th>
+                <th className="w-[250px] px-4 py-3">Teacher</th>
+                <th className="w-[140px] px-4 py-3">Subjects</th>
+                <th className="w-[200px] px-4 py-3">Assigned Sections</th>
+                <th className="w-[245px] px-4 py-3">Login Details</th>
+                <th className="w-[175px] px-4 py-3">Qualification</th>
+                <th className="w-[120px] px-4 py-3">Status</th>
+                <th className="w-[180px] px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -1545,7 +1545,7 @@ export default function TeacherDirectory() {
                 <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-slate-500">No teacher profiles created yet.</td></tr>
               ) : filtered.map((teacher) => (
                 <tr key={teacher.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-3">
+                  <td className="align-top px-4 py-3">
                     <div className="flex items-center gap-3">
                       {teacher.photoUrl ? (
                         <AuthenticatedImage src={teacher.photoUrl} alt={teacher.name} className="h-10 w-10 rounded-full border border-slate-200 object-cover" />
@@ -1581,7 +1581,7 @@ export default function TeacherDirectory() {
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-xs">
+                  <td className="align-top px-4 py-3 text-xs">
                     <div className="flex flex-wrap gap-1 max-w-[180px]">
                       {(teacher.subjects && teacher.subjects.length > 0) ? (
                         teacher.subjects.map((s) => (
@@ -1594,20 +1594,27 @@ export default function TeacherDirectory() {
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-xs">
-                    <div className="flex flex-wrap gap-1 max-w-[200px]">
+                  <td className="align-top px-4 py-3 text-xs">
+                    <div className="flex max-h-[76px] max-w-[184px] flex-wrap content-start gap-1 overflow-hidden" title={teacher.assignedSections?.length ? `${teacher.assignedSections.length} assigned sections: ${teacher.assignedSections.join(', ')}` : undefined}>
                       {(teacher.assignedSections && teacher.assignedSections.length > 0) ? (
-                        teacher.assignedSections.map((sec) => (
+                        <>
+                          {teacher.assignedSections.slice(0, 4).map((sec) => (
                           <span key={sec} className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-700 border border-indigo-100">
                             {sec}
                           </span>
-                        ))
+                          ))}
+                          {teacher.assignedSections.length > 4 && (
+                            <span className="inline-flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-bold text-slate-600">
+                              +{teacher.assignedSections.length - 4} more
+                            </span>
+                          )}
+                        </>
                       ) : (
                         <span className="text-slate-400">-</span>
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="align-top px-4 py-3">
                     {(() => {
                       return (
                         <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3 text-[11px] text-slate-700">
@@ -1644,19 +1651,19 @@ export default function TeacherDirectory() {
                       );
                     })()}
                   </td>
-                  <td className="px-4 py-3 text-xs text-slate-600">
+                  <td className="align-top px-4 py-3 text-xs text-slate-600">
                     <p>{teacher.qualification || '-'}</p>
                     {teacher.salary != null && teacher.salary !== '' && (
                       <p className="mt-1 font-semibold text-emerald-700">Salary: ₹{Number(teacher.salary).toLocaleString('en-IN')}</p>
                     )}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="align-top px-4 py-3">
                     <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-extrabold ${teacher.status === 'Active' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
                       {teacher.status === 'Active' ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
                       {teacher.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                  <td className="align-top px-4 py-3 text-right whitespace-nowrap">
                     <div className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap">
                       {(() => {
                         const hasPending = teacher.documents.some((d) => d.status === 'Pending' || d.status === 'Uploaded');
