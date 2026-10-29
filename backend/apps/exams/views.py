@@ -805,6 +805,23 @@ class ExamScheduleViewSet(TenantScopedViewSet):
             for item in schedule.items.all()
             if item.subject_name
         }
+        # The sheet endpoint normally prepares these rows first, but callers
+        # can save directly after a deadline extension. Keep that path safe too.
+        for item in schedule_items.values():
+            Exam.objects.get_or_create(
+                school_id=schedule.school_id,
+                schedule=schedule,
+                name=schedule.name,
+                class_name=schedule.class_name,
+                section=section_name,
+                subject=item.subject_name,
+                defaults={
+                    'date': item.exam_date,
+                    'time': item.start_time,
+                    'end_time': item.end_time,
+                    'max_marks': item.max_marks,
+                },
+            )
         if is_teacher and target_status == ExamResult.Status.SUBMITTED:
             if has_specific_assignments and not teacher_subs_lower:
                 return Response({'detail': f'You are not assigned to enter marks for Section {section_name}.'}, status=status.HTTP_403_FORBIDDEN)
