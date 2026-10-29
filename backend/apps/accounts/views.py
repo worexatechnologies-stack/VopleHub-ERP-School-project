@@ -85,21 +85,6 @@ class CsrfTokenView(APIView):
         return response
 
 
-class HumanChallengeView(APIView):
-    """Issues a fresh, signed human verification challenge for login protection."""
-    permission_classes = [permissions.AllowAny]
-    throttle_classes = []
-
-    def get(self, request):
-        from .human_verification import generate_challenge_token
-        challenge = generate_challenge_token(request)
-        return Response({
-            'success': True,
-            'token': challenge['token'],
-            'timestamp': challenge['timestamp'],
-        })
-
-
 def _enforce_vault_temp_password(user):
     """Enforce must_change_password=True if the user is using an admin-generated/temporary password."""
     if not user or user.role not in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
@@ -161,7 +146,7 @@ class LoginView(APIView):
             )
             is_valid, error_msg = verify_human_token(human_token, request=request)
             if not is_valid:
-                return Response({'detail': error_msg or 'Please complete human verification to sign in.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'detail': error_msg or 'Please complete the Cloudflare security check to sign in.'}, status=status.HTTP_400_BAD_REQUEST)
         raw_email = (request.data.get('email') or request.data.get('username') or '').strip()
         password = str(request.data.get('password', ''))
         requested_role = (request.data.get('role') or '').strip()

@@ -1,332 +1,175 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ShieldCheck, Check, RefreshCw, AlertCircle } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
 
 interface HumanVerificationProps {
   onVerify: (token: string) => void;
   onReset?: () => void;
-  hasAttemptedSubmit?: boolean;
   resetKey?: number;
 }
 
-export default function HumanVerification({
-  onVerify,
-  onReset,
-  hasAttemptedSubmit = false,
-  resetKey = 0,
-}: HumanVerificationProps) {
-  const [status, setStatus] = useState<'idle' | 'verifying' | 'verified' | 'error'>('idle');
-  const [turnstileReady, setTurnstileReady] = useState(false);
-  const [challengeToken, setChallengeToken] = useState<string | null>(null);
+type TurnstileApi = {
+  render: (container: HTMLElement, options: Record<string, unknown>) => string | number;
+  reset: (widgetId?: string | number) => void;
+  remove?: (widgetId: string | number) => void;
+};
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
+}
+
+export default function HumanVerification({ onVerify, onReset, resetKey = 0 }: HumanVerificationProps) {
+  const [status, setStatus] = useState<'loading' | 'ready' | 'verified' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const clickStartTime = useRef<number>(0);
-  const turnstileContainerRef = useRef<HTMLDivElement>(null);
-  const turnstileWidgetIdRef = useRef<string | number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const widgetIdRef = useRef<string | number | null>(null);
   const onVerifyRef = useRef(onVerify);
   const onResetRef = useRef(onReset);
-
-  const turnstileSiteKey = (import.meta as any).env?.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY;
+  const siteKey = String(import.meta.env.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY || '').trim();
 
   useEffect(() => {
     onVerifyRef.current = onVerify;
     onResetRef.current = onReset;
   }, [onVerify, onReset]);
 
-  // Cloudflare Turnstile integration if site key is configured
   useEffect(() => {
-    if (!turnstileSiteKey || typeof window === 'undefined') return;
+    if (!siteKey) {
+      setStatus('error');
+      setErrorMessage('Cloudflare Turnstile is not configured. Please contact support.');
+      onResetRef.current?.();
+      return;
+    }
 
-    const renderTurnstile = () => {
-      const turnstile = (window as any).turnstile;
-      if (!turnstile || !turnstileContainerRef.current) {
-        setErrorMessage('Cloudflare verification is unavailable. Please reload this page.');
-        return;
+    let cancelled = false;
+    let script = document.querySelector<HTMLScriptElement>('script[data-volpehub-turnstile]');
+
+    const renderWidget = () => {
+      if (cancelled || !containerRef.current || !window.turnstile) return;
+      if (widgetIdRef.current !== null) {
+        window.turnstile.remove?.(widgetIdRef.current);
+        widgetIdRef.current = null;
       }
 
       try {
-        turnstileWidgetIdRef.current = turnstile.render(turnstileContainerRef.current, {
-          sitekey: turnstileSiteKey,
+        widgetIdRef.current = window.turnstile.render(containerRef.current, {
+          sitekey: siteKey,
           theme: 'light',
           size: 'normal',
           appearance: 'always',
           action: 'login',
           callback: (token: string) => {
             setStatus('verified');
+            setErrorMessage(null);
             onVerifyRef.current(token);
           },
           'error-callback': (errorCode?: number | string) => {
-            setStatus('error');
             const code = errorCode == null ? '' : String(errorCode);
             const message = code === '110200'
-              ? 'This site is not authorized for the Turnstile widget. Add volpehub.in to its Hostname Management settings.'
+              ? 'This website hostname is not authorized for the Turnstile widget.'
               : code === '400020' || code === '110100' || code === '110110'
-              ? 'Cloudflare rejected this site key. Copy the Site Key from the active Turnstile widget into the CLOUDFLARE_TURNSTILE_SITE_KEY GitHub Actions variable, then redeploy.'
+              ? 'Cloudflare rejected the configured Turnstile Site Key.'
               : code === '400070'
-              ? 'This Turnstile widget is disabled. Enable the widget in Cloudflare and reload this page.'
+              ? 'This Turnstile widget is disabled in Cloudflare.'
               : code === '400021'
-              ? 'This site key is for a different Cloudflare region. Use the Site Key from the widget configured for this site.'
+              ? 'This Turnstile Site Key is configured for a different Cloudflare region.'
               : code === '200500'
-              ? 'Cloudflare’s challenge could not load. Allow challenges.cloudflare.com and retry.'
+              ? 'The Cloudflare challenge could not load. Check your network and retry.'
               : 'Cloudflare verification failed. Please retry.';
+            setStatus('error');
             setErrorMessage(code ? `${message} (code ${code})` : message);
             onResetRef.current?.();
             return true;
           },
           'expired-callback': () => {
-            setStatus('idle');
-            setErrorMessage('Verification expired. Please verify again.');
+            setStatus('ready');
+            setErrorMessage('Cloudflare verification expired. Please verify again.');
             onResetRef.current?.();
           },
           'timeout-callback': () => {
-            setStatus('idle');
-            setErrorMessage('Verification timed out. Please verify again.');
+            setStatus('ready');
+            setErrorMessage('Cloudflare verification timed out. Please verify again.');
             onResetRef.current?.();
           },
         });
-        setTurnstileReady(true);
+        setStatus('ready');
+        setErrorMessage(null);
       } catch {
-        setErrorMessage('Cloudflare verification could not start. Please reload this page.');
+        setStatus('error');
+        setErrorMessage('Cloudflare verification could not start. Reload the page and retry.');
       }
     };
 
-    if (!(window as any).turnstile) {
-      const script = document.createElement('script');
-      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-      script.async = true;
-      script.defer = true;
-      script.onload = renderTurnstile;
-      script.onerror = () => {
-        setErrorMessage('Cloudflare verification did not load. Check your connection and reload the page.');
-      };
-      document.head.appendChild(script);
+    if (window.turnstile) {
+      renderWidget();
     } else {
-      renderTurnstile();
+      if (!script) {
+        script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.defer = true;
+        script.dataset.volpehubTurnstile = 'true';
+        document.head.appendChild(script);
+      }
+      script.addEventListener('load', renderWidget);
+      script.addEventListener('error', () => {
+        if (cancelled) return;
+        setStatus('error');
+        setErrorMessage('Cloudflare could not load. Check your network and reload the page.');
+      }, { once: true });
     }
-  }, [turnstileSiteKey]);
+
+    return () => {
+      cancelled = true;
+      if (widgetIdRef.current !== null) {
+        window.turnstile?.remove?.(widgetIdRef.current);
+        widgetIdRef.current = null;
+      }
+    };
+  }, [siteKey]);
 
   useEffect(() => {
-    if (!turnstileSiteKey || resetKey === 0 || typeof window === 'undefined') return;
-    const turnstile = (window as any).turnstile;
-    if (!turnstile || turnstileWidgetIdRef.current === null) return;
-
-    turnstile.reset(turnstileWidgetIdRef.current);
-    setStatus('idle');
+    if (!siteKey || resetKey === 0 || !window.turnstile || widgetIdRef.current === null) return;
+    window.turnstile.reset(widgetIdRef.current);
+    setStatus('ready');
     setErrorMessage(null);
     onResetRef.current?.();
-  }, [resetKey, turnstileSiteKey]);
+  }, [resetKey, siteKey]);
 
-  // Pre-fetch challenge token from server on component mount
-  useEffect(() => {
-    let isMounted = true;
-    async function fetchChallenge() {
-      try {
-        const res = await fetch('/api/v1/auth/human-challenge/', {
-          method: 'GET',
-          headers: { 'Accept': 'application/json' },
-          credentials: 'include',
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (isMounted && data?.token) {
-            setChallengeToken(data.token);
-          }
-        }
-      } catch {
-        // Handled on click
-      }
+  const retry = () => {
+    if (!window.turnstile || widgetIdRef.current === null) {
+      window.location.reload();
+      return;
     }
-    fetchChallenge();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  const handleInteractionStart = () => {
-    clickStartTime.current = Date.now();
-  };
-
-  const handleCheckboxClick = async () => {
-    if (status === 'verifying' || status === 'verified') return;
-
-    setStatus('verifying');
     setErrorMessage(null);
-
-    const elapsed = Date.now() - clickStartTime.current;
-    // Human interaction entropy check
-    const isHumanSpeed = elapsed >= 0 && elapsed < 8000;
-
-    try {
-      let activeToken = challengeToken;
-      if (!activeToken) {
-        const res = await fetch('/api/v1/auth/human-challenge/', {
-          method: 'GET',
-          headers: { 'Accept': 'application/json' },
-          credentials: 'include',
-        });
-        if (!res.ok) throw new Error('Could not establish secure challenge.');
-        const data = await res.json();
-        activeToken = data.token;
-        setChallengeToken(activeToken);
-      }
-
-      if (!activeToken || !isHumanSpeed) {
-        throw new Error('Verification check failed. Please try again.');
-      }
-
-      // Smooth security evaluation micro-delay (approx 550ms for natural feel)
-      await new Promise((resolve) => setTimeout(resolve, 550));
-
-      setStatus('verified');
-      onVerify(activeToken);
-    } catch (err: any) {
-      setStatus('error');
-      setErrorMessage(err?.message || 'Verification failed. Please retry.');
-      if (onReset) onReset();
-    }
+    setStatus('ready');
+    onResetRef.current?.();
+    window.turnstile.reset(widgetIdRef.current);
   };
-
-  if (turnstileSiteKey) {
-    return (
-      <div className="my-2.5 flex min-h-[72px] flex-col items-center justify-center gap-1 rounded-xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
-        <div ref={turnstileContainerRef} id="cf-turnstile-wrapper" className="grid min-h-[65px] min-w-[300px] place-items-center" />
-        {!turnstileReady && !errorMessage && (
-          <p className="text-xs text-slate-500" role="status">Loading Cloudflare security check…</p>
-        )}
-        {turnstileReady && status !== 'verified' && !errorMessage && (
-          <p className="text-xs text-slate-500" role="status">Cloudflare security check is running.</p>
-        )}
-        {status === 'verified' && (
-          <p className="text-xs font-semibold text-emerald-700" role="status">Cloudflare security check complete.</p>
-        )}
-        {errorMessage && (
-          <div className="flex flex-col items-center gap-1" role="alert">
-            <p className="text-center text-xs text-rose-600">{errorMessage}</p>
-            {turnstileReady && (
-              <button
-                type="button"
-                onClick={() => {
-                  const turnstile = (window as any).turnstile;
-                  if (turnstile && turnstileWidgetIdRef.current !== null) {
-                    setErrorMessage(null);
-                    turnstile.reset(turnstileWidgetIdRef.current);
-                  }
-                }}
-                className="text-xs font-semibold text-indigo-700 underline underline-offset-2"
-              >
-                Retry verification
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  const isWarning = hasAttemptedSubmit && status !== 'verified';
 
   return (
-    <div
-      className={`my-2.5 rounded-xl border p-3 transition-all duration-200 select-none ${
-        status === 'verified'
-          ? 'border-emerald-200 bg-emerald-50/50 shadow-sm'
-          : isWarning
-          ? 'border-rose-300 bg-rose-50/70 shadow-sm animate-pulse'
-          : 'border-slate-200 bg-slate-50/80 hover:border-indigo-300 hover:bg-slate-50'
-      }`}
-      id="human-verification-card"
-    >
-      <div className="flex items-center justify-between gap-3">
-        {/* Left: Checkbox & Label */}
-        <div
-          className="flex items-center gap-3 cursor-pointer"
-          onMouseDown={handleInteractionStart}
-          onTouchStart={handleInteractionStart}
-          onClick={handleCheckboxClick}
-          role="checkbox"
-          aria-checked={status === 'verified'}
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === ' ' || e.key === 'Enter') {
-              e.preventDefault();
-              handleCheckboxClick();
-            }
-          }}
-        >
-          {/* Checkbox Icon / State */}
-          <div
-            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-all duration-150 ${
-              status === 'verified'
-                ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm'
-                : status === 'verifying'
-                ? 'border-indigo-500 bg-white'
-                : isWarning
-                ? 'border-rose-400 bg-white ring-2 ring-rose-200'
-                : 'border-slate-300 bg-white hover:border-indigo-500'
-            }`}
-          >
-            {status === 'verifying' ? (
-              <RefreshCw size={13} className="animate-spin text-indigo-600" />
-            ) : status === 'verified' ? (
-              <Check size={14} className="stroke-[3]" />
-            ) : null}
-          </div>
-
-          {/* Verification Text */}
-          <div className="flex flex-col">
-            <span
-              className={`text-xs font-semibold ${
-                status === 'verified'
-                  ? 'text-emerald-900 font-bold'
-                  : isWarning
-                  ? 'text-rose-700 font-bold'
-                  : 'text-slate-800'
-              }`}
-            >
-              {status === 'verified'
-                ? 'Human Verified'
-                : status === 'verifying'
-                ? 'Verifying interaction…'
-                : isWarning
-                ? 'Please check: I am human'
-                : 'Verify you are human'}
-            </span>
-            <span className="text-[10px] text-slate-500">
-              {status === 'verified'
-                ? 'Security check passed'
-                : 'Interactive security check'}
-            </span>
-          </div>
-        </div>
-
-        {/* Right: Security Badge */}
-        <div className="flex items-center gap-1.5 text-right shrink-0">
-          <div className="flex flex-col items-end">
-            <span className="text-[9px] font-bold tracking-wider uppercase text-slate-400">
-              Shield
-            </span>
-            <span className="text-[8px] font-medium text-slate-400">
-              Cloudflare Protected
-            </span>
-          </div>
-          <div
-            className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
-              status === 'verified'
-                ? 'bg-emerald-100 text-emerald-700'
-                : 'bg-slate-200/70 text-slate-500'
-            }`}
-          >
-            <ShieldCheck size={15} />
-          </div>
-        </div>
-      </div>
-
-      {/* Error message if challenge failed */}
+    <div className="my-2.5 flex min-h-[92px] flex-col items-center justify-center gap-1 rounded-xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
+      <div ref={containerRef} className="grid min-h-[65px] min-w-[300px] place-items-center" />
+      {status === 'loading' && (
+        <p className="text-xs text-slate-500" role="status">Loading Cloudflare Turnstile…</p>
+      )}
+      {status === 'ready' && !errorMessage && (
+        <p className="text-xs text-slate-500" role="status">Complete the Cloudflare security check.</p>
+      )}
+      {status === 'verified' && (
+        <p className="text-xs font-semibold text-emerald-700" role="status">Cloudflare security check complete.</p>
+      )}
       {errorMessage && (
-        <div className="mt-2 flex items-center gap-1 text-[11px] font-medium text-rose-600">
-          <AlertCircle size={13} className="shrink-0" />
-          <span>{errorMessage}</span>
+        <div className="flex flex-col items-center gap-1" role="alert">
+          <p className="text-center text-xs text-rose-600">{errorMessage}</p>
+          <button
+            type="button"
+            onClick={retry}
+            className="text-xs font-semibold text-indigo-700 underline underline-offset-2"
+          >
+            Retry Cloudflare verification
+          </button>
         </div>
       )}
     </div>
   );
 }
-

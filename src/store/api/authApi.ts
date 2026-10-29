@@ -97,9 +97,6 @@ export const authApi = baseApi.injectEndpoints({
     getCsrfToken: build.query<{ csrfToken: string }, void>({
       query: () => ({ url: '/auth/csrf/' }),
     }),
-    getHumanChallenge: build.query<{ success: boolean; token: string; timestamp: number }, void>({
-      query: () => ({ url: '/auth/human-challenge/' }),
-    }),
     getCurrentUser: build.query<AuthUser, void>({
       query: () => ({ url: '/auth/me/' }),
       providesTags: ['Auth'],
@@ -211,7 +208,6 @@ export const {
   useVerifyOtpMutation,
   useResendOtpMutation,
   useGetCsrfTokenQuery,
-  useGetHumanChallengeQuery,
   useGetCurrentUserQuery,
   useChangePasswordMutation,
   useLogoutMutation,

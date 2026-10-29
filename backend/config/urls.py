@@ -30,7 +30,6 @@ from rest_framework.permissions import AllowAny
 from rest_framework.routers import DefaultRouter
 from apps.accounts.views import (
     CsrfTokenView,
-    HumanChallengeView,
     LoginView,
     VerifyOtpView,
     ResendOtpView,
@@ -128,7 +127,6 @@ urlpatterns = [
     path('api/v1/enrollment/submit/', SubmitEnrollmentApplicationView.as_view()),
     path('api/v1/contact/inquiry/', ContactInquiryView.as_view(), name='public-contact-inquiry'),
     path('api/v1/auth/csrf/', CsrfTokenView.as_view(), name='auth-csrf'),
-    path('api/v1/auth/human-challenge/', HumanChallengeView.as_view(), name='auth-human-challenge'),
     path('api/v1/auth/login/', LoginView.as_view()),
     path('api/v1/auth/verify-otp/', VerifyOtpView.as_view()),
     path('api/v1/auth/resend-otp/', ResendOtpView.as_view()),

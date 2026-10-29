@@ -6,7 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.password_validation import validate_password
 from .credential_generator import create_user_with_credentials, generate_password
 from .credential_vault import sync_school_credential_vault
-from .human_verification import _valid_turnstile_login_response
+from .human_verification import _valid_turnstile_login_response, verify_human_token
 
 from apps.accounts.models import CredentialVaultRecord, ParentProfile, StudentProfile, User
 from apps.schools.models import School
@@ -20,6 +20,7 @@ from apps.academics.models import Class, Section, Subject
 from apps.sis.models import StudentDocument
 from django.core.files.uploadedfile import SimpleUploadedFile
 from io import BytesIO
+from unittest.mock import patch
 from PIL import Image
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from .auth_utils import issue_token_pair
@@ -591,6 +592,16 @@ class TurnstileLoginResponseTests(TestCase):
         self.assertFalse(_valid_turnstile_login_response({**valid, 'action': 'signup'}, request))
         self.assertFalse(_valid_turnstile_login_response({**valid, 'hostname': 'attacker.example'}, request))
         self.assertFalse(_valid_turnstile_login_response({**valid, 'success': False}, request))
+
+    @override_settings(TESTING=False, CLOUDFLARE_TURNSTILE_SECRET_KEY='')
+    @patch('apps.accounts.human_verification.sys.argv', ['manage.py'])
+    def test_login_verification_fails_closed_without_cloudflare_secret(self):
+        request = RequestFactory().post('/api/v1/auth/login/', HTTP_HOST='volpehub.in')
+
+        is_valid, error = verify_human_token('vhs_legacy_custom_challenge', request)
+
+        self.assertFalse(is_valid)
+        self.assertIn('Cloudflare', error)
 
 
 @override_settings(SECURE_SSL_REDIRECT=False)

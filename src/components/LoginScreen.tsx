@@ -396,7 +396,6 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
   // widget callback and a rapid submit can happen before React commits state.
   const humanTokenRef = useRef<string | null>(null);
   const [humanVerificationResetKey, setHumanVerificationResetKey] = useState(0);
-  const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
 
   // 3D Parallax tilt state for showcase card
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
@@ -586,7 +585,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
     setEmail('');
     setPassword('');
     humanTokenRef.current = null;
-    setHasAttemptedSubmit(false);
+    setHumanVerificationResetKey((key) => key + 1);
     setMfaSession(null);
     setOtpDigits(['', '', '', '', '', '']);
   };
@@ -614,8 +613,7 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
     }
     const activeHumanToken = humanTokenRef.current;
     if (!activeHumanToken) {
-      setHasAttemptedSubmit(true);
-      setErrorMessage('Please complete human verification to sign in.');
+      setErrorMessage('Please complete the Cloudflare security check to sign in.');
       return;
     }
     setErrorMessage('');
@@ -1029,7 +1027,6 @@ export default function LoginScreen({ onLogin, brandSettings, portalRole, onPubl
                   onReset={() => {
                     humanTokenRef.current = null;
                   }}
-                  hasAttemptedSubmit={hasAttemptedSubmit}
                 />
 
                 {/* Submit button */}

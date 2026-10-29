@@ -105,6 +105,15 @@ jobs:
         run: |
           echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
+      - name: Require Cloudflare Turnstile site key
+        env:
+          TURNSTILE_SITE_KEY: ${{ vars.CLOUDFLARE_TURNSTILE_SITE_KEY }}
+        run: |
+          if [ -z "$TURNSTILE_SITE_KEY" ]; then
+            echo "CLOUDFLARE_TURNSTILE_SITE_KEY is missing from GitHub Actions variables." >&2
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
