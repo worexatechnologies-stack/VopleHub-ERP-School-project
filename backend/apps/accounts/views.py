@@ -390,7 +390,16 @@ class UserListView(APIView):
         if request.user.role == User.Role.SUPER_ADMIN:
             users = User.objects.select_related('school').filter(role=User.Role.SCHOOL_ADMIN).order_by('email')
         elif request.user.role == User.Role.SCHOOL_ADMIN:
-            users = User.objects.select_related('school').filter(school=request.user.school, role__in=[User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]).order_by('role', 'email')
+            users = User.objects.select_related(
+                'school', 'student_profile', 'parent_profile', 'teacher_profile',
+            ).prefetch_related(
+                'parent_profile__students',
+                'teacher_profile__managed_classes',
+                'teacher_profile__managed_sections__class_room',
+            ).filter(
+                school=request.user.school,
+                role__in=[User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT],
+            ).order_by('role', 'email')
         else:
             return Response({'detail': 'Administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(UserSerializer(users, many=True).data)
@@ -670,6 +679,35 @@ class ChangePasswordView(APIView):
         return response
 
 
+def _reset_user_credentials(user):
+    password = generate_password(user.first_name or user.username, user.role)
+    user.set_password(password)
+    user.must_change_password = True
+    user.save(update_fields=['password', 'must_change_password'])
+
+    if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]:
+        try:
+            record_credential(
+                school=user.school,
+                role=user.role,
+                name=user.get_full_name() or user.first_name or user.username,
+                login_id=user.email or user.username,
+                plaintext_password=password,
+                user=user,
+                source='admin_reset',
+                must_change_password=True,
+            )
+        except Exception:
+            logger.exception('Failed to update credential vault during admin reset for user %s', user.pk)
+
+    return {
+        'userId': user.pk,
+        'loginId': user.email or user.username,
+        'temporaryPassword': password,
+        'mustChangePassword': True,
+    }
+
+
 class ResetCredentialsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_classes = [AdminCredentialManagementThrottle]
@@ -691,28 +729,91 @@ class ResetCredentialsView(APIView):
             return Response({'detail': 'Super Admins may reset School Admin accounts only.'}, status=status.HTTP_403_FORBIDDEN)
         if request.user.role == User.Role.SCHOOL_ADMIN and (user.school_id != request.user.school_id or user.role not in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]):
             return Response({'detail': 'School Admins may reset in-school Teacher, Student, and Parent accounts only.'}, status=status.HTTP_403_FORBIDDEN)
-        password = generate_password(user.first_name or user.username, user.role)
-        user.set_password(password)
-        user.must_change_password = True
-        user.save(update_fields=['password', 'must_change_password'])
+        return Response(_reset_user_credentials(user))
 
-        if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]:
-            try:
-                from apps.accounts.credential_vault import record_credential
-                record_credential(
-                    school=user.school,
-                    role=user.role,
-                    name=user.get_full_name() or user.first_name or user.username,
-                    login_id=user.email or user.username,
-                    plaintext_password=password,
-                    user=user,
-                    source='admin_reset',
-                    must_change_password=True,
-                )
-            except Exception:
-                pass
 
-        return Response({'loginId': user.email, 'temporaryPassword': password, 'mustChangePassword': True})
+class ResetStudentCredentialsView(APIView):
+    """Create or reset a student's/parent's login, always scoped to the admin's school."""
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [AdminCredentialManagementThrottle]
+
+    @extend_schema(
+        operation_id='create_or_reset_student_credentials',
+        request=inline_serializer('ResetStudentCredentialsRequest', {
+            'role': serializers.ChoiceField(choices=['Student', 'Parent']),
+        }),
+        responses={200: inline_serializer('ResetStudentCredentialsResponse', {
+            'userId': serializers.IntegerField(),
+            'loginId': serializers.EmailField(),
+            'temporaryPassword': serializers.CharField(),
+            'mustChangePassword': serializers.BooleanField(),
+        }), 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Student not found')},
+    )
+    @transaction.atomic
+    def post(self, request, student_id):
+        if request.user.role != User.Role.SCHOOL_ADMIN or not request.user.school_id:
+            return Response({'detail': 'School administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        role = request.data.get('role')
+        if role not in ['Student', 'Parent']:
+            return Response({'detail': 'Choose Student or Parent credentials.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.sis.models import Student
+        student = Student.objects.select_for_update().filter(
+            pk=student_id,
+            school_id=request.user.school_id,
+        ).first()
+        if not student:
+            return Response({'detail': 'Student not found in your school.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if role == 'Student':
+            from apps.accounts.models import StudentProfile
+            profile = StudentProfile.objects.select_related('user').filter(student=student).first()
+            if profile:
+                user = profile.user
+            else:
+                from apps.sis.services import create_student_login
+                credentials = create_student_login(student)
+                return Response({
+                    'userId': credentials['userId'],
+                    'loginId': credentials['email'],
+                    'temporaryPassword': credentials['temporaryPassword'],
+                    'mustChangePassword': True,
+                })
+        else:
+            from apps.accounts.models import ParentProfile
+            profiles = ParentProfile.objects.filter(
+                students=student,
+                user__school_id=request.user.school_id,
+                user__role=User.Role.PARENT,
+            ).select_related('user')
+            if student.parent_email:
+                profile = profiles.filter(user__email__iexact=student.parent_email).first() or profiles.first()
+            else:
+                profile = profiles.first()
+
+            if profile:
+                user = profile.user
+            else:
+                from apps.sis.services import create_or_link_parent_login
+                credentials = create_or_link_parent_login(student)
+                user_id = credentials.get('userId')
+                user = User.objects.filter(
+                    pk=user_id,
+                    school_id=request.user.school_id,
+                    role=User.Role.PARENT,
+                ).first()
+                if not user:
+                    return Response({'detail': 'Could not create or link a parent login for this student.'}, status=status.HTTP_400_BAD_REQUEST)
+                if credentials.get('created'):
+                    return Response({
+                        'userId': user.pk,
+                        'loginId': credentials['email'],
+                        'temporaryPassword': credentials['temporaryPassword'],
+                        'mustChangePassword': True,
+                    })
+
+        return Response(_reset_user_credentials(user))
 
 
 class LogoutView(APIView):

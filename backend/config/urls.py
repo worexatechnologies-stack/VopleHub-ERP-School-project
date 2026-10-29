@@ -44,6 +44,7 @@ from apps.accounts.views import (
     UserListView,
     ChangePasswordView,
     ResetCredentialsView,
+    ResetStudentCredentialsView,
     CredentialVaultViewSet,
 )
 from apps.schools.views import HallTicketSettingsView, SchoolViewSet
@@ -138,6 +139,7 @@ urlpatterns = [
     path('api/v1/auth/school-admins/<int:user_id>/set-password/', SchoolAdminPasswordSetView.as_view()),
     path('api/v1/auth/school-admins/<int:user_id>/<str:action>/', SchoolAdminLifecycleView.as_view()),
     path('api/v1/auth/users/<int:user_id>/reset-credentials/', ResetCredentialsView.as_view()),
+    path('api/v1/auth/students/<int:student_id>/reset-credentials/', ResetStudentCredentialsView.as_view()),
     path('api/v1/auth/change-password/', ChangePasswordView.as_view()),
     path('api/v1/auth/users/', UserListView.as_view()),
     path('api/v1/auth/refresh/', RefreshView.as_view()),

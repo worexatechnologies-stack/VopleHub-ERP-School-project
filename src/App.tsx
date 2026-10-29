@@ -706,9 +706,30 @@ function AuthenticatedApp() {
     });
   };
 
-  const resetChildCredentials = async (userId: number) => {
-    const credentials = await dispatch(authApi.endpoints.resetCredentials.initiate(userId)).unwrap();
-    setAccountDirectory((current) => current.map((account) => account.id === userId ? { ...account, email: credentials.loginId } : account));
+  const resetChildCredentials = async (studentId: string, role: 'Student' | 'Parent') => {
+    const credentials = await dispatch(authApi.endpoints.resetStudentLoginCredentials.initiate({ studentId, role })).unwrap();
+    const accountRole = role.toLowerCase();
+    setAccountDirectory((current) => {
+      const existing = current.find((account) => account.id === credentials.userId);
+      if (existing) {
+        return current.map((account) => account.id === credentials.userId
+          ? {
+              ...account,
+              email: credentials.loginId,
+              studentId: role === 'Student' ? studentId : account.studentId,
+              parentStudentIds: role === 'Parent'
+                ? Array.from(new Set([...(account.parentStudentIds || []), studentId]))
+                : account.parentStudentIds,
+            }
+          : account);
+      }
+      return [...current, {
+        id: credentials.userId,
+        email: credentials.loginId,
+        role: accountRole,
+        ...(role === 'Student' ? { studentId } : { parentStudentIds: [studentId] }),
+      }];
+    });
     return credentials;
   };
 

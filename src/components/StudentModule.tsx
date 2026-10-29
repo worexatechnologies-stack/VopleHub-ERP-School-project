@@ -96,7 +96,7 @@ interface StudentModuleProps {
   onIssueTC?: (studentId: string) => void;
   onDocumentsChanged: (studentId: string, documents: StudentDocument[]) => void;
   accountDirectory?: Array<{ id: number; email: string; role: string; studentId?: string; parentStudentIds?: string[] }>;
-  onResetCredentials?: (userId: number) => Promise<{ loginId: string; temporaryPassword: string }>;
+  onResetCredentials?: (studentId: string, role: 'Student' | 'Parent') => Promise<{ userId: number; loginId: string; temporaryPassword: string }>;
   currentAcademicYear?: string;
   canManageStudents?: boolean;
   onOpenAcademicSetup?: () => void;
@@ -801,14 +801,11 @@ export default function StudentModule({
     };
   };
 
-  const resetCredentials = async (role: 'Student' | 'Parent', userId: number | undefined) => {
-    if (!onResetCredentials || !userId) {
-      alert(`No linked ${role} login is available to reset.`);
-      return;
-    }
+  const resetCredentials = async (role: 'Student' | 'Parent', studentId: string) => {
+    if (!onResetCredentials) return;
     if (!confirm(`Generate a new one-time password for this ${role} account?`)) return;
     try {
-      const credentials = await onResetCredentials(userId);
+      const credentials = await onResetCredentials(studentId, role);
       setCredentialRevision((version) => version + 1);
       setRevealedCredential({ role, loginId: credentials.loginId, temporaryPassword: credentials.temporaryPassword });
     } catch (error) {
@@ -2170,13 +2167,13 @@ export default function StudentModule({
                                       <p className="text-[10px] font-bold uppercase text-slate-400">Student Login</p>
                                       <p className="mt-1 break-all font-mono"><strong>Email:</strong> {loginDetails.studentEmail}</p>
                                       <p className="mt-1 break-all font-mono"><strong>Password:</strong> {loginDetails.studentPassword}</p>
-                                      <button onClick={() => void resetCredentials('Student', loginDetails.studentUserId)} className="mt-3 rounded-lg border border-indigo-200 px-2.5 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50">Reset Student credentials</button>
+                                      <button onClick={() => void resetCredentials('Student', selectedStudent.id)} className="mt-3 rounded-lg border border-indigo-200 px-2.5 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50">{loginDetails.studentUserId ? 'Reset Student credentials' : 'Create Student login'}</button>
                                     </div>
                                     <div className="min-w-0 rounded-lg bg-white border border-emerald-100 p-3">
                                       <p className="text-[10px] font-bold uppercase text-slate-400">Parent Login</p>
                                       <p className="mt-1 break-all font-mono"><strong>Email:</strong> {loginDetails.parentEmail}</p>
                                       <p className="mt-1 break-all font-mono"><strong>Password:</strong> {loginDetails.parentPassword}</p>
-                                      <button onClick={() => void resetCredentials('Parent', loginDetails.parentUserId)} className="mt-3 rounded-lg border border-indigo-200 px-2.5 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50">Reset Parent credentials</button>
+                                      <button onClick={() => void resetCredentials('Parent', selectedStudent.id)} className="mt-3 rounded-lg border border-indigo-200 px-2.5 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50">{loginDetails.parentUserId ? 'Reset Parent credentials' : 'Create Parent login'}</button>
                                     </div>
                                   </div>
                                 </div>

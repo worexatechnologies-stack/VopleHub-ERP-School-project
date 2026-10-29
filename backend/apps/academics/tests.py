@@ -1,15 +1,16 @@
 from datetime import date, time
+from unittest.mock import patch
 
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.accounts.models import StudentProfile, User
+from apps.accounts.models import ParentProfile, StudentProfile, User
 from apps.exams.models import Exam
 from apps.schools.models import School
 from apps.sis.models import AcademicHistory, Student
 from apps.staff.models import Teacher
 
-from .models import AcademicYear, Class, Section, Subject
+from .models import AcademicYear, Class, Section, Subject, Homework
 
 
 class AcademicTenantAccessTests(TestCase):
@@ -544,3 +545,51 @@ class AcademicTenantAccessTests(TestCase):
         self.assertEqual((exam.class_name, exam.section, exam.subject), ('Grade Eight', 'Alpha', 'Advanced Mathematics'))
         self.assertEqual(teacher.assigned_sections, ['Grade Eight-Alpha'])
         self.assertEqual(teacher.subjects, ['Advanced Mathematics'])
+
+
+class HomeworkNotificationFanoutTests(TestCase):
+    def setUp(self):
+        self.school = School.objects.create(name='Homework Fanout School', code='homework-fanout')
+        self.admin = User.objects.create_user(
+            username='homework-admin', email='homework-admin@example.com', password='StrongPass123!',
+            role=User.Role.SCHOOL_ADMIN, school=self.school,
+        )
+        self.student = Student.objects.create(
+            school=self.school, admission_no='HW-001', name='Homework Student',
+            class_name='Grade 8', section='A', roll_no=1, parent_name='Homework Parent',
+            parent_phone='9000000088', parent_email='homework-parent@example.com',
+            dob=date(2012, 1, 1), gender='Female', academic_year='2026-27',
+        )
+        student_user = User.objects.create_user(
+            username='homework-student', email='homework-student@example.com', password='StrongPass123!',
+            role=User.Role.STUDENT, school=self.school,
+        )
+        StudentProfile.objects.create(user=student_user, student=self.student)
+        parent_user = User.objects.create_user(
+            username='homework-parent', email='homework-parent@example.com', password='StrongPass123!',
+            role=User.Role.PARENT, school=self.school,
+        )
+        ParentProfile.objects.create(user=parent_user, phone=self.student.parent_phone).students.add(self.student)
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    @patch('apps.notifications.tasks.fanout_notification_task.delay')
+    def test_create_homework_queues_bounded_metadata_notification_fanout(self, fanout):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post('/api/v1/homework/', {
+                'title': 'Homework Test',
+                'description': 'Complete the worksheet.',
+                'className': 'All Classes',
+                'sectionName': '',
+                'subjectName': 'Mathematics',
+                'dueDate': '2026-11-30',
+                'maxMarks': 20,
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Homework.objects.filter(school=self.school).count(), 1)
+        self.assertEqual(fanout.call_count, 2)
+        for call in fanout.call_args_list:
+            self.assertNotIn('studentIds', call.kwargs['related'])
+            self.assertEqual(call.kwargs['related']['targetClass'], 'all')
+            self.assertEqual(len(call.kwargs['recipient_ids']), 1)

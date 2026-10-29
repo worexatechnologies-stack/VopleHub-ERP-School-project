@@ -604,6 +604,52 @@ class TurnstileLoginResponseTests(TestCase):
         self.assertIn('Cloudflare', error)
 
 
+class StudentCredentialRecoveryTests(TestCase):
+    def setUp(self):
+        self.school = School.objects.create(name='Credential Recovery School', code='credential-recovery')
+        self.admin = User.objects.create_user(
+            username='recovery-admin', email='recovery-admin@example.com', password='StrongPass123!',
+            role=User.Role.SCHOOL_ADMIN, school=self.school,
+        )
+        self.student = Student.objects.create(
+            school=self.school, admission_no='RECOVERY-1', name='Recovery Student',
+            class_name='8', section='A', roll_no=1, parent_name='Recovery Parent',
+            parent_phone='9711112233', parent_email='recovery-parent@example.com',
+            dob=date(2012, 1, 1), gender='Female', academic_year='2026-27',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    def test_reset_endpoint_creates_missing_student_and_parent_logins(self):
+        endpoint = f'/api/v1/auth/students/{self.student.pk}/reset-credentials/'
+
+        student_response = self.client.post(endpoint, {'role': 'Student'}, format='json')
+        self.assertEqual(student_response.status_code, 200)
+        self.assertTrue(student_response.data['temporaryPassword'])
+        self.assertTrue(StudentProfile.objects.filter(student=self.student, user__must_change_password=True).exists())
+
+        parent_response = self.client.post(endpoint, {'role': 'Parent'}, format='json')
+        self.assertEqual(parent_response.status_code, 200)
+        self.assertTrue(parent_response.data['temporaryPassword'])
+        self.assertTrue(ParentProfile.objects.filter(students=self.student, user__must_change_password=True).exists())
+
+    def test_reset_endpoint_rejects_students_from_another_school(self):
+        other_school = School.objects.create(name='Other Recovery School', code='other-recovery')
+        other_student = Student.objects.create(
+            school=other_school, admission_no='OTHER-1', name='Other Student',
+            class_name='8', section='A', roll_no=1, parent_name='Other Parent',
+            parent_phone='9711112244', parent_email='other-parent@example.com',
+            dob=date(2012, 1, 1), gender='Female', academic_year='2026-27',
+        )
+
+        response = self.client.post(
+            f'/api/v1/auth/students/{other_student.pk}/reset-credentials/',
+            {'role': 'Student'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+
 @override_settings(SECURE_SSL_REDIRECT=False)
 class LogoutTests(TestCase):
     def test_logout_revokes_the_opaque_refresh_token(self):

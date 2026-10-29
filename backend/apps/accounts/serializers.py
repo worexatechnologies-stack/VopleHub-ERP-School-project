@@ -39,7 +39,7 @@ class UserSerializer(serializers.ModelSerializer):
         if obj.role != User.Role.PARENT:
             return []
         profile = getattr(obj, 'parent_profile', None)
-        return [str(student_id) for student_id in profile.students.values_list('id', flat=True)] if profile else []
+        return [str(student.pk) for student in profile.students.all()] if profile else []
 
     def get_teacherId(self, obj) -> Optional[int]:
         if obj.role != User.Role.TEACHER:
@@ -53,8 +53,11 @@ class UserSerializer(serializers.ModelSerializer):
         prof = getattr(obj, 'teacher_profile', None)
         if not prof:
             return []
-        classes = list(prof.managed_classes.values('id', 'name', 'code'))
-        for sec in prof.managed_sections.select_related('class_room').all():
+        classes = [
+            {'id': classroom.id, 'name': classroom.name, 'code': classroom.code}
+            for classroom in prof.managed_classes.all()
+        ]
+        for sec in prof.managed_sections.all():
             if not any(c['id'] == sec.class_room_id for c in classes):
                 classes.append({'id': sec.class_room_id, 'name': f"{sec.class_room.name} ({sec.name})", 'code': sec.class_room.code})
         return classes

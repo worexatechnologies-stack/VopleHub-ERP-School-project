@@ -1222,8 +1222,9 @@ class HomeworkViewSet(TenantScopedViewSet):
         from apps.staff.models import Teacher
         from apps.sis.models import Student
         from apps.accounts.models import ParentProfile, StudentProfile, User
-        from apps.notifications.views import create_rows
+        from apps.notifications.tasks import fanout_notification_task
         from rest_framework.exceptions import PermissionDenied
+        import logging
 
         user = self.request.user
         teacher = _active_teacher_profile(user)
@@ -1368,55 +1369,74 @@ class HomeworkViewSet(TenantScopedViewSet):
             if not is_all_classes and instance.section_name and instance.section_name.lower() != 'all':
                 student_qs = student_qs.filter(Q(section__iexact=instance.section_name) | Q(section=''))
 
-            students = list(student_qs)
-            if students:
-                student_user_ids = list(StudentProfile.objects.filter(student__in=students).values_list('user_id', flat=True))
-                student_users = list(User.objects.filter(id__in=student_user_ids, is_active=True))
+            student_ids = list(student_qs.values_list('id', flat=True))
+            if student_ids:
+                student_user_ids = list(
+                    StudentProfile.objects.filter(
+                        student_id__in=student_ids,
+                        user__school_id=instance.school_id,
+                        user__is_active=True,
+                    ).values_list('user_id', flat=True).distinct()
+                )
+                parent_user_ids = list(
+                    ParentProfile.objects.filter(
+                        students__id__in=student_ids,
+                        user__school_id=instance.school_id,
+                        user__is_active=True,
+                    ).values_list('user_id', flat=True).distinct()
+                )
 
-                if student_users:
-                    create_rows(
-                        sender=user,
-                        recipients=student_users,
-                        channel='teacher-to-students',
-                        category='Homework',
-                        title=f"New Homework: {instance.subject_name} - {instance.title}",
-                        body=f"Class {instance.class_name} ({instance.section_name or 'All Sections'}). Due: {instance.due_date}. Instructions: {instance.description[:140]}",
-                        related={
-                            'homeworkId': instance.id,
-                            'title': instance.title,
-                            'subject': instance.subject_name,
-                            'dueDate': str(instance.due_date),
-                            'maxMarks': instance.max_marks,
-                            'targetClass': instance.class_name,
-                            'targetSection': instance.section_name or '',
-                            'studentIds': [s.id for s in students],
-                        }
-                    )
+                target_class = 'all' if is_all_classes else instance.class_name
+                common_related = {
+                    'homeworkId': instance.id,
+                    'title': instance.title,
+                    'subject': instance.subject_name,
+                    'dueDate': str(instance.due_date),
+                    'maxMarks': instance.max_marks,
+                    'targetClass': target_class,
+                    'targetSection': instance.section_name or '',
+                }
 
-                parent_profiles = ParentProfile.objects.filter(students__in=students).select_related('user').distinct()
-                parent_users = [pp.user for pp in parent_profiles if pp.user and pp.user.is_active]
+                def queue_fanout(recipient_ids, *, channel, title, body):
+                    if not recipient_ids:
+                        return
+                    payload = {
+                        'school_id': instance.school_id,
+                        'sender_id': user.pk,
+                        'recipient_ids': recipient_ids,
+                        'channel': channel,
+                        'category': 'Homework',
+                        'title': title,
+                        'body': body,
+                        'related': common_related,
+                    }
 
-                if parent_users:
-                    create_rows(
-                        sender=user,
-                        recipients=parent_users,
-                        channel='teacher-to-parents',
-                        category='Homework',
-                        title=f"New Homework Assigned: {instance.subject_name} - {instance.title}",
-                        body=f"For Class {instance.class_name} ({instance.section_name or 'All Sections'}). Due: {instance.due_date}. Instructions: {instance.description[:140]}",
-                        related={
-                            'homeworkId': instance.id,
-                            'title': instance.title,
-                            'subject': instance.subject_name,
-                            'dueDate': str(instance.due_date),
-                            'maxMarks': instance.max_marks,
-                            'targetClass': instance.class_name,
-                            'targetSection': instance.section_name or '',
-                            'studentIds': [s.id for s in students],
-                        }
-                    )
+                    def enqueue():
+                        try:
+                            fanout_notification_task.delay(**payload)
+                        except Exception:
+                            # Homework is already saved; notification broker
+                            # outages must not turn a successful save into a
+                            # failed/timeout HTTP request.
+                            logging.getLogger(__name__).exception(
+                                'Could not queue homework notifications for homework %s', instance.pk
+                            )
+
+                    transaction.on_commit(enqueue)
+
+                queue_fanout(
+                    student_user_ids,
+                    channel='teacher-to-students',
+                    title=f"New Homework: {instance.subject_name} - {instance.title}",
+                    body=f"Class {instance.class_name} ({instance.section_name or 'All Sections'}). Due: {instance.due_date}. Instructions: {instance.description[:140]}",
+                )
+                queue_fanout(
+                    parent_user_ids,
+                    channel='teacher-to-parents',
+                    title=f"New Homework Assigned: {instance.subject_name} - {instance.title}",
+                    body=f"For Class {instance.class_name} ({instance.section_name or 'All Sections'}). Due: {instance.due_date}. Instructions: {instance.description[:140]}",
+                )
         except Exception as e:
-            import logging
             logging.getLogger(__name__).warning("Failed to auto-send homework notifications: %s", e)
 
     def perform_update(self, serializer):

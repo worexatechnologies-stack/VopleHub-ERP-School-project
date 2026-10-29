@@ -719,11 +719,19 @@ export default function HomeworkModule({ user, students = [], onNavigateToTab }:
       refetch();
     } catch (err: any) {
       console.error('Failed to save homework:', err);
-      const errorMsg =
-        err?.data?.detail ||
-        (err?.data && typeof err.data === 'object' ? Object.values(err.data).flat().join(' ') : null) ||
-        err?.message ||
-        'Failed to save homework. Please check your network and try again.';
+      const dataMessage = typeof err?.data === 'string'
+        ? err.data
+        : err?.data?.detail ||
+          (err?.data && typeof err.data === 'object' ? Object.values(err.data).flat().join(' ') : null);
+      const errorMsg = dataMessage ||
+        (err?.status === 'FETCH_ERROR'
+          ? `Could not reach the server${err?.error ? `: ${err.error}` : '. Check your connection and try again.'}`
+          : err?.status === 'PARSING_ERROR'
+          ? `The server returned an unreadable response (HTTP ${err.originalStatus}). Refresh the homework list before retrying.`
+          : err?.message ||
+            (typeof err?.status === 'number'
+              ? `The server could not save this homework (HTTP ${err.status}). Please retry.`
+              : 'Failed to save homework. Please try again.'));
       alert(errorMsg);
     }
   };

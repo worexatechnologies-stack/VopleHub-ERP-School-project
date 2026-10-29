@@ -138,6 +138,14 @@ export const authApi = baseApi.injectEndpoints({
       }),
       invalidatesTags: ['Auth'],
     }),
+    resetStudentLoginCredentials: build.mutation<{ userId: number; loginId: string; temporaryPassword: string }, { studentId: string; role: 'Student' | 'Parent' }>({
+      query: (body) => ({
+        url: `/auth/students/${body.studentId}/reset-credentials/`,
+        method: 'POST',
+        body: { role: body.role },
+      }),
+      invalidatesTags: ['Auth'],
+    }),
     getUsers: build.query<Array<{
       id: number;
       email: string;
