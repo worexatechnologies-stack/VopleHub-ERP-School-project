@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Inbox,
@@ -52,6 +52,7 @@ import {
 import AuthenticatedImage from './AuthenticatedImage';
 import { copyToClipboard } from '../utils/clipboard';
 import type { Student } from '../types';
+import { chatSocket } from '../services/chatSocket';
 
 export interface AdmissionsModuleProps {
   students: Student[];
@@ -126,13 +127,19 @@ export default function AdmissionsModule({
   } | null>(null);
   const [downloadingDocAppId, setDownloadingDocAppId] = useState<number | null>(null);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [realtimeConnected, setRealtimeConnected] = useState(chatSocket.getStatus() === 'connected');
 
   // Backend RTK Queries & Mutations
   const {
     data: enrollmentApplications = [],
     isLoading: isAppsLoading,
     refetch: refetchApplications,
-  } = useGetEnrollmentApplicationsQuery();
+  } = useGetEnrollmentApplicationsQuery(undefined, {
+    // WebSocket is instant; background polling reconciles missed events and
+    // keeps the queue current when the connection is unavailable.
+    pollingInterval: realtimeConnected ? 30_000 : 10_000,
+    skipPollingIfUnfocused: true,
+  });
 
   const {
     data: enrollmentLinks = [],
@@ -144,6 +151,18 @@ export default function AdmissionsModule({
   const [rejectEnrollmentApplication, { isLoading: isRejectingApp }] = useRejectEnrollmentApplicationMutation();
   const [createEnrollmentLink, { isLoading: isCreatingLink }] = useCreateEnrollmentLinkMutation();
   const [deactivateEnrollmentLink] = useDeactivateEnrollmentLinkMutation();
+
+  useEffect(() => chatSocket.subscribeStatus((socketStatus) => {
+    setRealtimeConnected(socketStatus === 'connected');
+  }), []);
+
+  useEffect(() => chatSocket.on('enrollment.sync', () => {
+    refetchApplications();
+  }), [refetchApplications]);
+
+  useEffect(() => {
+    if (realtimeConnected) refetchApplications();
+  }, [realtimeConnected, refetchApplications]);
 
   // Metrics
   const stats = useMemo(() => {
@@ -518,6 +537,10 @@ export default function AdmissionsModule({
               </span>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
                 Cycle: {yearFilter || currentAcademicYear}
+              </span>
+              <span className={`inline-flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full border ${realtimeConnected ? 'bg-emerald-500/10 text-emerald-300 border-emerald-400/30' : 'bg-amber-500/10 text-amber-200 border-amber-400/30'}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${realtimeConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-300'}`} />
+                {realtimeConnected ? 'LIVE' : 'RECONNECTING'}
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white">

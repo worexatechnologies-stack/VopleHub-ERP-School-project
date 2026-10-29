@@ -48,6 +48,18 @@ def invalidate_student_dependent_caches(school_id, academic_year: str = ''):
             cache.delete(f"school_revenue_{school_id}_{academic_year}")
     except Exception:
         pass
+
+
+def schedule_enrollment_sync(school_id, action: str, application_id):
+    """Publish an enrollment queue event only after its database write commits."""
+    from apps.common.realtime import broadcast_sync_event
+
+    transaction.on_commit(lambda: broadcast_sync_event(
+        school_id=school_id,
+        entity='enrollment',
+        action=action,
+        entity_id=application_id,
+    ))
 from .access import teacher_can_access_student, teacher_student_queryset
 from .models import AcademicHistory, Student, StudentDocument, EnrollmentLink, EnrollmentApplication
 from .serializers import (
@@ -2100,6 +2112,8 @@ class SubmitEnrollmentApplicationView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        schedule_enrollment_sync(link.school_id, 'created', application.pk)
+
         # Notify school admin of new admission application
         try:
             from apps.notifications.services import notify_school_admins
@@ -2330,6 +2344,8 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
             app.created_student = student
             app.save()
 
+            schedule_enrollment_sync(school.pk, 'updated', app.pk)
+
             if app.document_data or app.document_key:
                 StudentDocument.objects.create(
                     student=student,
@@ -2387,6 +2403,7 @@ class EnrollmentApplicationViewSet(TenantScopedViewSet):
         app.status = EnrollmentApplication.Status.REJECTED
         app.rejection_remarks = str(request.data.get('remarks', '')).strip()
         app.save(update_fields=['status', 'rejection_remarks'])
+        schedule_enrollment_sync(app.school_id, 'updated', app.pk)
 
         if app.user and not app.created_student:
             app.user.delete()
