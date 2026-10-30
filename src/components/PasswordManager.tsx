@@ -9,8 +9,6 @@ import {
   Search,
   Copy,
   Check,
-  Eye,
-  EyeOff,
   Download,
   RefreshCw,
   Filter,
@@ -34,13 +32,15 @@ import {
 } from 'lucide-react';
 import {
   useGetVaultCredentialsQuery,
+  useGetVaultSummaryQuery,
   useSyncVaultRosterMutation,
   useResetVaultCredentialPasswordMutation,
-  useUpdateVaultCredentialMutation,
   useDeleteVaultCredentialMutation,
+  OneTimeCredential,
   VaultCredential,
 } from '../store/api/vaultApi';
 import { useGetClassesQuery, useGetSectionsQuery } from '../store/api/academicApi';
+import { useGetSchoolsQuery } from '../store/api/schoolApi';
 import { copyToClipboard as robustCopyToClipboard } from '../utils/clipboard';
 
 interface PasswordManagerProps {
@@ -64,7 +64,7 @@ export default function PasswordManager({
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(50);
-  const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set());
+  const [ordering, setOrdering] = useState('name');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
@@ -78,56 +78,53 @@ export default function PasswordManager({
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Super Admin action modal states
-  const [updatingAdminItem, setUpdatingAdminItem] = useState<VaultCredential | null>(null);
-  const [adminNewPassword, setAdminNewPassword] = useState('');
+  const [oneTimeCredential, setOneTimeCredential] = useState<OneTimeCredential | null>(null);
   const [adminDeleteCandidate, setAdminDeleteCandidate] = useState<VaultCredential | null>(null);
 
   // Fetch official school academic classes & sections for authoritative dropdown options
   const { data: dbClasses = [] } = useGetClassesQuery(undefined, { skip: isSuperAdmin });
   const { data: dbSections = [] } = useGetSectionsQuery(undefined, { skip: isSuperAdmin });
 
-  // Unfiltered vault query for stable overview KPI counts and full class/section discovery
-  const { data: allVaultCredentials = [] } = useGetVaultCredentialsQuery(
-    isSuperAdmin ? { role: 'admin' } : {},
-    { refetchOnMountOrArgChange: true }
-  );
+  const { data: vaultSummary } = useGetVaultSummaryQuery({
+    schoolId: isSuperAdmin && selectedBranch !== 'all' ? selectedBranch : undefined,
+  });
 
   // Filtered RTK Query hooks with live auto-sync polling every 3 seconds
-  const { data: rawCredentials = [], isLoading, isFetching, refetch } = useGetVaultCredentialsQuery(
+  const { data: vaultPage, isLoading, isFetching, refetch } = useGetVaultCredentialsQuery(
     {
       role: isSuperAdmin ? 'admin' : selectedRole !== 'all' ? selectedRole : undefined,
       className: !isSuperAdmin && selectedClass !== 'all' ? selectedClass : undefined,
       section: !isSuperAdmin && selectedSection !== 'all' ? selectedSection : undefined,
       search: debouncedSearch ? debouncedSearch : undefined,
+      schoolId: isSuperAdmin && selectedBranch !== 'all' ? selectedBranch : undefined,
+      page,
+      page_size: pageSize,
+      ordering,
     },
     {
-      pollingInterval: 3000,
+      pollingInterval: 30000,
       refetchOnMountOrArgChange: true,
       refetchOnFocus: true,
       refetchOnReconnect: true,
     }
   );
+  const rawCredentials = vaultPage?.results || [];
+  const matchingCount = vaultPage?.count || 0;
+  const { data: schools = [] } = useGetSchoolsQuery(undefined, { skip: !isSuperAdmin });
 
   const [syncVaultRoster, { isLoading: isSyncing }] = useSyncVaultRosterMutation();
   const [resetPassword, { isLoading: isResetting }] = useResetVaultCredentialPasswordMutation();
-  const [updateVaultCredential, { isLoading: isUpdatingCred }] = useUpdateVaultCredentialMutation();
   const [deleteVaultCredential, { isLoading: isDeletingCred }] = useDeleteVaultCredentialMutation();
 
   // Distinct branches for Super Admin
   const branchOptions = useMemo(() => {
-    const set = new Set<string>();
-    rawCredentials.forEach((c) => {
-      if (c.schoolName) set.add(c.schoolName);
-    });
-    return Array.from(set).sort();
-  }, [rawCredentials]);
+    return schools.map((school) => ({ id: String(school.id), name: school.schoolName })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [schools]);
 
   // Filtered credentials (handling branch filter for Super Admin)
   const credentials = useMemo(() => {
-    if (!isSuperAdmin || selectedBranch === 'all') return rawCredentials;
-    return rawCredentials.filter((c) => c.schoolName === selectedBranch);
-  }, [rawCredentials, isSuperAdmin, selectedBranch]);
+    return rawCredentials;
+  }, [rawCredentials]);
 
   // Automatically sync roster on mount in background to guarantee all accounts have live credentials
   useEffect(() => {
@@ -165,7 +162,7 @@ export default function PasswordManager({
     });
 
     // 2. Add from all vault records
-    allVaultCredentials.forEach((c) => {
+    credentials.forEach((c) => {
       if (c.className && !map.has(c.className)) {
         map.set(c.className, formatClassDisplay(c.className));
       }
@@ -180,7 +177,7 @@ export default function PasswordManager({
         if (numA !== numB) return numA - numB;
         return a.label.localeCompare(b.label, undefined, { numeric: true });
       });
-  }, [dbClasses, allVaultCredentials]);
+  }, [dbClasses, credentials]);
 
   // Distinct sections available for the currently selected class
   const sectionOptions = useMemo(() => {
@@ -202,7 +199,7 @@ export default function PasswordManager({
       }
 
       // Also harvest sections from vault credentials matching this class
-      allVaultCredentials.forEach((c) => {
+      credentials.forEach((c) => {
         if (
           c.className &&
           (c.className.toLowerCase() === selectedClass.toLowerCase() ||
@@ -215,13 +212,13 @@ export default function PasswordManager({
     } else {
       // All sections across the school
       dbSections.forEach((s) => set.add(s.name.toUpperCase()));
-      allVaultCredentials.forEach((c) => {
+      credentials.forEach((c) => {
         if (c.section) set.add(c.section.trim().toUpperCase());
       });
     }
 
     return Array.from(set).sort();
-  }, [selectedClass, dbClasses, dbSections, allVaultCredentials]);
+  }, [selectedClass, dbClasses, dbSections, credentials]);
 
   // Handlers for filter changes
   const handleRoleChange = (role: 'all' | 'student' | 'teacher' | 'parent') => {
@@ -247,36 +244,21 @@ export default function PasswordManager({
     setPage(1);
   };
 
-  // Aggregate metrics: derived from allVaultCredentials so overview cards stay stable
+  // Summary counts come from a bounded aggregate endpoint; list rows stay paginated.
   const stats = useMemo(() => {
-    const source = allVaultCredentials.length > 0 ? allVaultCredentials : credentials;
-    const total = source.length;
-    const students = source.filter((c) => c.role === 'student').length;
-    const teachers = source.filter((c) => c.role === 'teacher').length;
-    const parents = source.filter((c) => c.role === 'parent').length;
-    const admins = source.filter((c) => c.role === 'admin' || c.role === 'school_admin').length;
+    const byRole = vaultSummary?.byRole || {};
+    const total = vaultSummary?.total ?? credentials.length;
+    const students = byRole.student?.total || 0;
+    const teachers = byRole.teacher?.total || 0;
+    const parents = byRole.parent?.total || 0;
+    const admins = (byRole.admin?.total || 0) + (byRole.school_admin?.total || 0);
     return { total, students, teachers, parents, admins };
-  }, [allVaultCredentials, credentials]);
+  }, [vaultSummary, credentials]);
 
   // Client-side pagination calculations
-  const totalPages = Math.max(1, Math.ceil(credentials.length / pageSize));
-  const paginatedCredentials = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return credentials.slice(start, start + pageSize);
-  }, [credentials, page, pageSize]);
-
-  // Toggle reveal
-  const toggleReveal = (id: number) => {
-    setRevealedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
+  const totalPages = Math.max(1, Math.ceil(matchingCount / pageSize));
+  const paginatedCredentials = credentials;
+  const temporaryCount = Object.values(vaultSummary?.byRole || {}).reduce((sum, item) => sum + item.temporary, 0);
 
   // Robust cross-platform copy handler
   const handleCopy = async (
@@ -351,34 +333,11 @@ export default function PasswordManager({
       return;
     }
     try {
-      await resetPassword(item.id).unwrap();
-      // Ensure the new password is shown
-      setRevealedIds((prev) => new Set([...prev, item.id]));
-    } catch (err: any) {
-      alert(`Could not reset password: ${err?.data?.detail || err?.message}`);
-    }
-  };
-
-  // Super Admin custom password update
-  const handleSaveAdminNewPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!updatingAdminItem || !adminNewPassword) return;
-    if (adminNewPassword.length < 8) {
-      alert('Password must be at least 8 characters long.');
-      return;
-    }
-    try {
-      await updateVaultCredential({
-        id: updatingAdminItem.id,
-        password: adminNewPassword,
-      }).unwrap();
-      setRevealedIds((prev) => new Set([...prev, updatingAdminItem.id]));
-      setCopyToast(`Password updated for ${updatingAdminItem.name}`);
-      setUpdatingAdminItem(null);
-      setAdminNewPassword('');
+      const credential = await resetPassword(item.id).unwrap();
+      setOneTimeCredential(credential);
       refetch();
     } catch (err: any) {
-      alert(err?.data?.detail || err?.message || 'Could not update administrator password.');
+      alert(`Could not reset password: ${err?.data?.detail || err?.message}`);
     }
   };
 
@@ -400,12 +359,11 @@ export default function PasswordManager({
     if (!credentials.length) return;
 
     if (isSuperAdmin) {
-      const headers = ['Administrator Name', 'Login Email / ID', 'Allocated School Branch', 'Password', 'Status'];
+      const headers = ['Administrator Name', 'Login Email / ID', 'Allocated School Branch', 'Status'];
       const rows = credentials.map((c) => [
         `"${c.name.replace(/"/g, '""')}"`,
         `"${c.loginId}"`,
         `"${(c.schoolName || 'Central Branch').replace(/"/g, '""')}"`,
-        `"${c.password}"`,
         '"Active"',
       ]);
       const csvContent =
@@ -416,7 +374,7 @@ export default function PasswordManager({
       link.setAttribute('href', encodedUri);
       link.setAttribute(
         'download',
-        `school_admins_passwords_${new Date().toISOString().slice(0, 10)}.csv`
+        `school_admin_directory_${new Date().toISOString().slice(0, 10)}.csv`
       );
       document.body.appendChild(link);
       link.click();
@@ -428,7 +386,6 @@ export default function PasswordManager({
       'Role',
       'Name',
       'Login Email / ID',
-      'Password',
       'Admission / Employee ID',
       'Class & Section',
       'Academic Year',
@@ -440,7 +397,6 @@ export default function PasswordManager({
       c.role.toUpperCase(),
       `"${c.name.replace(/"/g, '""')}"`,
       `"${c.loginId}"`,
-      `"${c.password}"`,
       `"${c.identifier || ''}"`,
       `"${c.className ? `${c.className} ${c.section}`.trim() : ''}"`,
       `"${c.academicYear || ''}"`,
@@ -457,7 +413,7 @@ export default function PasswordManager({
     link.setAttribute('href', encodedUri);
     link.setAttribute(
       'download',
-      `${schoolName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_passwords_${new Date().toISOString().slice(0, 10)}.csv`
+      `${schoolName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_account_directory_${new Date().toISOString().slice(0, 10)}.csv`
     );
     document.body.appendChild(link);
     link.click();
@@ -519,9 +475,12 @@ export default function PasswordManager({
               className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 hover:bg-indigo-500 px-4 py-2.5 text-xs font-bold text-white shadow-lg shadow-indigo-600/30 transition-all cursor-pointer disabled:opacity-50"
             >
               <Download className="w-4 h-4" />
-              <span>Export Passwords (CSV)</span>
+              <span>Export Directory (CSV)</span>
             </button>
           </div>
+          <select aria-label="Sort credential directory" value={ordering} onChange={(event) => { setOrdering(event.target.value); setPage(1); }} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700">
+            <option value="name">Name A–Z</option><option value="-name">Name Z–A</option><option value="role">Role</option><option value="-updated_at">Recently updated</option><option value="updated_at">Oldest updated</option>
+          </select>
         </div>
 
         {/* Security Invariant Badge */}
@@ -531,7 +490,7 @@ export default function PasswordManager({
             <span>
               {isSuperAdmin ? (
                 <>
-                  <strong className="text-white">Root Clearance:</strong> Exclusively School Administrator credentials are displayed in this console.
+                  <strong className="text-white">Root Clearance:</strong> Only School Administrator account metadata is displayed here. Passwords are never retrievable from the directory.
                 </>
               ) : (
                 <>
@@ -585,7 +544,7 @@ export default function PasswordManager({
                 <UserCheck className="w-4 h-4" />
               </div>
             </div>
-            <div className="mt-2 text-2xl font-black text-slate-900">{credentials.length}</div>
+            <div className="mt-2 text-2xl font-black text-slate-900">{matchingCount}</div>
             <p className="text-[11px] text-slate-400 mt-0.5">School administrators</p>
           </div>
 
@@ -596,7 +555,7 @@ export default function PasswordManager({
                 <Key className="w-4 h-4" />
               </div>
             </div>
-            <div className="mt-2 text-2xl font-black text-slate-900">{credentials.filter((c) => c.password).length}</div>
+            <div className="mt-2 text-2xl font-black text-slate-900">{temporaryCount}</div>
             <p className="text-[11px] text-slate-400 mt-0.5">Encrypted login keys</p>
           </div>
 
@@ -613,13 +572,13 @@ export default function PasswordManager({
 
           <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-amber-600 uppercase tracking-wider">Revealed Keys</span>
+              <span className="text-xs font-bold text-amber-600 uppercase tracking-wider">Temporary Accounts</span>
               <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
-                <Eye className="w-4 h-4" />
+                <Lock className="w-4 h-4" />
               </div>
             </div>
-            <div className="mt-2 text-2xl font-black text-slate-900">{revealedIds.size}</div>
-            <p className="text-[11px] text-slate-400 mt-0.5">Passwords inspected</p>
+            <div className="mt-2 text-2xl font-black text-slate-900">{temporaryCount}</div>
+            <p className="text-[11px] text-slate-400 mt-0.5">Must change at next sign-in</p>
           </div>
         </div>
       ) : (
@@ -676,7 +635,7 @@ export default function PasswordManager({
           <div className="flex items-center gap-2">
             <span className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-50 border border-indigo-100 px-3 py-1.5 text-xs font-bold text-indigo-700">
               <UserCheck className="w-3.5 h-3.5" />
-              <span>School Administrators ({credentials.length})</span>
+              <span>School Administrators ({matchingCount})</span>
             </span>
 
             {branchOptions.length > 0 && (
@@ -691,8 +650,8 @@ export default function PasswordManager({
                 >
                   <option value="all">All School Branches</option>
                   {branchOptions.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
+                    <option key={b.id} value={b.id}>
+                      {b.name}
                     </option>
                   ))}
                 </select>
@@ -888,7 +847,7 @@ export default function PasswordManager({
               </span>
             )}
             <span className="text-slate-500 font-semibold ml-1">
-              ({credentials.length} matching account{credentials.length === 1 ? '' : 's'})
+              ({matchingCount} matching account{matchingCount === 1 ? '' : 's'})
             </span>
           </div>
 
@@ -935,15 +894,13 @@ export default function PasswordManager({
                   <th className="py-3 px-4">Login ID / Email</th>
                   <th className="py-3 px-4">Allocated School Branch</th>
                   <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4">Password Credential</th>
+                  <th className="py-3 px-4">Password Status</th>
                   <th className="py-3 px-4 text-right">Clearance Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {paginatedCredentials.map((item) => {
-                  const isRevealed = revealedIds.has(item.id);
                   const isUserCopied = copiedKey === `login-${item.id}`;
-                  const isPassCopied = copiedKey === `pass-${item.id}`;
 
                   return (
                     <tr key={item.id} className="hover:bg-slate-50/80 transition-colors group">
@@ -1007,76 +964,32 @@ export default function PasswordManager({
                         </span>
                       </td>
 
-                      {/* Password */}
+                      {/* Password status only. The list never returns credentials. */}
                       <td className="py-3 px-4">
-                        {item.password === '[User Managed]' || !item.mustChangePassword || item.source === 'user_password_change' ? (
-                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold" title="Protected: User has set their personal password (hashed via Argon2id)">
+                        {!item.mustChangePassword ? (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold">
                             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                             <span>User Set • Protected</span>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => toggleReveal(item.id)}
-                              className={`font-mono text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer text-left ${
-                                isRevealed
-                                  ? 'bg-amber-50/80 border-amber-200 text-amber-900 font-bold select-all'
-                                  : 'bg-slate-100 border-slate-200 text-slate-500 select-none tracking-widest hover:border-slate-300'
-                              }`}
-                              title="Click to toggle reveal"
-                            >
-                              {isRevealed ? item.password : '••••••••••••'}
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => toggleReveal(item.id)}
-                              className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
-                              title={isRevealed ? 'Hide Password' : 'Show Password'}
-                            >
-                              {isRevealed ? (
-                                <EyeOff className="w-3.5 h-3.5 text-amber-600" />
-                              ) : (
-                                <Eye className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={(e) => handleCopy(e, item.password, `pass-${item.id}`, `${item.name}'s Password`)}
-                              className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
-                                isPassCopied
-                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-600 shadow-xs scale-105'
-                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 hover:border-slate-300'
-                              }`}
-                              title={isPassCopied ? 'Copied Password!' : 'Copy Password'}
-                            >
-                              {isPassCopied ? (
-                                <Check className="w-3.5 h-3.5 text-emerald-600" />
-                              ) : (
-                                <Copy className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          </div>
+                          <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
+                            <Lock className="h-3.5 w-3.5" /> Must change at sign-in
+                          </span>
                         )}
                       </td>
 
                       {/* Clearance Actions */}
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-2">
-                          {/* Update Custom Password */}
                           <button
                             type="button"
-                            onClick={() => {
-                              setUpdatingAdminItem(item);
-                              setAdminNewPassword('');
-                            }}
-                            className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 px-2 py-1 text-[10px] font-bold text-amber-800 transition-all cursor-pointer"
-                            title="Set custom password for this administrator"
+                            onClick={() => handleResetPassword(item)}
+                            disabled={isResetting}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 px-2 py-1 text-[10px] font-bold text-amber-800 transition-all cursor-pointer disabled:opacity-50"
+                            title="Generate a one-time password and require a change at sign-in"
                           >
-                            <Key className="w-3 h-3 text-amber-600" />
-                            <span>Update Password</span>
+                            <RotateCcw className="w-3 h-3 text-amber-600" />
+                            <span>Reset Password</span>
                           </button>
 
                           {/* Delete Administrator */}
@@ -1106,16 +1019,14 @@ export default function PasswordManager({
                   <th className="py-3 px-4">User &amp; Role</th>
                   <th className="py-3 px-4">Details / Class</th>
                   <th className="py-3 px-4">Login ID (Username / Email)</th>
-                  <th className="py-3 px-4">Password</th>
+                  <th className="py-3 px-4">Password Status</th>
                   <th className="py-3 px-4">Source</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {paginatedCredentials.map((item) => {
-                  const isRevealed = revealedIds.has(item.id);
                   const isUserCopied = copiedKey === `login-${item.id}`;
-                  const isPassCopied = copiedKey === `pass-${item.id}`;
 
                   let roleBadge = (
                     <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200">
@@ -1205,55 +1116,14 @@ export default function PasswordManager({
                       </td>
 
                       <td className="py-3 px-4">
-                        {item.password === '[User Managed]' || !item.mustChangePassword || item.source === 'user_password_change' ? (
-                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold" title="Protected: User has set their personal password (hashed via Argon2id)">
+                        {item.mustChangePassword ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
+                            <Lock className="h-3.5 w-3.5" /> Must change at sign-in
+                          </span>
+                        ) : (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold">
                             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                             <span>User Set • Protected</span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => toggleReveal(item.id)}
-                              className={`font-mono text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer text-left ${
-                                isRevealed
-                                  ? 'bg-amber-50/80 border-amber-200 text-amber-900 font-bold select-all'
-                                  : 'bg-slate-100 border-slate-200 text-slate-500 select-none tracking-widest hover:border-slate-300'
-                              }`}
-                              title="Click to toggle reveal"
-                            >
-                              {isRevealed ? item.password : '••••••••••••'}
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => toggleReveal(item.id)}
-                              className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
-                              title={isRevealed ? 'Hide Password' : 'Show Password'}
-                            >
-                              {isRevealed ? (
-                                <EyeOff className="w-3.5 h-3.5 text-amber-600" />
-                              ) : (
-                                <Eye className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={(e) => handleCopy(e, item.password, `pass-${item.id}`, `${item.name}'s Password`)}
-                              className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
-                                isPassCopied
-                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-600 shadow-xs scale-105'
-                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 hover:border-slate-300'
-                              }`}
-                              title={isPassCopied ? 'Copied Password!' : 'Copy Password'}
-                            >
-                              {isPassCopied ? (
-                                <Check className="w-3.5 h-3.5 text-emerald-600" />
-                              ) : (
-                                <Copy className="w-3.5 h-3.5" />
-                              )}
-                            </button>
                           </div>
                         )}
                       </td>
@@ -1280,34 +1150,6 @@ export default function PasswordManager({
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
-                            onClick={(e) => handleCopy(
-                              e,
-                              `School: ${schoolName}\nRole: ${item.role.toUpperCase()}\nName: ${item.name}\nLogin ID: ${item.loginId}\nPassword: ${item.password}`,
-                              `slip-${item.id}`,
-                              `${item.name}'s Credentials Slip`
-                            )}
-                            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all cursor-pointer ${
-                              copiedKey === `slip-${item.id}`
-                                ? 'bg-emerald-50 border-emerald-300 text-emerald-700 shadow-xs'
-                                : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:border-slate-300'
-                            }`}
-                            title="Copy Login ID and Password together"
-                          >
-                            {copiedKey === `slip-${item.id}` ? (
-                              <>
-                                <Check className="w-3 h-3 text-emerald-600" />
-                                <span>Copied Slip</span>
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-3 h-3 text-slate-400" />
-                                <span>Copy Slip</span>
-                              </>
-                            )}
-                          </button>
-
-                          <button
-                            type="button"
                             onClick={() => handleResetPassword(item)}
                             disabled={isResetting}
                             className="inline-flex items-center gap-1 rounded-lg border border-slate-200 hover:bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition-all cursor-pointer disabled:opacity-50"
@@ -1327,14 +1169,14 @@ export default function PasswordManager({
         )}
 
         {/* Table Footer & Interactive Pagination Bar */}
-        {!isLoading && credentials.length > 0 && (
+        {!isLoading && matchingCount > 0 && (
           <div className="p-4 bg-slate-50/80 border-t border-slate-200/80 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
             <div className="text-slate-600 font-medium">
               Showing{' '}
               <strong className="text-slate-900 font-bold">
-                {credentials.length === 0 ? 0 : (page - 1) * pageSize + 1} - {Math.min(page * pageSize, credentials.length)}
+                {(page - 1) * pageSize + 1} - {Math.min(page * pageSize, matchingCount)}
               </strong>{' '}
-              of <strong className="text-indigo-700 font-bold">{credentials.length.toLocaleString()}</strong> credentials
+              of <strong className="text-indigo-700 font-bold">{matchingCount.toLocaleString()}</strong> credentials
               {selectedClass !== 'all' && (
                 <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-bold">
                   {formatClassDisplay(selectedClass)}
@@ -1408,77 +1250,37 @@ export default function PasswordManager({
         )}
       </div>
 
-      {/* Super Admin Update Password Modal */}
-      {updatingAdminItem && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-fade-in">
-          <div className="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-6 relative animate-scale-up space-y-4">
+      {oneTimeCredential && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
-                <Key className="w-5 h-5 text-amber-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-50 text-amber-700">
+                <Key className="h-5 w-5" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-slate-800">Update Administrator Password</h3>
-                <p className="text-xs text-slate-500">Super Admin Root Clearance</p>
+                <h3 className="text-base font-bold text-slate-900">Temporary password — shown once</h3>
+                <p className="text-xs text-slate-500">Give this to the account holder. They must change it at sign-in.</p>
               </div>
             </div>
-
-            <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-xs text-slate-700 space-y-1">
-              <div><span className="text-slate-400">Officer:</span> <span className="font-bold">{updatingAdminItem.name}</span></div>
-              <div><span className="text-slate-400">Login ID:</span> <span className="font-bold">{updatingAdminItem.loginId}</span></div>
-              <div><span className="text-slate-400">Branch:</span> <span className="font-bold">{updatingAdminItem.schoolName || 'Central Branch Office'}</span></div>
+            <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs text-slate-500">Login ID</div>
+              <div className="font-mono text-sm text-slate-800">{oneTimeCredential.loginId}</div>
+              <div className="pt-1 text-xs text-slate-500">Temporary password</div>
+              <div className="select-all break-all font-mono text-base font-bold text-slate-900">{oneTimeCredential.temporaryPassword}</div>
             </div>
-
-            <form onSubmit={handleSaveAdminNewPassword} className="space-y-4">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">New Password</label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*';
-                      let pass = '';
-                      for (let i = 0; i < 12; i++) pass += chars.charAt(Math.floor(Math.random() * chars.length));
-                      setAdminNewPassword(pass);
-                    }}
-                    className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer"
-                  >
-                    Generate Random
-                  </button>
-                </div>
-                <input
-                  autoFocus
-                  required
-                  type="text"
-                  minLength={8}
-                  placeholder="Enter at least 8 characters"
-                  value={adminNewPassword}
-                  onChange={(e) => setAdminNewPassword(e.target.value)}
-                  className="w-full text-xs bg-slate-50 border border-slate-200 p-2.5 rounded-xl focus:outline-indigo-500 text-slate-800 font-mono"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUpdatingAdminItem(null);
-                    setAdminNewPassword('');
-                  }}
-                  disabled={isUpdatingCred}
-                  className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-bold transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isUpdatingCred || adminNewPassword.length < 8}
-                  className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow-xs disabled:opacity-50 transition-colors cursor-pointer"
-                >
-                  <Key className="w-3.5 h-3.5" />
-                  {isUpdatingCred ? 'Saving in DB…' : 'Update Password'}
-                </button>
-              </div>
-            </form>
+            <p className="text-xs text-amber-800">Closing this window clears the password from the screen. It cannot be retrieved from the account list.</p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={(event) => handleCopy(event, oneTimeCredential.temporaryPassword, 'one-time-password', 'Temporary password')}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+              >Copy password</button>
+              <button
+                type="button"
+                onClick={() => setOneTimeCredential(null)}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700"
+              >Done</button>
+            </div>
           </div>
         </div>,
         document.body

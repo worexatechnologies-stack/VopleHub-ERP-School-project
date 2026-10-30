@@ -737,6 +737,7 @@ function AuthenticatedApp() {
   const handleUpdateStudent = async (updatedStudent: Student) => {
     if (isAuthenticated) {
       const body = new FormData();
+      const currentStudent = students.find((student) => student.id === updatedStudent.id);
       const fields: Record<string, string | number | undefined> = {
         name: updatedStudent.name, class_: updatedStudent.class, section: updatedStudent.section, sectionId: updatedStudent.sectionId,
         rollNo: updatedStudent.rollNo, parentName: updatedStudent.parentName,
@@ -746,7 +747,30 @@ function AuthenticatedApp() {
         academicYear: updatedStudent.academicYear, attendancePercentage: updatedStudent.attendancePercentage,
         feeTotal: updatedStudent.feeTotal, feePaid: updatedStudent.feePaid,
       };
-      Object.entries(fields).forEach(([key, value]) => { if (value !== undefined) body.append(key, String(value)); });
+      const currentValues: Record<string, string | number | undefined> = {
+        name: currentStudent?.name,
+        class_: currentStudent?.class,
+        section: currentStudent?.section,
+        sectionId: currentStudent?.sectionId,
+        rollNo: currentStudent?.rollNo,
+        parentName: currentStudent?.parentName,
+        parentPhone: currentStudent?.parentPhone,
+        parentEmail: currentStudent?.parentEmail,
+        dob: currentStudent?.dob,
+        gender: currentStudent?.gender,
+        address: currentStudent?.address,
+        medical_conditions: currentStudent?.medicalConditions,
+        status: currentStudent?.status,
+        academicYear: currentStudent?.academicYear,
+        attendancePercentage: currentStudent?.attendancePercentage,
+        feeTotal: currentStudent?.feeTotal,
+        feePaid: currentStudent?.feePaid,
+      };
+      Object.entries(fields).forEach(([key, value]) => {
+        if (value !== undefined && String(value ?? '') !== String(currentValues[key] ?? '')) {
+          body.append(key, String(value));
+        }
+      });
       if (updatedStudent.photoFile) body.append('photo', updatedStudent.photoFile);
       const saved = await dispatch(studentApi.endpoints.updateStudent.initiate({ id: updatedStudent.id, body })).unwrap();
       updatedStudent = {
@@ -1211,6 +1235,8 @@ function AuthenticatedApp() {
           { id: 'super-admin-dashboard', label: 'Overview Dashboard', icon: Grid },
           { id: 'super-admin-schools', label: 'School Branches', icon: School },
           { id: 'super-admin-admins', label: 'School Admins', icon: UserCheck },
+          { id: 'super-admin-public-learners', label: 'Public Learners', icon: Users },
+          { id: 'super-admin-audit', label: 'Security Audit', icon: FileText },
           { id: 'passwords', label: 'Password Manager', icon: Key },
           { id: 'super-admin-sys-settings', label: 'System Settings', icon: Settings }
         ];

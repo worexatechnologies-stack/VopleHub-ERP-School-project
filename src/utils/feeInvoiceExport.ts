@@ -46,6 +46,7 @@ export interface FeeInvoiceExportOptions {
     collected: number;
     pending: number;
   }>;
+  selectedSheets?: string[];
 }
 
 /**
@@ -65,7 +66,9 @@ export function exportFeeInvoicesToExcel(options: FeeInvoiceExportOptions): void
     quarterlyStats,
     componentDistributionStats,
     classReportData,
+    selectedSheets,
   } = options;
+  const includeSheet = (name: string) => !selectedSheets || selectedSheets.includes(name);
 
   // Filter students if a specific class is selected, otherwise export all
   const isFiltered = selectedClass && selectedClass !== 'All';
@@ -328,7 +331,7 @@ export function exportFeeInvoicesToExcel(options: FeeInvoiceExportOptions): void
   ];
 
   styleWorksheet(ws1, { theme: 'navy', hasTotalRow: true });
-  XLSX.utils.book_append_sheet(wb, ws1, 'Fee_Invoices_Ledger');
+  if (includeSheet('Fee_Invoices_Ledger')) XLSX.utils.book_append_sheet(wb, ws1, 'Fee_Invoices_Ledger');
 
   // ---------------------------------------------------------------------------
   // SHEET 2: PAYMENT RECEIPTS & CASH/BANK TRANSACTION LOG
@@ -406,7 +409,7 @@ export function exportFeeInvoicesToExcel(options: FeeInvoiceExportOptions): void
   ];
 
   styleWorksheet(ws2, { theme: 'emerald', hasTotalRow: true });
-  XLSX.utils.book_append_sheet(wb, ws2, 'Payment_Receipts_Log');
+  if (includeSheet('Payment_Receipts_Log')) XLSX.utils.book_append_sheet(wb, ws2, 'Payment_Receipts_Log');
 
   // ---------------------------------------------------------------------------
   // SHEET 3: QUARTERLY FEE SET & COLLECTION TALLY (Matches UI Section)
@@ -480,7 +483,7 @@ export function exportFeeInvoicesToExcel(options: FeeInvoiceExportOptions): void
   ];
 
   styleWorksheet(ws3, { theme: 'indigo', hasTotalRow: true });
-  XLSX.utils.book_append_sheet(wb, ws3, 'Quarterly_Collection_Tally');
+  if (includeSheet('Quarterly_Collection_Tally')) XLSX.utils.book_append_sheet(wb, ws3, 'Quarterly_Collection_Tally');
 
   // ---------------------------------------------------------------------------
   // SHEET 4: FEE COMPONENT ALLOCATION DISTRIBUTION
@@ -531,7 +534,7 @@ export function exportFeeInvoicesToExcel(options: FeeInvoiceExportOptions): void
   ];
 
   styleWorksheet(ws4, { theme: 'teal', hasTotalRow: true });
-  XLSX.utils.book_append_sheet(wb, ws4, 'Component_Distribution');
+  if (includeSheet('Component_Distribution')) XLSX.utils.book_append_sheet(wb, ws4, 'Component_Distribution');
 
   // ---------------------------------------------------------------------------
   // SHEET 5: CLASS-LEVEL FINANCIAL SUMMARY
@@ -629,7 +632,7 @@ export function exportFeeInvoicesToExcel(options: FeeInvoiceExportOptions): void
   ];
 
   styleWorksheet(ws5, { theme: 'slate', hasTotalRow: true });
-  XLSX.utils.book_append_sheet(wb, ws5, 'Class_Financial_Summary');
+  if (includeSheet('Class_Financial_Summary')) XLSX.utils.book_append_sheet(wb, ws5, 'Class_Financial_Summary');
 
   // ---------------------------------------------------------------------------
   // GENERATE AND TRIGGER FILE DOWNLOAD (PROPER EXCEL OPENXML .XLSX FORMAT)

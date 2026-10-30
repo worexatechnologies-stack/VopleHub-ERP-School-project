@@ -118,11 +118,15 @@ export const deleteFeeStructureFromDB = async (id: number | string): Promise<unk
 
 export const fetchStudentFeeRecordsFromDB = async (
   className?: string,
-  studentId?: string
+  studentId?: string,
+  forceRefetch = false,
 ): Promise<BackendStudentFeeRecord[]> => {
   try {
     const res = await store
-      .dispatch(financeApi.endpoints.getStudentFeeRecords.initiate({ className, studentId }))
+      .dispatch(financeApi.endpoints.getStudentFeeRecords.initiate(
+        { className, studentId },
+        { forceRefetch, subscribe: false },
+      ))
       .unwrap();
     return res || [];
   } catch (err) {
@@ -191,11 +195,12 @@ export const recordFeePaymentInDB = async (
     category?: string;
     installment_type?: string;
     quarter_id?: number;
-  }
+  },
+  studentId?: number | string,
 ): Promise<any> => {
   try {
     return await store
-      .dispatch(financeApi.endpoints.recordFeePayment.initiate({ recordId, body: paymentData }))
+      .dispatch(financeApi.endpoints.recordFeePayment.initiate({ recordId, studentId, body: paymentData }))
       .unwrap();
   } catch (err) {
     console.warn('Backend payment record error:', err);

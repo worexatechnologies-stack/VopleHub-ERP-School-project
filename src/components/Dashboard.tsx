@@ -104,17 +104,34 @@ export default function Dashboard({
   );
 
   // ── Document Queue & Verification State ──
+  const [docFilterTab, setDocFilterTab] = useState<'pending' | 'all' | 'student' | 'teacher' | 'verified'>('pending');
+  const [docSearchQuery, setDocSearchQuery] = useState('');
+  const [docSearchTerm, setDocSearchTerm] = useState('');
+  const [docPage, setDocPage] = useState(1);
+  const docPageSize = 25;
+  const documentQueueStatus = docFilterTab === 'pending'
+    ? 'Pending'
+    : docFilterTab === 'verified'
+      ? 'Verified'
+      : undefined;
+  const documentQueueType = docFilterTab === 'student' || docFilterTab === 'teacher'
+    ? docFilterTab
+    : undefined;
   const {
     data: docQueueData,
     isFetching: isFetchingDocs,
     refetch: refetchDocQueue,
-  } = useGetSchoolDocumentsQueueQuery(undefined, { skip: !isSchoolAdmin });
+  } = useGetSchoolDocumentsQueueQuery({
+    page: docPage,
+    page_size: docPageSize,
+    status: documentQueueStatus,
+    docType: documentQueueType,
+    search: docSearchTerm || undefined,
+  }, { skip: !isSchoolAdmin });
 
   const [verifyStudentDocMutation] = useVerifyStudentDocumentMutation();
   const [verifyTeacherDocMutation] = useVerifyTeacherDocumentMutation();
 
-  const [docFilterTab, setDocFilterTab] = useState<'pending' | 'all' | 'student' | 'teacher' | 'verified'>('pending');
-  const [docSearchQuery, setDocSearchQuery] = useState('');
   const [actionInProgressId, setActionInProgressId] = useState<string | null>(null);
 
   interface DashboardDocPreviewState {
@@ -130,6 +147,15 @@ export default function Dashboard({
 
   const [rejectingDoc, setRejectingDoc] = useState<SchoolDocumentItem | null>(null);
   const [rejectRemarks, setRejectRemarks] = useState('');
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDocSearchTerm(docSearchQuery.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [docSearchQuery]);
+
+  useEffect(() => {
+    setDocPage(1);
+  }, [docFilterTab, docSearchTerm]);
 
   const handleVerifyDoc = async (doc: SchoolDocumentItem) => {
     setActionInProgressId(`${doc.docType}-${doc.id}`);
@@ -273,26 +299,7 @@ export default function Dashboard({
     totalTeacherDocs: 0,
   };
 
-  const filteredDocuments = useMemo(() => {
-    const list = docQueueData?.documents || [];
-    return list.filter((doc) => {
-      if (docFilterTab === 'pending' && doc.status !== 'Pending') return false;
-      if (docFilterTab === 'verified' && doc.status !== 'Verified') return false;
-      if (docFilterTab === 'student' && doc.docType !== 'student') return false;
-      if (docFilterTab === 'teacher' && doc.docType !== 'teacher') return false;
-
-      if (docSearchQuery.trim()) {
-        const q = docSearchQuery.toLowerCase();
-        const personName = (doc.studentName || doc.teacherName || '').toLowerCase();
-        const docName = (doc.name || '').toLowerCase();
-        const cat = (doc.category || '').toLowerCase();
-        const cls = (doc.className || '').toLowerCase();
-        const file = (doc.fileName || '').toLowerCase();
-        return personName.includes(q) || docName.includes(q) || cat.includes(q) || cls.includes(q) || file.includes(q);
-      }
-      return true;
-    });
-  }, [docQueueData, docFilterTab, docSearchQuery]);
+  const filteredDocuments = docQueueData?.documents || [];
 
   const teachersList = useMemo(() => Array.isArray(teachersData) ? teachersData : (teachersData as any).results || [], [teachersData]);
   const activeTeachers = useMemo(() => teachersList.filter((t: any) => t.status === 'Active' || !t.status), [teachersList]);
@@ -962,6 +969,33 @@ export default function Dashboard({
           )}
         </div>
       </div>
+
+      {docQueueData && docQueueData.count > 0 && (
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 px-6 py-3 text-xs font-semibold text-slate-500">
+          <span>
+            Showing {(docPage - 1) * docPageSize + 1}–{Math.min(docPage * docPageSize, docQueueData.count)} of {docQueueData.count} matching documents
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDocPage((current) => Math.max(1, current - 1))}
+              disabled={docPage <= 1 || isFetchingDocs}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" /> Previous
+            </button>
+            <span>Page {docPage} of {Math.max(1, Math.ceil(docQueueData.count / docPageSize))}</span>
+            <button
+              type="button"
+              onClick={() => setDocPage((current) => current + 1)}
+              disabled={!docQueueData.next || isFetchingDocs}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════
           INTERACTIVE DOCUMENT PREVIEW MODAL

@@ -106,10 +106,28 @@ export interface SchoolRevenueSummary {
     category: string;
   }>;
   studentsCount: number;
+  paidCount: number;
+  partialCount: number;
+  unpaidCount: number;
   lastUpdated: string;
 }
 
 type Page<T> = { results?: T[]; next?: string | null } | T[];
+
+async function fetchAllPages<T>(url: string, baseQuery: any): Promise<{ data: T[] } | { error: any }> {
+  const rows: T[] = [];
+  let page = 1;
+  while (true) {
+    const sep = url.includes('?') ? '&' : '?';
+    const result = await baseQuery(`${url}${sep}page=${page}`);
+    if (result.error) return { error: result.error };
+    const payload = result.data as Page<T>;
+    if (Array.isArray(payload)) return { data: payload };
+    rows.push(...(payload.results || []));
+    if (!payload.next) return { data: rows };
+    page += 1;
+  }
+}
 
 function unwrapResults<T>(payload: Page<T>): T[] {
   if (Array.isArray(payload)) return payload;
@@ -119,23 +137,26 @@ function unwrapResults<T>(payload: Page<T>): T[] {
 
 export const financeApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
-    getSchoolRevenue: build.query<SchoolRevenueSummary, { academicYear?: string } | void>({
+    getSchoolRevenue: build.query<SchoolRevenueSummary, { academicYear?: string; className?: string } | void>({
       query: (args) => {
         const params = new URLSearchParams();
         if (args && typeof args === 'object' && args.academicYear) {
           params.append('academic_year', args.academicYear);
         }
+        if (args && typeof args === 'object' && args.className) {
+          params.append('class_name', args.className);
+        }
         const query = params.toString() ? `?${params.toString()}` : '';
         return `/fee-structures/school-revenue/${query}`;
       },
-      providesTags: ['Fee', 'Student'],
+      providesTags: [{ type: 'FeeRevenue', id: 'LIST' }, { type: 'StudentStats', id: 'LIST' }],
     }),
 
     getFeeStructures: build.query<
       BackendFeeStructure[],
       { targetClass?: string; academicYear?: string; targetClassId?: number; targetSectionId?: number } | void
     >({
-      query: (args) => {
+      queryFn: (args, _api, _extra, baseQuery) => {
         const params = new URLSearchParams();
         if (args && typeof args === 'object') {
           if (args.targetClassId) params.append('target_class_id', String(args.targetClassId));
@@ -144,10 +165,9 @@ export const financeApi = baseApi.injectEndpoints({
           if (args.academicYear) params.append('academic_year', args.academicYear);
         }
         const query = params.toString() ? `?${params.toString()}` : '';
-        return `/fee-structures/${query}`;
+        return fetchAllPages<BackendFeeStructure>(`/fee-structures/${query}`, baseQuery);
       },
-      transformResponse: (response: Page<BackendFeeStructure>) => unwrapResults(response),
-      providesTags: ['Fee'],
+      providesTags: [{ type: 'FeeStructures', id: 'LIST' }],
     }),
 
     resolveFeeStructure: build.query<
@@ -176,7 +196,7 @@ export const financeApi = baseApi.injectEndpoints({
         }
         return null;
       },
-      providesTags: ['Fee'],
+      providesTags: [{ type: 'FeeStructures', id: 'LIST' }],
     }),
 
     getFeeStructuresByTeacher: build.query<BackendFeeStructure[], { teacherId?: string | number } | void>({
@@ -186,21 +206,20 @@ export const financeApi = baseApi.injectEndpoints({
         return `/fee-structures/by-teacher/${query}`;
       },
       transformResponse: (response: Page<BackendFeeStructure>) => unwrapResults(response),
-      providesTags: ['Fee'],
+      providesTags: [{ type: 'FeeStructures', id: 'LIST' }],
     }),
 
     getFeeQuarters: build.query<BackendFeeQuarter[], { targetClass?: string; academicYear?: string } | void>({
-      query: (args) => {
+      queryFn: (args, _api, _extra, baseQuery) => {
         const params = new URLSearchParams();
         if (args && typeof args === 'object') {
           if (args.targetClass && args.targetClass !== 'All') params.append('target_class', args.targetClass);
           if (args.academicYear) params.append('academic_year', args.academicYear);
         }
         const query = params.toString() ? `?${params.toString()}` : '';
-        return `/fee-quarters/${query}`;
+        return fetchAllPages<BackendFeeQuarter>(`/fee-quarters/${query}`, baseQuery);
       },
-      transformResponse: (response: Page<BackendFeeQuarter>) => unwrapResults(response),
-      providesTags: ['Fee'],
+      providesTags: [{ type: 'FeeQuarters', id: 'LIST' }],
     }),
 
     createFeeStructure: build.mutation<BackendFeeStructure, Partial<BackendFeeStructure>>({
@@ -209,7 +228,11 @@ export const financeApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Fee'],
+      invalidatesTags: [
+        { type: 'FeeStructures', id: 'LIST' },
+        { type: 'FeeQuarters', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+      ],
     }),
 
     updateFeeStructure: build.mutation<BackendFeeStructure, { id: number | string; body: Partial<BackendFeeStructure> }>({
@@ -218,7 +241,11 @@ export const financeApi = baseApi.injectEndpoints({
         method: 'PUT',
         body,
       }),
-      invalidatesTags: ['Fee'],
+      invalidatesTags: [
+        { type: 'FeeStructures', id: 'LIST' },
+        { type: 'FeeQuarters', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+      ],
     }),
 
     deleteFeeStructure: build.mutation<void, number | string>({
@@ -226,21 +253,27 @@ export const financeApi = baseApi.injectEndpoints({
         url: `/fee-structures/${id}/`,
         method: 'DELETE',
       }),
-      invalidatesTags: ['Fee'],
+      invalidatesTags: [
+        { type: 'FeeStructures', id: 'LIST' },
+        { type: 'FeeQuarters', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+      ],
     }),
 
     getStudentFeeRecords: build.query<BackendStudentFeeRecord[], { className?: string; studentId?: string } | void>({
-      query: (args) => {
+      queryFn: (args, _api, _extra, baseQuery) => {
         const params = new URLSearchParams();
         if (args && typeof args === 'object') {
           if (args.className && args.className !== 'All') params.append('class_name', args.className);
           if (args.studentId) params.append('student_id', args.studentId);
         }
         const query = params.toString() ? `?${params.toString()}` : '';
-        return `/fee-records/${query}`;
+        return fetchAllPages<BackendStudentFeeRecord>(`/fee-records/${query}`, baseQuery);
       },
-      transformResponse: (response: Page<BackendStudentFeeRecord>) => unwrapResults(response),
-      providesTags: ['Fee'],
+      providesTags: (records) => [
+        { type: 'FeeRecords', id: 'LIST' },
+        ...(records || []).map((record) => ({ type: 'FeeRecords' as const, id: String(record.student_id_str) })),
+      ],
     }),
 
     getStudentFeeSummary: build.query<StudentFeeSummaryResponse, { studentId: number | string; academicYear?: string }>({
@@ -250,7 +283,7 @@ export const financeApi = baseApi.injectEndpoints({
         if (academicYear) params.append('academic_year', academicYear);
         return `/fee-structures/student-summary/?${params.toString()}`;
       },
-      providesTags: (_res, _err, arg) => [{ type: 'Fee', id: `student-${arg.studentId}` }, 'Fee'],
+      providesTags: (_res, _err, arg) => [{ type: 'FeeSummary', id: String(arg.studentId) }],
     }),
 
     getStudentFeeSummaries: build.query<
@@ -268,7 +301,10 @@ export const financeApi = baseApi.injectEndpoints({
         return `/fee-structures/student-summaries/${query}`;
       },
       transformResponse: (response: Page<StudentFeeSummaryResponse>) => unwrapResults(response),
-      providesTags: ['Fee'],
+      providesTags: (summaries) => [
+        { type: 'FeeSummaries', id: 'LIST' },
+        ...(summaries || []).map((summary) => ({ type: 'FeeSummaries' as const, id: String(summary.studentId) })),
+      ],
     }),
 
     recordStudentPayment: build.mutation<
@@ -287,13 +323,21 @@ export const financeApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: (_res, _err, arg) => [{ type: 'Fee', id: `student-${arg.studentId}` }, 'Fee', 'Student'],
+      invalidatesTags: (_res, _err, arg) => [
+        { type: 'FeeRecords', id: String(arg.studentId) },
+        { type: 'FeeSummary', id: String(arg.studentId) },
+        { type: 'FeeSummaries', id: String(arg.studentId) },
+        { type: 'FeeRevenue', id: 'LIST' },
+        { type: 'StudentRoster', id: String(arg.studentId) },
+        { type: 'StudentStats', id: 'LIST' },
+      ],
     }),
 
     recordFeePayment: build.mutation<
       any,
       {
         recordId: number;
+        studentId?: number | string;
         body: {
           amount_paid: number;
           payment_method: string;
@@ -308,7 +352,20 @@ export const financeApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Fee', 'Student'],
+      invalidatesTags: (_res, _err, arg) => [
+        { type: 'FeeRecords', id: arg.studentId ? String(arg.studentId) : 'LIST' },
+        ...(arg.studentId
+          ? [
+              { type: 'FeeSummary' as const, id: String(arg.studentId) },
+              { type: 'FeeSummaries' as const, id: String(arg.studentId) },
+            ]
+          : []),
+        { type: 'FeeRevenue', id: 'LIST' },
+        ...(arg.studentId
+          ? [{ type: 'StudentRoster' as const, id: String(arg.studentId) }]
+          : [{ type: 'StudentRoster' as const, id: 'LIST' }]),
+        { type: 'StudentStats', id: 'LIST' },
+      ],
     }),
 
     updateStudentFeeRecord: build.mutation<
@@ -335,7 +392,20 @@ export const financeApi = baseApi.injectEndpoints({
           ...body,
         },
       }),
-      invalidatesTags: ['Fee', 'Student'],
+      invalidatesTags: (_res, _err, arg) => [
+        { type: 'FeeRecords', id: arg.studentId ? String(arg.studentId) : 'LIST' },
+        ...(arg.studentId
+          ? [
+              { type: 'FeeSummary' as const, id: String(arg.studentId) },
+              { type: 'FeeSummaries' as const, id: String(arg.studentId) },
+            ]
+          : []),
+        { type: 'FeeRevenue', id: 'LIST' },
+        ...(arg.studentId
+          ? [{ type: 'StudentRoster' as const, id: String(arg.studentId) }]
+          : [{ type: 'StudentRoster' as const, id: 'LIST' }]),
+        { type: 'StudentStats', id: 'LIST' },
+      ],
     }),
   }),
 });

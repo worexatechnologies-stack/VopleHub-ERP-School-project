@@ -1,4 +1,5 @@
 import { baseApi } from './baseApi';
+import { fetchAllPages } from './pagedQuery';
 
 export type EventKind = 'School event' | 'Workshop' | 'Competition' | 'Seminar' | 'Sports' | 'Cultural';
 export type EventStatus = 'Draft' | 'Published' | 'Completed' | 'Cancelled';
@@ -69,6 +70,13 @@ export interface CommunityPostRecord {
 
 type Page<T> = { next?: string | null; results?: T[] } | T[];
 
+export interface PaginatedRows<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
 function unwrapPage<T>(payload: Page<T>): T[] {
   return Array.isArray(payload) ? payload : payload.results || [];
 }
@@ -76,17 +84,11 @@ function unwrapPage<T>(payload: Page<T>): T[] {
 export const communityApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
     // Events
-    getEvents: build.query<SchoolEventRecord[], { search?: string; kind?: string; activity_status?: string; status?: string } | void>({
-      query: (args) => {
-        const params = new URLSearchParams();
-        if (args?.search) params.append('search', args.search);
-        if (args?.kind && args.kind !== 'All') params.append('kind', args.kind);
-        if (args?.activity_status && args.activity_status !== 'all') params.append('activity_status', args.activity_status);
-        if (args?.status) params.append('status', args.status);
-        const query = params.toString() ? `?${params.toString()}` : '';
-        return `/events/${query}`;
-      },
-      transformResponse: (res: Page<SchoolEventRecord>) => unwrapPage(res),
+    getEvents: build.query<PaginatedRows<SchoolEventRecord>, { page: number; page_size?: number; search?: string; kind?: string; activity_status?: string; status?: string } | void>({
+      query: (args) => ({
+        url: '/events/',
+        params: args ? { ...args, page_size: args.page_size || 25 } : { page: 1, page_size: 25 },
+      }),
       providesTags: ['CommunityEvent'],
     }),
 
@@ -148,14 +150,13 @@ export const communityApi = baseApi.injectEndpoints({
 
     // Community Feed Posts
     getCommunityPosts: build.query<CommunityPostRecord[], { kind?: string; search?: string } | void>({
-      query: (args) => {
+      queryFn: (args, api, extraOptions, baseQuery) => {
         const params = new URLSearchParams();
         if (args?.kind) params.append('kind', args.kind);
         if (args?.search) params.append('search', args.search);
         const query = params.toString() ? `?${params.toString()}` : '';
-        return `/community-posts/${query}`;
+        return fetchAllPages<CommunityPostRecord>(`/community-posts/${query}`, baseQuery as any, api, extraOptions);
       },
-      transformResponse: (res: Page<CommunityPostRecord>) => unwrapPage(res),
       providesTags: ['CommunityPost'],
     }),
 

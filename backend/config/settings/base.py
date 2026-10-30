@@ -222,6 +222,7 @@ REST_FRAMEWORK = {
         # do not attach it to login, OTP, or CSRF bootstrap endpoints.
         'login_ip': env('CAMPUS_LOGIN_THROTTLE_RATE', default='1200/minute'),
         'login_account': env('LOGIN_ACCOUNT_THROTTLE_RATE', default='12/minute'),
+        'public_signup': env('PUBLIC_LEARNER_SIGNUP_THROTTLE_RATE', default='10/hour'),
         'token_refresh': env('TOKEN_REFRESH_THROTTLE_RATE', default='30/minute'),       # Per mobile refresh token
         'mfa_challenge': env('MFA_CHALLENGE_THROTTLE_RATE', default='30/minute'),
         'admin_credential': env('ADMIN_CREDENTIAL_THROTTLE_RATE', default='120/hour'),  # Dedicated quota for school administrators
@@ -239,7 +240,7 @@ REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.SearchFilter',
-        'rest_framework.filters.OrderingFilter',
+        'apps.common.filters.StableOrderingFilter',
     ],
 }
 SPECTACULAR_SETTINGS = {'TITLE': 'Volpehub Education ERP API', 'VERSION': 'v1'}

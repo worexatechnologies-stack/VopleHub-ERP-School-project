@@ -47,12 +47,14 @@ import {
   ChevronsRight,
 } from 'lucide-react';
 import ExcelImportModal from './ExcelImportModal';
+import ExportOptionsModal from './common/ExportOptionsModal';
 import { copyToClipboard } from '../utils/clipboard';
 import { Student, StudentDocument, UserRole } from '../types';
 import AuthenticatedImage from './AuthenticatedImage';
 import { formatBytes, optimizeImageForUpload } from '../services/imageOptimizer';
 import { apiDownload } from '../services/api';
 import { store, useAppSelector } from '../store';
+import { STUDENT_EXPORT_FIELDS, exportStudentDirectoryToExcel } from '../utils/studentDirectoryExport';
 import {
   studentApi,
   normalizeStudent,
@@ -135,6 +137,52 @@ export default function StudentModule({
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
+  const [studentOrdering, setStudentOrdering] = useState('roll_no');
+  const [isExportOptionsOpen, setIsExportOptionsOpen] = useState(false);
+  const [isExportingStudents, setIsExportingStudents] = useState(false);
+  const [studentExportScope, setStudentExportScope] = useState<'all' | 'filtered'>('all');
+  const [studentExportFields, setStudentExportFields] = useState<string[]>(STUDENT_EXPORT_FIELDS.map((field) => field.key));
+
+  const handleExportStudents = async () => {
+    if (isExportingStudents) return;
+    setIsExportingStudents(true);
+    try {
+      const filters = studentExportScope === 'filtered'
+        ? {
+            search: debouncedSearch || undefined,
+            class_name: classFilter !== 'All' ? classFilter : undefined,
+            section: sectionFilter !== 'All' ? sectionFilter : undefined,
+            academic_year: yearFilter !== 'All' ? yearFilter : undefined,
+          }
+        : {};
+      const allRows: Student[] = [];
+      let currentPage = 1;
+      let expectedCount = Number.POSITIVE_INFINITY;
+      while (allRows.length < expectedCount) {
+        const response = await store.dispatch(studentApi.endpoints.getStudentsPaginated.initiate(
+          { ...filters, page: currentPage, page_size: 500 },
+          { forceRefetch: true, subscribe: false },
+        )).unwrap();
+        allRows.push(...response.results);
+        expectedCount = response.count;
+        if (!response.next || response.results.length === 0) break;
+        currentPage += 1;
+      }
+      exportStudentDirectoryToExcel(allRows, studentExportFields, 'School');
+      setIsExportOptionsOpen(false);
+    } catch (error) {
+      console.error('Failed to export the student list:', error);
+      window.alert('Could not prepare the student Excel file. Please try again.');
+    } finally {
+      setIsExportingStudents(false);
+    }
+  };
+
+  const toggleStudentExportField = (field: string) => {
+    setStudentExportFields((current) => current.includes(field)
+      ? current.filter((item) => item !== field)
+      : [...current, field]);
+  };
 
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -213,6 +261,7 @@ export default function StudentModule({
       class_name: classFilter !== 'All' ? classFilter : undefined,
       section: sectionFilter !== 'All' ? sectionFilter : undefined,
       academic_year: yearFilter !== 'All' ? yearFilter : undefined,
+      ordering: studentOrdering,
     },
     { skip: !isServerBacked }
   );
@@ -1318,6 +1367,16 @@ export default function StudentModule({
               </button>
 
               <button
+                type="button"
+                onClick={() => setIsExportOptionsOpen(true)}
+                className="portal-btn-secondary !text-xs !py-2 !px-3.5 flex items-center gap-2 !border-indigo-200 !bg-indigo-50/70 hover:!bg-indigo-100/80 !text-indigo-800 transition-all"
+                title="Choose student records and columns for an Excel export"
+              >
+                <Download className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Export Students</span>
+              </button>
+
+              <button
                 onClick={() => setIsExcelImportOpen(true)}
                 className="portal-btn-secondary !text-xs !py-2 !px-3.5 flex items-center gap-2 !border-emerald-200 !bg-emerald-50/80 hover:!bg-emerald-100/90 !text-emerald-800 transition-all"
                 title="Import students from Excel (.xlsx, .xls) or Google Sheets with smart column & row organization"
@@ -1833,11 +1892,14 @@ export default function StudentModule({
                 <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Search Name, ADM-ID, Roll, Mobile..."
+                  placeholder="Search name, admission number, parent phone or email..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="pl-8 text-xs w-full p-2.5 rounded-lg border border-slate-200 focus:outline-none focus:border-indigo-500 bg-white text-slate-800 placeholder-slate-400 font-semibold"
                 />
+                <select aria-label="Sort student roster" value={studentOrdering} onChange={(e) => { setStudentOrdering(e.target.value); setPage(1); }} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700">
+                  <option value="roll_no">Roll number</option><option value="name">Name A–Z</option><option value="-name">Name Z–A</option><option value="admission_no">Admission number</option><option value="-admission_no">Admission number descending</option>
+                </select>
               </div>
             </div>
 
@@ -4122,6 +4184,19 @@ export default function StudentModule({
       </div>,
       document.body
     )}
+      {isExportOptionsOpen && <ExportOptionsModal
+        title="Export student records"
+        description="Choose whether to export the whole school or the current filters, then select the columns you need."
+        choices={STUDENT_EXPORT_FIELDS.map(({ key, label }) => ({ key, label }))}
+        selectedKeys={studentExportFields}
+        onToggle={toggleStudentExportField}
+        scope={studentExportScope}
+        onScopeChange={setStudentExportScope}
+        filteredDescription="Use the current search, class, section, and academic year filters."
+        busy={isExportingStudents}
+        onClose={() => setIsExportOptionsOpen(false)}
+        onExport={() => void handleExportStudents()}
+      />}
     </>
   );
 }

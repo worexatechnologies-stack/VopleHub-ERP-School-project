@@ -50,7 +50,7 @@ import {
 } from '../services/academicStructure';
 import { announceTeacherAssignmentsChanged } from '../services/teacherAssignments';
 import {
-  useGetTeachersQuery,
+  useGetTeachersPageQuery,
   useCreateTeacherMutation,
   useUpdateTeacherMutation,
   useDeleteTeacherMutation,
@@ -200,9 +200,11 @@ export default function TeacherDirectory() {
   ));
   const [loginUsers, setLoginUsers] = useState<any[]>(loadLoginUsers);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [teacherPage, setTeacherPage] = useState(1);
   const TEACHER_PAGE_SIZE = 50;
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Inactive'>('All');
+  const [teacherOrdering, setTeacherOrdering] = useState('user__first_name');
   const [isAdding, setIsAdding] = useState(false);
   const [isExcelImportOpen, setIsExcelImportOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -254,6 +256,10 @@ export default function TeacherDirectory() {
   const [academicStructureError, setAcademicStructureError] = useState('');
   const [teacherListError, setTeacherListError] = useState('');
   const isServerBacked = Boolean(getStoredAuthenticatedUser());
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
   const classOptions = academicClasses;
   const sectionOptions = academicSections;
   const sectionLabel = (section: AcademicSection) => {
@@ -300,7 +306,14 @@ export default function TeacherDirectory() {
     })
   );
 
-  const { data: serverTeacherRows = [], isLoading: teachersLoading, isFetching: teachersFetching, error: teachersApiError, refetch: refetchTeachers } = useGetTeachersQuery(undefined, { skip: !isServerBacked });
+  const { currentData: teacherPageData, isLoading: teachersLoading, isFetching: teachersFetching, error: teachersApiError, refetch: refetchTeachers } = useGetTeachersPageQuery({
+    page: teacherPage,
+    page_size: TEACHER_PAGE_SIZE,
+    search: debouncedSearch || undefined,
+    status: statusFilter === 'All' ? undefined : statusFilter,
+    ordering: teacherOrdering,
+  }, { skip: !isServerBacked });
+  const serverTeacherRows = teacherPageData?.results || [];
   const [createTeacherMutation] = useCreateTeacherMutation();
   const [updateTeacherMutation] = useUpdateTeacherMutation();
   const [deleteTeacherMutation] = useDeleteTeacherMutation();
@@ -311,7 +324,7 @@ export default function TeacherDirectory() {
   const [resetCredentialsMutation] = useResetCredentialsMutation();
 
   useEffect(() => {
-    if (!isServerBacked || !serverTeacherRows.length) return;
+    if (!isServerBacked || !teacherPageData) return;
     const serverTeachers: TeacherRecord[] = serverTeacherRows.map((teacher) => ({
       id: String(teacher.id),
       userId: teacher.userId,
@@ -352,7 +365,7 @@ export default function TeacherDirectory() {
     }));
     saveTeachers(serverTeachers);
     setTeacherListError('');
-  }, [isServerBacked, serverTeacherRows]);
+  }, [isServerBacked, teacherPageData]);
 
   useEffect(() => {
     if (teachersApiError) {
@@ -385,9 +398,10 @@ export default function TeacherDirectory() {
     const matchesStatus = statusFilter === 'All' || teacher.status === statusFilter;
     return matchesSearch && matchesStatus;
   }), [teachers, search, statusFilter]);
-  const teacherPageCount = Math.max(1, Math.ceil(filtered.length / TEACHER_PAGE_SIZE));
-  const visibleTeachers = useMemo(() => filtered.slice((teacherPage - 1) * TEACHER_PAGE_SIZE, teacherPage * TEACHER_PAGE_SIZE), [filtered, teacherPage]);
-  useEffect(() => setTeacherPage(1), [search, statusFilter]);
+  const resultTotal = isServerBacked ? (teacherPageData?.count || 0) : filtered.length;
+  const teacherPageCount = Math.max(1, Math.ceil(resultTotal / TEACHER_PAGE_SIZE));
+  const visibleTeachers = isServerBacked ? teachers : filtered.slice((teacherPage - 1) * TEACHER_PAGE_SIZE, teacherPage * TEACHER_PAGE_SIZE);
+  useEffect(() => setTeacherPage(1), [debouncedSearch, statusFilter]);
   const documentsTeacher = teachers.find((teacher) => teacher.id === documentsTeacherId) || null;
 
   const saveTeachers = (next: TeacherRecord[]) => {
@@ -1526,12 +1540,15 @@ export default function TeacherDirectory() {
         <div className="flex flex-col gap-3 border-b border-slate-100 p-4 md:flex-row md:items-center">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search teacher, subject, section..." className="w-full rounded-xl border border-slate-200 py-2 pl-9 pr-3 text-sm" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search teacher name, email, phone, or qualification" className="w-full rounded-xl border border-slate-200 py-2 pl-9 pr-3 text-sm" />
           </div>
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)} className="rounded-xl border border-slate-200 px-3 py-2 text-sm">
             <option>All</option>
             <option>Active</option>
             <option>Inactive</option>
+          </select>
+          <select aria-label="Sort teacher directory" value={teacherOrdering} onChange={(e) => { setTeacherOrdering(e.target.value); setTeacherPage(1); }} className="rounded-xl border border-slate-200 px-3 py-2 text-sm">
+            <option value="user__first_name">Name A–Z</option><option value="-user__first_name">Name Z–A</option><option value="joining_date">Joining date (oldest)</option><option value="-joining_date">Joining date (newest)</option>
           </select>
         </div>
         <div className="overflow-x-auto">
@@ -1709,7 +1726,7 @@ export default function TeacherDirectory() {
             </tbody>
           </table>
         </div>
-        <ListPagination page={teacherPage} pageSize={TEACHER_PAGE_SIZE} total={filtered.length} onPageChange={(next) => setTeacherPage(Math.min(teacherPageCount, Math.max(1, next)))} />
+        <ListPagination page={teacherPage} pageSize={TEACHER_PAGE_SIZE} total={resultTotal} onPageChange={(next) => setTeacherPage(Math.min(teacherPageCount, Math.max(1, next)))} />
         {teachersFetching && !teachersLoading && <p role="status" className="px-4 pb-3 text-center text-xs font-semibold text-indigo-600">Refreshing teacher profiles…</p>}
       </div>
 

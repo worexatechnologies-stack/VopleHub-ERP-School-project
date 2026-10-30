@@ -340,14 +340,13 @@ export interface AnalyticsResult {
 }
 
 export interface PublicLearnerRecord {
-  id: string;
+  id: number;
   name: string;
   email: string;
-  password: string;
   plan: 'Monthly' | 'Quarterly' | 'Annual';
-  status: 'Active' | 'Expired' | 'Suspended';
-  paymentDate: string;
-  expiryDate: string;
+  status: 'Pending' | 'Active' | 'Expired' | 'Suspended';
+  paymentDate: string | null;
+  expiryDate: string | null;
   phone?: string;
   notes?: string;
 }

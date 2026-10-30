@@ -141,7 +141,10 @@ class TeacherDocument(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=['teacher', 'created_at'])]
+        indexes = [
+            models.Index(fields=['teacher', 'created_at']),
+            models.Index(fields=['-created_at', '-id'], include=['teacher'], name='staff_doc_created_id_idx'),
+        ]
         ordering = ['-created_at']
 
 

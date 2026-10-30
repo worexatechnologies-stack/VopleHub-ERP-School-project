@@ -1,4 +1,5 @@
 import { baseApi } from './baseApi';
+import { fetchAllPages } from './pagedQuery';
 
 export interface StoreProduct {
   id: number;
@@ -84,6 +85,22 @@ export interface StorePaymentSettings {
 type Page<T> = { results?: T[] } | T[];
 const unwrap = <T,>(payload: Page<T>): T[] => Array.isArray(payload) ? payload : payload.results || [];
 
+export interface StoreOrderPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: StoreOrder[];
+}
+
+export interface StoreOrderSummary {
+  totalCount: number;
+  paidCount: number;
+  fulfilledCount: number;
+  pendingCount: number;
+  problemCount: number;
+  totalRevenue: string | number;
+}
+
 export const storeApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
     getStoreProducts: build.query<StoreProduct[], { activeOnly?: boolean } | void>({
@@ -99,9 +116,23 @@ export const storeApi = baseApi.injectEndpoints({
       query: ({ id, body }) => ({ url: `/store/products/${id}/`, method: 'PATCH', body: productRequestBody(body) }),
       invalidatesTags: ['StoreProduct'],
     }),
-    getStoreOrders: build.query<StoreOrder[], void>({
-      query: () => '/store/orders/',
-      transformResponse: (response: Page<StoreOrder>) => unwrap(response),
+    getStoreOrdersPage: build.query<StoreOrderPage, { page: number; page_size?: number; search?: string; status?: string; ordering?: string }>({
+      query: (params) => ({ url: '/store/orders/', params }),
+      providesTags: ['StoreOrder'],
+    }),
+    getStoreOrdersSummary: build.query<StoreOrderSummary, void>({
+      query: () => '/store/orders/summary/',
+      providesTags: ['StoreOrder'],
+    }),
+    getStoreOrdersForExport: build.query<StoreOrder[], { search?: string; status?: string; ordering?: string }>({
+      queryFn: (params, api, extraOptions, baseQuery) => {
+        const query = new URLSearchParams();
+        if (params.search) query.set('search', params.search);
+        if (params.status) query.set('status', params.status);
+        if (params.ordering) query.set('ordering', params.ordering);
+        const suffix = query.toString() ? `?${query.toString()}` : '';
+        return fetchAllPages<StoreOrder>(`/store/orders/${suffix}`, baseQuery as any, api, extraOptions, 200, null);
+      },
       providesTags: ['StoreOrder'],
     }),
     createStoreOrder: build.mutation<StoreCheckoutOrder, { items: { productId: number; quantity: number }[]; buyerName: string; buyerPhone: string; deliveryAddress?: string }>({
@@ -139,7 +170,9 @@ export const {
   useGetStoreProductsQuery,
   useCreateStoreProductMutation,
   useUpdateStoreProductMutation,
-  useGetStoreOrdersQuery,
+  useGetStoreOrdersPageQuery,
+  useGetStoreOrdersSummaryQuery,
+  useLazyGetStoreOrdersForExportQuery,
   useCreateStoreOrderMutation,
   useVerifyStorePaymentMutation,
   useCompleteDemoStorePaymentMutation,

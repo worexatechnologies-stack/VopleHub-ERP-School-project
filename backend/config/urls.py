@@ -46,6 +46,10 @@ from apps.accounts.views import (
     ResetCredentialsView,
     ResetStudentCredentialsView,
     CredentialVaultViewSet,
+    PublicLearnerRegistrationView,
+    PublicLearnerSelfView,
+    SuperAdminPublicLearnerView,
+    SuperAdminLegacyPublicLearnerMigrationView,
 )
 from apps.schools.views import HallTicketSettingsView, SchoolViewSet
 from apps.sis.views import (
@@ -81,7 +85,7 @@ from apps.chat.views import (
 )
 from apps.community.views import SchoolEventViewSet, EventRegistrationViewSet, CommunityPostViewSet
 from apps.store.views import StoreProductViewSet, StoreOrderViewSet, razorpay_webhook, store_payment_settings
-from apps.common.views import ExportJobViewSet
+from apps.common.views import AdminAuditEventViewSet, ExportJobViewSet, PlatformSettingsView
 from apps.common.contact_views import ContactInquiryView
 
 class PublicAPIRootRouter(DefaultRouter):
@@ -118,6 +122,7 @@ router.register('enrollment-links', EnrollmentLinkViewSet, basename='enrollment-
 router.register('enrollment-applications', EnrollmentApplicationViewSet, basename='enrollment-application')
 router.register('credential-vault', CredentialVaultViewSet, basename='credential-vault')
 router.register('exports', ExportJobViewSet, basename='export')
+router.register('admin-audit-events', AdminAuditEventViewSet, basename='admin-audit-event')
 
 
 urlpatterns = [
@@ -142,10 +147,16 @@ urlpatterns = [
     path('api/v1/auth/students/<int:student_id>/reset-credentials/', ResetStudentCredentialsView.as_view()),
     path('api/v1/auth/change-password/', ChangePasswordView.as_view()),
     path('api/v1/auth/users/', UserListView.as_view()),
+    path('api/v1/public-learning/register/', PublicLearnerRegistrationView.as_view(), name='public-learner-register'),
+    path('api/v1/public-learning/me/', PublicLearnerSelfView.as_view(), name='public-learner-me'),
+    path('api/v1/public-learning/learners/', SuperAdminPublicLearnerView.as_view(), name='superadmin-public-learners'),
+    path('api/v1/public-learning/learners/migrate-legacy/', SuperAdminLegacyPublicLearnerMigrationView.as_view(), name='superadmin-public-learners-migrate-legacy'),
+    path('api/v1/public-learning/learners/<int:subscription_id>/<str:action_name>/', SuperAdminPublicLearnerView.as_view(), name='superadmin-public-learner-action'),
     path('api/v1/auth/refresh/', RefreshView.as_view()),
     path('api/v1/auth/logout/', LogoutView.as_view()),
     path('api/v1/auth/me/', MeView.as_view()),
     path('api/v1/store/payment-settings/', store_payment_settings, name='store-payment-settings'),
+    path('api/v1/super-admin/settings/', PlatformSettingsView.as_view(), name='platform-settings'),
     path('api/v1/schools/hall-ticket-settings/', HallTicketSettingsView.as_view(), name='hall-ticket-settings'),
     path('api/v1/store/razorpay/webhook/', razorpay_webhook, name='store-razorpay-webhook'),
     path('api/v1/chat/contacts/', ChatContactsListView.as_view()),

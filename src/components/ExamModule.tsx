@@ -28,7 +28,6 @@ import {
 } from 'lucide-react';
 import { GRADE_CARDS } from '../data/mockData';
 import {
-  ExamSchedule,
   ExamScheduleItemRecord,
   ExamTimetableRecord,
   HallTicketRecord,
@@ -40,6 +39,7 @@ import { printElement } from '../utils/printElement';
 import MarksEntry from './MarksEntry';
 import ParentExamResults from './ParentExamResults';
 import AuthenticatedImage from './AuthenticatedImage';
+import { ListPagination } from './common/QueryStates';
 import {
   ACADEMIC_STRUCTURE_CHANGED_EVENT,
   loadAcademicStructure,
@@ -48,7 +48,6 @@ import {
   type AcademicSubject,
 } from '../services/academicStructure';
 import {
-  useGetExamsQuery,
   useGetExamSchedulesQuery,
   useCreateExamScheduleMutation,
   useUpdateExamScheduleMutation,
@@ -130,29 +129,6 @@ const HALL_TICKET_LABEL_GROUPS: { title: string; fields: { key: keyof HallTicket
   ] },
 ];
 
-type ExamApiRecord = {
-  id: number;
-  name: string;
-  class_name: string;
-  section: string;
-  subject: string;
-  date: string;
-  time: string;
-  end_time?: string | null;
-  max_marks: number;
-};
-
-const toSchedule = (exam: ExamApiRecord): ExamSchedule => ({
-  id: String(exam.id),
-  examName: exam.name,
-  class: exam.class_name,
-  section: exam.section,
-  subject: exam.subject,
-  date: exam.date,
-  time: exam.time ? exam.time.slice(0, 5) : '',
-  maxMarks: exam.max_marks,
-});
-
 const readImageAsDataUrl = async (file: File) => {
   const image = await createImageBitmap(file);
   const scale = Math.min(1, 1024 / Math.max(image.width, image.height));
@@ -197,7 +173,6 @@ export default function ExamModule({
   schoolName?: string;
 }) {
   const [activeTab, setActiveTab] = useState<'schedule' | 'hallticket' | 'marks' | 'marks-entry'>('schedule');
-  const [schedules, setSchedules] = useState<ExamSchedule[]>([]);
   const [requestError, setRequestError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [showCreator, setShowCreator] = useState(false);
@@ -213,6 +188,8 @@ export default function ExamModule({
 
   // Filter state for schedules list
   const [selectedClassFilter, setSelectedClassFilter] = useState('ALL');
+  const [schedulePage, setSchedulePage] = useState(1);
+  const SCHEDULE_PAGE_SIZE = 25;
 
   // Hall Tickets Tab State
   const [selectedScheduleIdForTickets, setSelectedScheduleIdForTickets] = useState<number | null>(null);
@@ -247,8 +224,12 @@ export default function ExamModule({
   });
   const [updateHallTicketSettings, { isLoading: savingTicketStyle }] = useUpdateHallTicketSettingsMutation();
 
-  const { data: examRows = [], isLoading: examsLoading } = useGetExamsQuery();
-  const { data: timetableRecords = [], isLoading: timetablesLoading, error: timetablesError, refetch: refetchSchedules } = useGetExamSchedulesQuery();
+  const { data: timetablePage, isLoading: timetablesLoading, error: timetablesError, refetch: refetchSchedules } = useGetExamSchedulesQuery({
+    page: schedulePage,
+    page_size: SCHEDULE_PAGE_SIZE,
+    class_name: selectedClassFilter === 'ALL' ? undefined : selectedClassFilter,
+  });
+  const timetableRecords = timetablePage?.results || [];
 
   const [createScheduleMutation] = useCreateExamScheduleMutation();
   const [updateScheduleMutation] = useUpdateExamScheduleMutation();
@@ -310,12 +291,6 @@ export default function ExamModule({
   } = useGetHallTicketsQuery(activeScheduleForTickets?.id || 0, {
     skip: !activeScheduleForTickets?.id || isTeacher,
   });
-
-  useEffect(() => {
-    if (examRows.length) {
-      setSchedules(examRows.map(toSchedule));
-    }
-  }, [examRows]);
 
   useEffect(() => {
     if (timetablesError) {
@@ -695,10 +670,9 @@ export default function ExamModule({
 
   const handlePrint = (elementId: string) => printElement(elementId, 'Official Exam Hall Ticket');
 
-  const filteredTimetables = useMemo(() => {
-    if (selectedClassFilter === 'ALL') return timetableRecords;
-    return timetableRecords.filter((t) => t.class_name === selectedClassFilter);
-  }, [timetableRecords, selectedClassFilter]);
+  const filteredTimetables = timetableRecords;
+  const visibleTimetables = timetableRecords;
+  useEffect(() => setSchedulePage(1), [selectedClassFilter]);
 
   const gradeCard = GRADE_CARDS[0];
 
@@ -1030,7 +1004,7 @@ export default function ExamModule({
                   onChange={(e) => setSelectedClassFilter(e.target.value)}
                   className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-800 shadow-2xs focus:outline-none cursor-pointer"
                 >
-                  <option value="ALL">All Classes ({timetableRecords.length})</option>
+                  <option value="ALL">All Classes ({timetablePage?.count || 0})</option>
                   {academicClasses.map((cls) => (
                     <option key={cls.id} value={cls.name}>
                       {cls.name}
@@ -1052,7 +1026,7 @@ export default function ExamModule({
               </div>
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {filteredTimetables.map((t) => {
+                {visibleTimetables.map((t) => {
                   const isPublished = t.status === 'published';
                   const hasTickets = t.hall_tickets_generated;
                   const isReleased = t.hall_tickets_released;
@@ -1203,6 +1177,7 @@ export default function ExamModule({
                 })}
               </div>
             )}
+            <ListPagination page={schedulePage} pageSize={SCHEDULE_PAGE_SIZE} total={timetablePage?.count || 0} onPageChange={setSchedulePage} />
           </div>
         </div>
       )}

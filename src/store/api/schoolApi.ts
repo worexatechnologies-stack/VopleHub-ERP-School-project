@@ -62,6 +62,13 @@ export interface HallTicketSettings {
 
 type Page<T> = { next?: string | null; results?: T[] } | T[];
 
+export interface PaginatedResult<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
 async function fetchAllPages<T>(
   url: string,
   baseQuery: any
@@ -104,6 +111,10 @@ export interface SchoolDocumentItem {
 }
 
 export interface SchoolDocumentsQueueResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: SchoolDocumentItem[];
   documents: SchoolDocumentItem[];
   studentDocuments: SchoolDocumentItem[];
   teacherDocuments: SchoolDocumentItem[];
@@ -119,18 +130,28 @@ export interface SchoolDocumentsQueueResponse {
 
 export const schoolApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
+    getPlatformSettings: build.query<Record<string, unknown>, void>({
+      query: () => '/super-admin/settings/',
+    }),
+    savePlatformSetting: build.mutation<{ key: string; value: unknown }, { key: string; value: unknown }>({
+      query: (body) => ({ url: '/super-admin/settings/', method: 'PUT', body }),
+    }),
+    getSchoolsPage: build.query<PaginatedResult<SchoolRecord>, { page: number; page_size?: number; search?: string; is_active?: boolean; is_demo?: boolean; ordering?: string }>({
+      query: (params) => ({ url: '/schools/', params }),
+      providesTags: ['School'],
+    }),
     getSchools: build.query<SchoolRecord[], void>({
       queryFn: (_arg, _api, _extra, baseQuery) => fetchAllPages<SchoolRecord>('/schools/', baseQuery),
       providesTags: ['School'],
     }),
     getSchoolRecordCounts: build.query<Record<string, SchoolRecordCounts>, void>({
       query: () => '/schools/school-counts/',
-      providesTags: ['SchoolCounts', 'Student', 'Teacher', 'School'],
+      providesTags: ['SchoolCounts', 'Teacher', 'School'],
       keepUnusedDataFor: 0,
     }),
-    getSchoolDocumentsQueue: build.query<SchoolDocumentsQueueResponse, void>({
-      query: () => ({ url: '/school/documents/queue/' }),
-      providesTags: ['Student', 'Teacher'],
+    getSchoolDocumentsQueue: build.query<SchoolDocumentsQueueResponse, { page?: number; page_size?: number; school_id?: number; status?: string; docType?: 'student' | 'teacher'; search?: string } | void>({
+      query: (params) => ({ url: '/school/documents/queue/', params: params || { page: 1, page_size: 25 } }),
+      providesTags: ['StudentDocumentQueue', 'Teacher'],
     }),
     getHallTicketSettings: build.query<HallTicketSettings, void>({
       query: () => '/schools/hall-ticket-settings/',
@@ -160,7 +181,10 @@ export const schoolApi = baseApi.injectEndpoints({
 });
 
 export const {
+  useGetPlatformSettingsQuery,
+  useSavePlatformSettingMutation,
   useGetSchoolsQuery,
+  useGetSchoolsPageQuery,
   useGetSchoolRecordCountsQuery,
   useGetSchoolDocumentsQueueQuery,
   useGetHallTicketSettingsQuery,

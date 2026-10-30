@@ -103,6 +103,16 @@ export interface PaginatedStudentsResponse {
   pageSize: number;
 }
 
+const studentRosterTags = (students: Student[] | undefined) => [
+  { type: 'StudentRoster' as const, id: 'LIST' },
+  ...(students || []).map((student) => ({ type: 'StudentRoster' as const, id: String(student.id) })),
+];
+
+const studentRosterChanged = [
+  { type: 'StudentRoster' as const, id: 'LIST' },
+  { type: 'StudentStats' as const, id: 'LIST' },
+];
+
 export const studentApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
     getStudents: build.query<
@@ -131,7 +141,7 @@ export const studentApi = baseApi.injectEndpoints({
         return { url: `/students/${qs ? `?${qs}` : ''}` };
       },
       transformResponse: (response: Page<StudentApiRecord>) => unwrapPage(response).map(normalizeStudent),
-      providesTags: ['Student'],
+      providesTags: (students) => studentRosterTags(students),
     }),
     getStudentStats: build.query<
       StudentStats,
@@ -150,7 +160,7 @@ export const studentApi = baseApi.injectEndpoints({
         const qs = sp.toString();
         return { url: `/students/stats/${qs ? `?${qs}` : ''}` };
       },
-      providesTags: ['Student'],
+      providesTags: [{ type: 'StudentStats', id: 'LIST' }],
     }),
     getStudentsPaginated: build.query<
       PaginatedStudentsResponse,
@@ -162,6 +172,7 @@ export const studentApi = baseApi.injectEndpoints({
         section?: string;
         academic_year?: string;
         status?: string;
+        ordering?: string;
       } | void
     >({
       query: (params) => {
@@ -174,6 +185,7 @@ export const studentApi = baseApi.injectEndpoints({
         if (p.section && p.section !== 'All') sp.append('section', p.section);
         if (p.academic_year && p.academic_year !== 'All') sp.append('academic_year', p.academic_year);
         if (p.status && p.status !== 'All') sp.append('status', p.status);
+        if (p.ordering) sp.append('ordering', p.ordering);
         const qs = sp.toString();
         return { url: `/students/?${qs}` };
       },
@@ -207,24 +219,76 @@ export const studentApi = baseApi.injectEndpoints({
           pageSize,
         };
       },
-      providesTags: ['Student'],
+      providesTags: (response) => studentRosterTags(response?.results),
     }),
     getStudent: build.query<Student, string>({
       query: (id) => ({ url: `/students/${id}/` }),
       transformResponse: (response: StudentApiRecord) => normalizeStudent(response),
-      providesTags: ['Student'],
+      providesTags: (_response, _error, id) => [{ type: 'Student', id }],
     }),
     createStudent: build.mutation<StudentApiRecord, FormData>({
       query: (body) => ({ url: '/students/', method: 'POST', body }),
-      invalidatesTags: ['Student', 'Auth', 'CredentialVault'],
+      invalidatesTags: [
+        ...studentRosterChanged,
+        'SchoolCounts',
+        { type: 'FeeRecords', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+        { type: 'FeeRevenue', id: 'LIST' },
+        'Auth',
+        'CredentialVault',
+      ],
     }),
     updateStudent: build.mutation<StudentApiRecord, { id: string; body: FormData }>({
       query: ({ id, body }) => ({ url: `/students/${id}/`, method: 'PATCH', body }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: (response, _error, { id, body }) => {
+        const studentId = String(response?.id ?? id);
+        const changedFields = new Set(Array.from(body.keys()));
+        const affectsRosterMembership = [
+          'name', 'class_', 'section', 'sectionId', 'rollNo', 'parentName', 'parentPhone', 'parentEmail',
+          'status', 'academicYear', 'gender', 'admissionNo',
+        ].some((field) => changedFields.has(field));
+        const affectsStats = [
+          'class_', 'section', 'sectionId', 'status', 'academicYear', 'gender',
+          'attendancePercentage', 'feeTotal', 'feePaid',
+        ].some((field) => changedFields.has(field));
+        const affectsFeeViews = [
+          'feeTotal', 'feePaid', 'name', 'admissionNo', 'class_', 'section', 'sectionId', 'academicYear', 'status',
+        ].some((field) => changedFields.has(field));
+        const affectsFeeFiltering = ['class_', 'section', 'sectionId', 'academicYear'].some((field) => changedFields.has(field));
+
+        return [
+          { type: 'Student', id: studentId },
+          { type: 'StudentRoster', id: studentId },
+          ...(affectsRosterMembership ? [{ type: 'StudentRoster' as const, id: 'LIST' }] : []),
+          ...(affectsStats
+            ? [{ type: 'StudentStats' as const, id: 'LIST' }]
+            : []),
+          ...(affectsFeeViews
+            ? [
+                { type: 'FeeRecords' as const, id: affectsFeeFiltering ? 'LIST' : studentId },
+                { type: 'FeeSummary' as const, id: studentId },
+                { type: 'FeeSummaries' as const, id: affectsFeeFiltering ? 'LIST' : studentId },
+                ...(['name', 'admissionNo'].some((field) => changedFields.has(field))
+                  ? [{ type: 'FeeRevenue' as const, id: 'LIST' }]
+                  : []),
+              ]
+            : []),
+        ];
+      },
     }),
     deleteStudent: build.mutation<void, string>({
       query: (id) => ({ url: `/students/${id}/`, method: 'DELETE' }),
-      invalidatesTags: ['Student', 'Auth', 'CredentialVault'],
+      invalidatesTags: (_response, _error, id) => [
+        ...studentRosterChanged,
+        'SchoolCounts',
+        { type: 'Student', id },
+        { type: 'FeeRecords', id: 'LIST' },
+        { type: 'FeeSummary', id },
+        { type: 'FeeSummaries', id: 'LIST' },
+        { type: 'FeeRevenue', id: 'LIST' },
+        'Auth',
+        'CredentialVault',
+      ],
     }),
     deleteAllStudents: build.mutation<
       { success: boolean; deletedCount: number; message: string },
@@ -235,7 +299,17 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Student', 'Auth', 'CredentialVault'],
+      invalidatesTags: [
+        ...studentRosterChanged,
+        'SchoolCounts',
+        'Student',
+        { type: 'FeeRecords', id: 'LIST' },
+        'FeeSummary',
+        { type: 'FeeSummaries', id: 'LIST' },
+        { type: 'FeeRevenue', id: 'LIST' },
+        'Auth',
+        'CredentialVault',
+      ],
     }),
     bulkImportStudents: build.mutation<
       BulkImportResponse,
@@ -288,19 +362,33 @@ export const studentApi = baseApi.injectEndpoints({
           api.signal,
         );
       },
-      invalidatesTags: ['Student', 'Auth', 'CredentialVault'],
+      invalidatesTags: [
+        ...studentRosterChanged,
+        'SchoolCounts',
+        { type: 'FeeRecords', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+        { type: 'FeeRevenue', id: 'LIST' },
+        'Auth',
+        'CredentialVault',
+      ],
     }),
     getStudentDocuments: build.query<StudentDocument[], string>({
       query: (studentId) => ({ url: `/students/${studentId}/documents/` }),
-      providesTags: ['Student'],
+      providesTags: (_response, _error, studentId) => [{ type: 'StudentDocument', id: studentId }],
     }),
     uploadStudentDocument: build.mutation<StudentDocument, { studentId: string; body: FormData }>({
       query: ({ studentId, body }) => ({ url: `/students/${studentId}/documents/`, method: 'POST', body }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: (_response, _error, { studentId }) => [
+        { type: 'StudentDocument', id: studentId },
+        { type: 'StudentDocumentQueue', id: 'LIST' },
+      ],
     }),
     deleteStudentDocument: build.mutation<void, { studentId: string; docId: number }>({
       query: ({ studentId, docId }) => ({ url: `/students/${studentId}/documents/${docId}/`, method: 'DELETE' }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: (_response, _error, { studentId }) => [
+        { type: 'StudentDocument', id: studentId },
+        { type: 'StudentDocumentQueue', id: 'LIST' },
+      ],
     }),
     verifyStudentDocument: build.mutation<
       StudentDocument,
@@ -311,7 +399,10 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'PATCH',
         body: patch,
       }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: (_response, _error, { studentId }) => [
+        { type: 'StudentDocument', id: studentId },
+        { type: 'StudentDocumentQueue', id: 'LIST' },
+      ],
     }),
     getStudentResults: build.query<unknown[], string>({
       query: (studentId) => ({ url: `/students/${studentId}/results/` }),
@@ -335,7 +426,7 @@ export const studentApi = baseApi.injectEndpoints({
       string
     >({
       query: (studentId) => ({ url: `/students/${studentId}/promotion-eligibility/` }),
-      providesTags: ['Student'],
+      providesTags: (_response, _error, studentId) => [{ type: 'Student', id: studentId }],
     }),
     promoteStudent: build.mutation<
       StudentApiRecord,
@@ -354,12 +445,19 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Student', 'Fee' as any],
+      invalidatesTags: (response, _error, { id }) => [
+        ...studentRosterChanged,
+        { type: 'Student', id: String(response?.id ?? id) },
+        { type: 'FeeRecords', id: 'LIST' },
+        { type: 'FeeSummary', id: String(response?.id ?? id) },
+        { type: 'FeeSummaries', id: String(response?.id ?? id) },
+        { type: 'FeeRevenue', id: 'LIST' },
+      ],
     }),
     getEnrollmentLinks: build.query<EnrollmentLinkItem[], void>({
       query: () => ({ url: '/enrollment-links/' }),
       transformResponse: (res: Page<EnrollmentLinkItem>) => unwrapPage(res),
-      providesTags: ['Student'],
+      providesTags: [{ type: 'EnrollmentLinks', id: 'LIST' }],
     }),
     createEnrollmentLink: build.mutation<
       EnrollmentLinkItem,
@@ -370,14 +468,14 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: [{ type: 'EnrollmentLinks', id: 'LIST' }],
     }),
     deactivateEnrollmentLink: build.mutation<EnrollmentLinkItem, string | number>({
       query: (id) => ({
         url: `/enrollment-links/${id}/deactivate/`,
         method: 'POST',
       }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: [{ type: 'EnrollmentLinks', id: 'LIST' }],
     }),
     getEnrollmentApplications: build.query<EnrollmentApplicationItem[], { status?: string } | void>({
       query: (params) => ({
@@ -385,7 +483,7 @@ export const studentApi = baseApi.injectEndpoints({
         params: params?.status ? { status: params.status } : undefined,
       }),
       transformResponse: (res: Page<EnrollmentApplicationItem>) => unwrapPage(res),
-      providesTags: ['Student'],
+      providesTags: [{ type: 'EnrollmentApplications', id: 'LIST' }],
     }),
     approveEnrollmentApplication: build.mutation<
       { message: string; student: StudentApiRecord; application: EnrollmentApplicationItem },
@@ -396,7 +494,15 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Student', 'Fee' as any, 'Auth'],
+      invalidatesTags: [
+        ...studentRosterChanged,
+        'SchoolCounts',
+        { type: 'EnrollmentApplications', id: 'LIST' },
+        { type: 'FeeRecords', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+        { type: 'FeeRevenue', id: 'LIST' },
+        'Auth',
+      ],
     }),
     rejectEnrollmentApplication: build.mutation<
       EnrollmentApplicationItem,
@@ -407,7 +513,7 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: [{ type: 'EnrollmentApplications', id: 'LIST' }],
     }),
     verifyEnrollmentLink: build.query<VerifyEnrollmentResponse, string>({
       query: (token) => ({
@@ -420,7 +526,7 @@ export const studentApi = baseApi.injectEndpoints({
         method: 'POST',
         body,
       }),
-      invalidatesTags: ['Student'],
+      invalidatesTags: [{ type: 'EnrollmentApplications', id: 'LIST' }],
     }),
   }),
 });

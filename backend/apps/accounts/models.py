@@ -43,6 +43,35 @@ class User(AbstractUser):
         ]
 
 
+class PublicLearnerSubscription(models.Model):
+    class Plan(models.TextChoices):
+        MONTHLY = 'Monthly', 'Monthly'
+        QUARTERLY = 'Quarterly', 'Quarterly'
+        ANNUAL = 'Annual', 'Annual'
+
+    class Status(models.TextChoices):
+        PENDING = 'Pending', 'Pending'
+        ACTIVE = 'Active', 'Active'
+        EXPIRED = 'Expired', 'Expired'
+        SUSPENDED = 'Suspended', 'Suspended'
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='public_subscription')
+    plan = models.CharField(max_length=16, choices=Plan.choices)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    phone = models.CharField(max_length=30, blank=True, default='')
+    payment_date = models.DateField(null=True, blank=True)
+    expiry_date = models.DateField(null=True, blank=True)
+    notes = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.user.email} ({self.plan}, {self.status})'
+
+
 class StudentProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='student_profile')
     student = models.OneToOneField('sis.Student', on_delete=models.CASCADE, related_name='login_profile')
@@ -130,7 +159,7 @@ class RefreshTokenRecord(models.Model):
 
 
 class CredentialVaultRecord(models.Model):
-    """Secure ledger of distributed passwords for Students, Teachers, and Parents.
+    """Roster metadata for accounts created by school administrators.
 
     CRITICAL SECURITY INVARIANT:
     Admin and Superadmin credentials MUST NEVER be recorded or returned in this table.
@@ -147,7 +176,6 @@ class CredentialVaultRecord(models.Model):
     role = models.CharField(max_length=24, choices=Role.choices)
     name = models.CharField(max_length=255)
     login_id = models.CharField(max_length=255)
-    plaintext_password = models.CharField(max_length=255)
     identifier = models.CharField(max_length=100, blank=True, default='')  # Admission No / Emp ID
     class_name = models.CharField(max_length=100, blank=True, default='')
     section = models.CharField(max_length=50, blank=True, default='')

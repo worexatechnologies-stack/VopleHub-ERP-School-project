@@ -18,6 +18,8 @@ export function getUrlForTab(tabId: string, role?: string): string {
       return '/super-admin-schools';
     case 'super-admin-admins':
       return '/super-admin-admins';
+    case 'super-admin-audit':
+      return '/super-admin-audit';
     case 'super-admin-sys-settings':
       return '/super-admin-settings';
 
@@ -133,6 +135,10 @@ export function getTabForUrl(rawPath: string, role?: string): string | null {
     case 'school-admins':
     case 'admins':
       return 'super-admin-admins';
+
+    case 'super-admin-audit':
+    case 'security-audit':
+      return 'super-admin-audit';
 
     case 'super-admin-settings':
     case 'system-settings':

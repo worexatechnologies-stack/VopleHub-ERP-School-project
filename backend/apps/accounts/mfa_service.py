@@ -32,6 +32,13 @@ def is_mfa_configured() -> bool:
     return bool(getattr(settings, 'EMAIL_HOST', '') and getattr(settings, 'DEFAULT_FROM_EMAIL', ''))
 
 
+def is_mfa_delivery_configured() -> bool:
+    """Whether OTP delivery is available, independent of optional MFA policy."""
+    if _development_mfa_enabled():
+        return True
+    return bool(getattr(settings, 'EMAIL_HOST', '') and getattr(settings, 'DEFAULT_FROM_EMAIL', ''))
+
+
 class MfaDeliveryError(Exception):
     """Raised when a production MFA code cannot be delivered."""
 

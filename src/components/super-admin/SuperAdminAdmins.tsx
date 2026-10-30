@@ -19,10 +19,11 @@ import {
   Check
 } from 'lucide-react';
 import { copyToClipboard } from '../../utils/clipboard';
-import { getStoredAuthenticatedUser, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME } from '../../utils/auth';
+import { getStoredAuthenticatedUser } from '../../utils/auth';
 import { store } from '../../store';
 import { schoolApi } from '../../store/api/schoolApi';
 import { authApi } from '../../store/api/authApi';
+import { ListPagination } from '../common/QueryStates';
 
 export interface AdminRecord {
   id: string;
@@ -48,16 +49,6 @@ interface AccountDirectoryItem {
   isActive?: boolean;
 }
 
-interface StoredUserItem {
-  name: string;
-  email: string;
-  role: string;
-  schoolId?: string;
-  status?: string;
-  locked?: boolean;
-  permissions?: string[];
-}
-
 const toAdminRecord = (account: AccountDirectoryItem): AdminRecord => ({
   id: String(account.id),
   name: account.name,
@@ -71,13 +62,17 @@ export default function SuperAdminAdmins() {
   const [admins, setAdmins] = useState<AdminRecord[]>([]);
   const [schools, setSchools] = useState<SchoolOption[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [directoryTotal, setDirectoryTotal] = useState(0);
+  const [schoolFilter, setSchoolFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [ordering, setOrdering] = useState('email');
   
   const [isAdding, setIsAdding] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
   
   // Password change states
   const [changingPasswordId, setChangingPasswordId] = useState<string | null>(null);
-  const [newPassword, setNewPassword] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
   const [deleteCandidate, setDeleteCandidate] = useState<AdminRecord | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
@@ -96,18 +91,29 @@ export default function SuperAdminAdmins() {
   const isServerBacked = Boolean(getStoredAuthenticatedUser());
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(searchQuery.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
     if (isServerBacked) {
       Promise.all([
         store.dispatch(schoolApi.endpoints.getSchools.initiate()).unwrap(),
-        store.dispatch(authApi.endpoints.getUsers.initiate()).unwrap(),
+        store.dispatch(authApi.endpoints.getUsersPage.initiate({
+          page, page_size: 50, role: 'school_admin', search: debouncedSearch || undefined,
+          school_id: schoolFilter === 'all' ? undefined : schoolFilter,
+          is_active: statusFilter === 'all' ? undefined : statusFilter === 'active', ordering,
+        }, { forceRefetch: true, subscribe: false })).unwrap(),
       ])
-        .then(([items, accounts]) => {
+        .then(([items, accountPage]) => {
           const serverSchools = items.map((school) => ({ id: String(school.id), name: school.schoolName, isDemo: Boolean(school.isDemo) }));
           const realSchools = serverSchools.filter((school) => !school.isDemo);
           setSchools(serverSchools);
-          setAdmins(accounts
-            .filter((account) => account.role === 'school_admin' || account.role === 'School Admin')
-            .map(toAdminRecord));
+          setAdmins(accountPage.results.map(toAdminRecord));
+          setDirectoryTotal(accountPage.count);
           setForm((current) => current.schoolId ? current : { ...current, schoolId: realSchools[0]?.id || '' });
           setSchoolLoadError(realSchools.length ? '' : 'No real schools are available. Create a real school before creating its administrator.');
         })
@@ -118,109 +124,11 @@ export default function SuperAdminAdmins() {
         });
       return;
     }
-    // Demo-only fallback when no authenticated API session exists.
-    const savedSch = localStorage.getItem('sa_schools');
-    if (savedSch) {
-      const parsed = JSON.parse(savedSch);
-      setSchools(Array.isArray(parsed) ? parsed : []);
-    } else {
-      setSchools([]);
-    }
-
-    // Load admins
-    const savedAdm = localStorage.getItem('sa_admins');
-    const filterEmails = ['delhi.admin@volpehub.education', 'mumbai.admin@volpehub.education', 'blr.admin@volpehub.education'];
-    if (savedAdm) {
-      try {
-        const parsed = JSON.parse(savedAdm);
-        const filtered = parsed.filter((adm: any) => !filterEmails.includes(adm.email?.toLowerCase()));
-        if (filtered.length !== parsed.length) {
-          localStorage.setItem('sa_admins', JSON.stringify(filtered));
-        }
-        setAdmins(filtered);
-      } catch (e) {
-        setAdmins([]);
-      }
-    } else {
-      const defaultAdmins: AdminRecord[] = [];
-      localStorage.setItem('sa_admins', JSON.stringify(defaultAdmins));
-      setAdmins(defaultAdmins);
-    }
-  }, [isServerBacked]);
-
-  const addAuditLog = (action: string) => {
-    const user = getStoredAuthenticatedUser();
-    const operatorName = user?.name || SUPER_ADMIN_NAME;
-    const newLog = {
-      id: `audit-${Date.now()}`,
-      userName: operatorName,
-      action,
-      timestamp: new Date().toISOString(),
-      ipAddress: '157.45.192.' + Math.floor(Math.random() * 254 + 1)
-    };
-    const saved = localStorage.getItem('sa_audit_logs');
-    const existing = saved ? JSON.parse(saved) : [];
-    localStorage.setItem('sa_audit_logs', JSON.stringify([newLog, ...existing]));
-  };
-
-  const syncWithGlobalUsers = (updatedAdmins: AdminRecord[]) => {
-    localStorage.setItem('sa_admins', JSON.stringify(updatedAdmins));
-    setAdmins(updatedAdmins);
-
-    // Sync to sa_users for login matching
-    const savedUsersStr = localStorage.getItem('sa_users');
-    let usersList: StoredUserItem[] = [];
-    if (savedUsersStr) {
-      usersList = JSON.parse(savedUsersStr);
-    }
-
-    // Process all admins to put them in usersList
-    updatedAdmins.forEach(adm => {
-      const existingUserIdx = usersList.findIndex((u) => u.email.toLowerCase() === adm.email.toLowerCase());
-      const userPayload = {
-        email: adm.email,
-        name: adm.name,
-        role: 'School Admin',
-        schoolId: adm.schoolId,
-        status: adm.status,
-        locked: adm.locked || false,
-        permissions: ['manage_school_data', 'manage_teachers', 'manage_fees', 'academic_year_promotion', 'developer_access']
-      };
-
-      if (existingUserIdx >= 0) {
-        usersList[existingUserIdx] = { ...usersList[existingUserIdx], ...userPayload };
-      } else {
-        usersList.push(userPayload);
-      }
-    });
-
-    // Remove deleted admins from usersList
-    const adminEmails = updatedAdmins.map(a => a.email.toLowerCase());
-    usersList = usersList.filter((u) => {
-      if (u.role === 'School Admin') {
-        return adminEmails.includes(u.email.toLowerCase()) || u.email.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
-      }
-      return true;
-    });
-
-    localStorage.setItem('sa_users', JSON.stringify(usersList));
-  };
-
-  const handleToggleLock = (id: string) => {
-    const s = admins.find(x => x.id === id);
-    if (!s) return;
-
-    const nextLocked = !s.locked;
-    const updated = admins.map(item => {
-      if (item.id === id) {
-        return { ...item, locked: nextLocked };
-      }
-      return item;
-    });
-
-    addAuditLog(`${nextLocked ? 'Locked' : 'Unlocked'} School Admin account: ${s.name} (${s.email})`);
-    syncWithGlobalUsers(updated);
-  };
+    setSchools([]);
+    setAdmins([]);
+    setDirectoryTotal(0);
+    setSchoolLoadError('A Super Admin server session is required to manage administrators.');
+  }, [isServerBacked, page, debouncedSearch, schoolFilter, statusFilter, ordering]);
 
   const handleToggleStatus = async (id: string) => {
     const s = admins.find(x => x.id === id);
@@ -234,7 +142,6 @@ export default function SuperAdminAdmins() {
         action: nextStatus === 'Active' ? 'reactivate' : 'deactivate',
       })).unwrap();
       setAdmins((current) => current.map((item) => item.id === id ? { ...item, status: nextStatus } : item));
-      addAuditLog(`${nextStatus === 'Active' ? 'Reactivated' : 'Deactivated'} School Admin access: ${s.name} (${s.email})`);
     } catch (error) {
       alert(error instanceof Error ? `Could not update School Admin access: ${error.message}` : 'Could not update School Admin access.');
     }
@@ -242,7 +149,7 @@ export default function SuperAdminAdmins() {
 
   const handleManualPasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!changingPasswordId || !newPassword) return;
+    if (!changingPasswordId) return;
 
     const s = admins.find(x => x.id === changingPasswordId);
     if (!s) return;
@@ -253,19 +160,13 @@ export default function SuperAdminAdmins() {
     }
     setSavingPassword(true);
     try {
-      await store.dispatch(authApi.endpoints.setSchoolAdminPassword.initiate({
-        id: s.id,
-        password: newPassword,
-      })).unwrap();
-      addAuditLog(`Set a temporary password for School Admin ${s.name} (${s.email})`);
+      const result = await store.dispatch(authApi.endpoints.setSchoolAdminPassword.initiate({ id: s.id })).unwrap();
       setCreatedAdminCredentials({
         name: s.name,
-        email: s.email,
-        password: newPassword,
+        email: result.loginId,
+        password: result.temporaryPassword,
       });
-      alert(`Password updated for School Admin "${s.name}". They must change it after signing in.`);
       setChangingPasswordId(null);
-      setNewPassword('');
     } catch (error) {
       alert(error instanceof Error ? `Could not change School Admin password: ${error.message}` : 'Could not change School Admin password.');
     } finally {
@@ -277,15 +178,12 @@ export default function SuperAdminAdmins() {
     if (!deleteCandidate) return;
     setDeleting(true);
     try {
-      if (isServerBacked) {
-        await store.dispatch(authApi.endpoints.deleteSchoolAdmin.initiate({
-          id: deleteCandidate.id,
-          confirmation: deleteCandidate.email,
-        })).unwrap();
-      }
+      await store.dispatch(authApi.endpoints.deleteSchoolAdmin.initiate({
+        id: deleteCandidate.id,
+        confirmation: deleteCandidate.email,
+      })).unwrap();
       const remaining = admins.filter((item) => item.id !== deleteCandidate.id);
-      syncWithGlobalUsers(remaining);
-      addAuditLog(`Permanently deleted School Admin account: ${deleteCandidate.name} (${deleteCandidate.email})`);
+      setAdmins(remaining);
       setDeleteCandidate(null);
       setDeleteConfirmation('');
     } catch (error) {
@@ -297,102 +195,34 @@ export default function SuperAdminAdmins() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingId) {
-      if (form.password && form.password.length < 8) {
-        alert('Password must be at least 8 characters.');
-        return;
-      }
-      // Editing Admin Profile
-      const s = admins.find(x => x.id === editingId);
-      if (!s) return;
-
-      const updated = admins.map(item => {
-        if (item.id === editingId) {
-          return {
-            ...item,
-            name: form.name,
-            email: form.email,
-            schoolId: form.schoolId,
-            status: form.status
-          };
-        }
-        return item;
-      });
-      addAuditLog(`Updated profile details for School Admin: ${form.name} (${form.email})`);
-      syncWithGlobalUsers(updated);
-      setEditingId(null);
-    } else {
-      if (isServerBacked) {
-        if (!form.schoolId) {
-          alert('Select a school before creating a School Admin account.');
-          return;
-        }
-        try {
-          const created = await store.dispatch(authApi.endpoints.createSchoolAdmin.initiate({
-            name: form.name,
-            schoolId: form.schoolId,
-            status: form.status,
-          })).unwrap();
-          setAdmins((current) => [...current, toAdminRecord(created)]);
-          setCreatedAdminCredentials({
-            name: created.name,
-            email: created.loginCredentials?.loginId || created.email,
-            password: created.loginCredentials?.temporaryPassword || '',
-          });
-          setIsAdding(false);
-          setForm({ name: '', email: '', password: '', schoolId: schools.find((school) => !school.isDemo)?.id || '', status: 'Active' });
-          return;
-        } catch (error) {
-          alert(error instanceof Error ? `School Admin account could not be saved: ${error.message}` : 'School Admin account could not be saved to the server.');
-          return;
-        }
-      }
-      if (!form.password || form.password.length < 8) {
-        alert('Please manually enter a password with at least 8 characters for this School Admin.');
-        return;
-      }
-      // Commissioning Admin
-      const newAdmin: AdminRecord = {
-        id: `adm-${Date.now()}`,
+    if (!isServerBacked) {
+      alert('A Super Admin server session is required before creating administrators.');
+      return;
+    }
+    if (!form.schoolId) {
+      alert('Select a school before creating a School Admin account.');
+      return;
+    }
+    try {
+      const created = await store.dispatch(authApi.endpoints.createSchoolAdmin.initiate({
         name: form.name,
-        email: form.email,
         schoolId: form.schoolId,
         status: form.status,
-        locked: false
-      };
-      const updated = [...admins, newAdmin];
-      addAuditLog(`Commissioned and registered School Admin: ${form.name} (${form.email})`);
-      syncWithGlobalUsers(updated);
+      })).unwrap();
+      setAdmins((current) => [...current, toAdminRecord(created)]);
+      setCreatedAdminCredentials({
+        name: created.name,
+        email: created.loginCredentials?.loginId || created.email,
+        password: created.loginCredentials?.temporaryPassword || '',
+      });
       setIsAdding(false);
-      setCreatedAdminCredentials({ name: form.name, email: form.email, password: form.password });
+      setForm({ name: '', email: '', password: '', schoolId: schools.find((school) => !school.isDemo)?.id || '', status: 'Active' });
+    } catch (error) {
+      alert(error instanceof Error ? `School Admin account could not be saved: ${error.message}` : 'School Admin account could not be saved to the server.');
     }
-
-    // Reset Form
-    setForm({
-      name: '',
-      email: '',
-      password: '',
-      schoolId: schools.find((school) => !school.isDemo)?.id || '',
-      status: 'Active'
-    });
   };
 
-  const startEdit = (admin: AdminRecord) => {
-    setEditingId(admin.id);
-    setForm({
-      name: admin.name,
-      email: admin.email,
-      password: '',
-      schoolId: admin.schoolId,
-      status: admin.status
-    });
-    setIsAdding(true);
-  };
-
-  const filteredAdmins = admins.filter(a =>
-    a.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    a.email.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredAdmins = admins;
 
   return (
     <div className="space-y-6" id="sa-admins-container">
@@ -423,7 +253,6 @@ export default function SuperAdminAdmins() {
 
         <button
           onClick={() => {
-            setEditingId(null);
             setForm({ name: '', email: '', password: '', schoolId: schools[0]?.id || 'sch-1', status: 'Active' });
             setIsAdding(!isAdding);
           }}
@@ -491,9 +320,9 @@ Password: ${createdAdminCredentials.password}`}
                   <Key className="h-5 w-5" />
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-slate-900 text-sm">Update School Admin Password</h3>
+                  <h3 className="font-extrabold text-slate-900 text-sm">Reset School Admin Password</h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Set a new password for <strong className="text-slate-800">{targetAdmin?.name}</strong> ({targetAdmin?.email}).
+                    Generate a one-time password for <strong className="text-slate-800">{targetAdmin?.name}</strong> ({targetAdmin?.email}).
                   </p>
                   {targetSchool && (
                     <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-600">
@@ -506,43 +335,15 @@ Password: ${createdAdminCredentials.password}`}
               <form onSubmit={handleManualPasswordChange} className="flex-1 flex flex-col min-h-0 mt-3">
                 <div className="flex-1 overflow-y-auto space-y-3.5 pr-1 py-1">
                   <p className="text-xs text-slate-600 bg-amber-50/80 border border-amber-200/70 rounded-xl p-3 leading-relaxed">
-                    Use this option if the administrator lost or forgot their password. Setting a new password will allow them to log in; they will be prompted to change it upon first signing in.
+                    The new password will be shown once after reset. The administrator must change it at sign-in, and their existing refresh tokens will be revoked.
                   </p>
-
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">New Secure Password</label>
-                    <input
-                      autoFocus
-                      required
-                      type="text"
-                      autoComplete="off"
-                      minLength={8}
-                      placeholder="Enter new password (min. 8 characters)"
-                      value={newPassword}
-                      onChange={e => setNewPassword(e.target.value)}
-                      className="w-full text-xs bg-slate-50 border border-slate-200 p-2.5 rounded-xl focus:outline-indigo-500 text-slate-800 font-mono"
-                    />
-                  </div>
                 </div>
 
-                <div className="flex-shrink-0 flex items-center justify-between pt-3 border-t border-slate-100 mt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*';
-                      let pass = '';
-                      for (let i = 0; i < 12; i++) pass += chars.charAt(Math.floor(Math.random() * chars.length));
-                      setNewPassword(pass);
-                    }}
-                    className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer"
-                  >
-                    Generate Random
-                  </button>
-
+                <div className="flex-shrink-0 flex items-center justify-end gap-2 pt-3 border-t border-slate-100 mt-2">
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={() => { setChangingPasswordId(null); setNewPassword(''); }}
+                      onClick={() => setChangingPasswordId(null)}
                       disabled={savingPassword}
                       className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-bold transition-colors"
                     >
@@ -550,10 +351,10 @@ Password: ${createdAdminCredentials.password}`}
                     </button>
                     <button
                       type="submit"
-                      disabled={savingPassword || newPassword.length < 8}
+                      disabled={savingPassword}
                       className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow-xs disabled:opacity-50 transition-colors"
                     >
-                      {savingPassword ? 'Updating…' : 'Update Password'}
+                      {savingPassword ? 'Resetting…' : 'Generate One-Time Password'}
                     </button>
                   </div>
                 </div>
@@ -620,7 +421,7 @@ Password: ${createdAdminCredentials.password}`}
         <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm max-w-2xl animate-fade-in" id="admin-form">
           <h3 className="font-sans font-bold text-xs uppercase tracking-wider text-slate-700 border-b border-slate-100 pb-2.5 mb-4 flex items-center gap-2">
             <UserCheck className="w-4 h-4 text-indigo-500" />
-            {editingId ? 'Edit Administrative Clearance' : 'Commission New School Administrator'}
+            Commission New School Administrator
           </h3>
           <form onSubmit={handleSave} className="space-y-4">
             {schoolLoadError && (
@@ -638,24 +439,9 @@ Password: ${createdAdminCredentials.password}`}
                   className="w-full text-xs bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-indigo-500 text-slate-800"
                 />
               </div>
-              {isServerBacked ? (
-                <div className="rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-xs text-indigo-800">
-                  The login ID is generated automatically from this name and the selected real school.
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Login Email Address</label>
-                  <input
-                    required
-                    type="email"
-                    placeholder="e.g. ramesh.c@volpehub.education"
-                    value={form.email}
-                    disabled={editingId !== null}
-                    onChange={e => setForm({ ...form, email: e.target.value })}
-                    className="w-full text-xs bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-indigo-500 text-slate-800 font-mono disabled:opacity-60"
-                  />
-                </div>
-              )}
+              <div className="rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-xs text-indigo-800">
+                The login ID is generated automatically from this name and the selected real school.
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -673,26 +459,9 @@ Password: ${createdAdminCredentials.password}`}
                   ))}
                 </select>
               </div>
-              {isServerBacked ? (
-                <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-800">
-                  A strong temporary password is generated securely and shown once after creation. The School Admin must change it on first login.
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">
-                    {editingId ? 'New Password (optional)' : 'Manual Login Password'}
-                  </label>
-                  <input
-                    required={!editingId}
-                    minLength={8}
-                    type="text"
-                    placeholder={editingId ? 'Leave blank to keep old password' : 'Enter permanent password'}
-                    value={form.password}
-                    onChange={e => setForm({ ...form, password: e.target.value })}
-                    className="w-full text-xs bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-indigo-500 text-slate-800 font-mono"
-                  />
-                </div>
-              )}
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-800">
+                A strong temporary password is generated securely and shown once after creation. The School Admin must change it on first login.
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -714,7 +483,6 @@ Password: ${createdAdminCredentials.password}`}
                 type="button"
                 onClick={() => {
                   setIsAdding(false);
-                  setEditingId(null);
                 }}
                 className="px-3 py-1.5 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-xs"
               >
@@ -722,11 +490,11 @@ Password: ${createdAdminCredentials.password}`}
               </button>
               <button
                 type="submit"
-                disabled={isServerBacked && schools.filter((school) => !school.isDemo).length === 0}
+                disabled={!isServerBacked || schools.filter((school) => !school.isDemo).length === 0}
                 className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow-xs"
               >
                 <Save className="w-3.5 h-3.5" />
-                {editingId ? 'Save Profile' : 'Commission Officer'}
+                Commission Officer
               </button>
             </div>
           </form>
@@ -744,6 +512,18 @@ Password: ${createdAdminCredentials.password}`}
           className="w-full text-xs bg-white border border-slate-200 pl-10 pr-4 py-2.5 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 shadow-xs"
         />
       </div>
+
+      {isServerBacked && <div className="grid gap-2 sm:grid-cols-3">
+        <select aria-label="Filter admins by school" value={schoolFilter} onChange={(event) => { setSchoolFilter(event.target.value); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+          <option value="all">All schools</option>{schools.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}
+        </select>
+        <select aria-label="Filter admins by status" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as typeof statusFilter); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+          <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
+        </select>
+        <select aria-label="Sort admins" value={ordering} onChange={(event) => { setOrdering(event.target.value); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+          <option value="email">Email A–Z</option><option value="-email">Email Z–A</option><option value="name">Name A–Z</option><option value="-name">Name Z–A</option><option value="created_at">Oldest created</option><option value="-created_at">Newest created</option>
+        </select>
+      </div>}
 
       {/* Administrators Registry Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden" id="sa-admins-list-table">
@@ -803,26 +583,16 @@ Password: ${createdAdminCredentials.password}`}
                   </td>
                   <td className="p-3.5 text-right pr-5">
                     <div className="flex items-center justify-end gap-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-                      {/* Edit profile */}
-                      <button
-                        onClick={() => startEdit(adm)}
-                        className="text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer px-1"
-                        title="Configure Profile"
-                      >
-                        Edit
-                      </button>
-
                       {/* Update Password */}
                       <button
                         onClick={() => {
                           setChangingPasswordId(adm.id);
-                          setNewPassword('');
                         }}
                         className="text-amber-600 hover:text-amber-800 transition-colors cursor-pointer px-1 flex items-center gap-1"
                         title="Update password if lost or forgotten"
                       >
                         <Key className="w-3 h-3" />
-                        Update Password
+                        Reset Password
                       </button>
 
                       {/* Delete Administrator */}
@@ -852,6 +622,7 @@ Password: ${createdAdminCredentials.password}`}
             )}
           </tbody>
         </table>
+        {isServerBacked && <ListPagination page={page} pageSize={50} total={directoryTotal} onPageChange={setPage} />}
       </div>
     </div>
   );

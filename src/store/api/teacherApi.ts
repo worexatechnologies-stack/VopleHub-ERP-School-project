@@ -86,6 +86,10 @@ async function fetchAllPages<T>(
 
 export const teacherApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
+    getTeachersPage: build.query<{ count: number; next: string | null; previous: string | null; results: TeacherRecord[] }, { page: number; page_size?: number; search?: string; status?: string; ordering?: string }>({
+      query: (params) => ({ url: '/teachers/', params }),
+      providesTags: ['Teacher'],
+    }),
     getTeachers: build.query<TeacherRecord[], void>({
       queryFn: (_arg, _api, _extra, baseQuery) => fetchAllPages<TeacherRecord>('/teachers/', baseQuery),
       providesTags: ['Teacher'],
@@ -212,6 +216,7 @@ export const teacherApi = baseApi.injectEndpoints({
 
 export const {
   useGetTeachersQuery,
+  useGetTeachersPageQuery,
   useGetTeacherStatsQuery,
   useGetTeacherQuery,
   useGetTeacherDocumentsQuery,

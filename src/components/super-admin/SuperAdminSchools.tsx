@@ -1,7 +1,7 @@
-import { FormEvent, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle, Plus, Power, RefreshCw, Save, School, Trash2, UsersRound, XCircle } from 'lucide-react';
+import { FormEvent, useEffect, useState } from 'react';
+import { AlertCircle, CheckCircle, Plus, Power, RefreshCw, Save, School, Trash2, UsersRound, XCircle, Search } from 'lucide-react';
 import {
-  useGetSchoolsQuery,
+  useGetSchoolsPageQuery,
   useGetSchoolRecordCountsQuery,
   useCreateSchoolMutation,
   useUpdateSchoolMutation,
@@ -14,6 +14,7 @@ import { getErrorMessage, getErrorStatus } from '../../utils/apiError';
 import { getStoredAuthenticatedUser } from '../../utils/auth';
 import AuthenticatedImage from '../AuthenticatedImage';
 import { formatBytes, optimizeImageForUpload } from '../../services/imageOptimizer';
+import { ListPagination } from '../common/QueryStates';
 
 const normalizeCode = (value: string) => value
   .trim()
@@ -24,14 +25,31 @@ const normalizeCode = (value: string) => value
 export default function SuperAdminSchools() {
   const dispatch = useAppDispatch();
   const tokenExists = Boolean(getStoredAuthenticatedUser());
-  const { data: rawSchools = [], isLoading, error: queryError, refetch: refetchSchools } = useGetSchoolsQuery(undefined, {
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'real' | 'demo'>('all');
+  const [ordering, setOrdering] = useState('name');
+  const [page, setPage] = useState(1);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { setDebouncedSearch(search.trim()); setPage(1); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  const { data: schoolPage, isLoading, error: queryError, refetch: refetchSchools } = useGetSchoolsPageQuery({
+    page,
+    page_size: 25,
+    search: debouncedSearch || undefined,
+    is_active: statusFilter === 'all' ? undefined : statusFilter === 'active',
+    is_demo: typeFilter === 'all' ? undefined : typeFilter === 'demo',
+    ordering,
+  }, {
     skip: !tokenExists,
     refetchOnFocus: true,
     refetchOnReconnect: true,
   });
   const { data: schoolRecordCounts, isFetching: isFetchingCounts, refetch: refetchCounts } = useGetSchoolRecordCountsQuery(undefined, {
     skip: !tokenExists,
-    pollingInterval: 3000,
+    pollingInterval: 30000,
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
     refetchOnReconnect: true,
@@ -60,9 +78,7 @@ export default function SuperAdminSchools() {
     ? 'Sign in as a Super Admin to manage real schools.'
     : (actionError || (queryError ? getErrorMessage(queryError, 'Could not load schools.') : ''));
 
-  const schools = useMemo(() => {
-    return [...rawSchools].sort((a, b) => a.schoolName.localeCompare(b.schoolName));
-  }, [rawSchools]);
+  const schools = schoolPage?.results || [];
 
   const handleNameChange = (name: string) => {
     const code = normalizeCode(name);
@@ -136,27 +152,6 @@ export default function SuperAdminSchools() {
         body: { is_active: nextActive },
       }).unwrap();
 
-      // Sync localStorage caches if present
-      const savedAdm = localStorage.getItem('sa_admins');
-      if (savedAdm) {
-        try {
-          const parsed = JSON.parse(savedAdm);
-          const updatedAdm = parsed.map((adm: any) =>
-            adm.schoolId === String(school.id) ? { ...adm, status: nextActive ? 'Active' : 'Inactive' } : adm
-          );
-          localStorage.setItem('sa_admins', JSON.stringify(updatedAdm));
-        } catch {}
-      }
-      const savedUsers = localStorage.getItem('sa_users');
-      if (savedUsers) {
-        try {
-          const parsedUsers = JSON.parse(savedUsers);
-          const updatedUsers = parsedUsers.map((u: any) =>
-            u.schoolId === String(school.id) ? { ...u, status: nextActive ? 'Active' : 'Inactive' } : u
-          );
-          localStorage.setItem('sa_users', JSON.stringify(updatedUsers));
-        } catch {}
-      }
     } catch (requestError) {
       if (getErrorStatus(requestError) === 404) {
         setActionError('This school has already been removed.');
@@ -184,31 +179,6 @@ export default function SuperAdminSchools() {
         confirmation,
       }).unwrap();
 
-      // Clean up deleted school's admins and users in localStorage caches if present
-      const savedAdm = localStorage.getItem('sa_admins');
-      if (savedAdm) {
-        try {
-          const parsed = JSON.parse(savedAdm);
-          const filtered = parsed.filter((adm: any) => adm.schoolId !== String(school.id));
-          localStorage.setItem('sa_admins', JSON.stringify(filtered));
-        } catch {}
-      }
-      const savedUsers = localStorage.getItem('sa_users');
-      if (savedUsers) {
-        try {
-          const parsedUsers = JSON.parse(savedUsers);
-          const filteredUsers = parsedUsers.filter((u: any) => u.schoolId !== String(school.id));
-          localStorage.setItem('sa_users', JSON.stringify(filteredUsers));
-        } catch {}
-      }
-      const savedSchools = localStorage.getItem('sa_schools');
-      if (savedSchools) {
-        try {
-          const parsedSchools = JSON.parse(savedSchools);
-          const filteredSchools = parsedSchools.filter((s: any) => s.id !== String(school.id) && s.id !== school.id);
-          localStorage.setItem('sa_schools', JSON.stringify(filteredSchools));
-        } catch {}
-      }
     } catch (requestError) {
       if (getErrorStatus(requestError) === 404) {
         setActionError('This school has already been deleted.');
@@ -256,6 +226,22 @@ export default function SuperAdminSchools() {
             {isAdding ? 'Cancel' : 'Create Real School'}
           </button>
         </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_160px_160px_190px]">
+        <label className="relative">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+          <input aria-label="Search schools" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, code, or subdomain" className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-xs" />
+        </label>
+        <select aria-label="Filter schools by status" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as typeof statusFilter); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+          <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
+        </select>
+        <select aria-label="Filter school type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value as typeof typeFilter); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+          <option value="all">All school types</option><option value="real">Real schools</option><option value="demo">Demo schools</option>
+        </select>
+        <select aria-label="Sort schools" value={ordering} onChange={(event) => { setOrdering(event.target.value); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+          <option value="name">Name A–Z</option><option value="-name">Name Z–A</option><option value="code">Code A–Z</option><option value="-code">Code Z–A</option><option value="student_count">Most students</option><option value="-student_count">Fewest students</option>
+        </select>
       </div>
 
       {error && (
@@ -426,6 +412,7 @@ export default function SuperAdminSchools() {
           {!schools.length && !error && <p className="col-span-full rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">No schools exist yet. Create the first real school above.</p>}
         </div>
       )}
+      {!isLoading && <ListPagination page={page} pageSize={25} total={schoolPage?.count || 0} onPageChange={setPage} />}
     </div>
   );
 }

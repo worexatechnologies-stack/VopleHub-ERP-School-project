@@ -73,6 +73,9 @@ class StudentDocument(models.Model):
 
     class Meta:
         ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['-created_at', '-id'], include=['student'], name='sis_doc_created_id_idx'),
+        ]
 
 class AcademicHistory(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='history')
@@ -160,4 +163,7 @@ class EnrollmentApplication(models.Model):
 
     class Meta:
         ordering = ['-submitted_at', '-id']
+        indexes = [
+            models.Index(fields=['school', '-submitted_at', '-id'], name='sis_app_sch_sub_id_idx'),
+        ]
 

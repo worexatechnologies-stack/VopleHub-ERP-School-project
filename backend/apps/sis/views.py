@@ -715,7 +715,7 @@ class StudentViewSet(TenantScopedViewSet):
         High-throughput architecture supporting up to 50,000+ student records:
         - Memory-efficient streaming spreadsheet parsing
         - O(1) in-memory allocation of unique admission numbers, roll numbers, and login credentials
-        - Ultra-fast temporary credential hashing with native auto-upgrade on user login
+        - Standard Django password hashing for imported accounts
         - Batched database writes (bulk_create) to eliminate N+1 bottlenecks
         - Idempotent batch processing with cached job recovery
         - Structured, sanitized error diagnostics for high reliability
@@ -734,7 +734,7 @@ class StudentViewSet(TenantScopedViewSet):
         )
         from apps.common.validators import validate_spreadsheet_upload
         from apps.sis.services import generate_temporary_password
-        from django.contrib.auth.hashers import MD5PasswordHasher
+        from django.contrib.auth.hashers import make_password
         from django.core.cache import cache
         from django.core.exceptions import ValidationError
         from django.db import DatabaseError, IntegrityError, transaction
@@ -776,7 +776,7 @@ class StudentViewSet(TenantScopedViewSet):
             total_batches = 1
 
         # Check idempotency cache if job_id is provided
-        cache_key = f"bulk_import_student:{school.id}:{user.id}:{job_id}:{batch_number}" if job_id else None
+        cache_key = f"bulk_import_student_v2:{school.id}:{user.id}:{job_id}:{batch_number}" if job_id else None
         if cache_key:
             cached_result = cache.get(cache_key)
             if cached_result:
@@ -1010,13 +1010,11 @@ class StudentViewSet(TenantScopedViewSet):
         allocated_batch_usernames = set()
         subdomain_slug = slugify(getattr(school, 'subdomain', '') or getattr(school, 'code', '') or f'school-{school.id}') or f'school-{school.id}'
 
-        # Fast password hasher
-        fast_hasher = MD5PasswordHasher()
         def get_fast_credentials(override_password=None):
             raw_pwd = str(override_password or '').strip()
             if not raw_pwd:
                 raw_pwd = generate_temporary_password(14)
-            encoded_pwd = fast_hasher.encode(raw_pwd, secrets.token_hex(8))
+            encoded_pwd = make_password(raw_pwd)
             return raw_pwd, encoded_pwd
 
         created_students = []
@@ -1232,7 +1230,6 @@ class StudentViewSet(TenantScopedViewSet):
                             role=CredentialVaultRecord.Role.STUDENT,
                             name=s_inst.name,
                             login_id=meta['studentEmail'],
-                            plaintext_password=meta['studentPassword'],
                             identifier=s_inst.admission_no,
                             class_name=s_inst.class_name,
                             section=s_inst.section,
@@ -1248,7 +1245,6 @@ class StudentViewSet(TenantScopedViewSet):
                                 role=CredentialVaultRecord.Role.PARENT,
                                 name=meta['parentName'],
                                 login_id=meta['parentEmail'],
-                                plaintext_password=meta['parentPassword'],
                                 identifier=f"P-{s_inst.admission_no}",
                                 class_name=s_inst.class_name,
                                 section=s_inst.section,
@@ -1376,7 +1372,9 @@ class StudentViewSet(TenantScopedViewSet):
 
         # Cache response for idempotency
         if cache_key:
-            cache.set(cache_key, response_data, timeout=3600)
+            # Temporary passwords are returned to the caller once and must not
+            # be retained in Redis as part of the idempotency response.
+            cache.set(cache_key, {**response_data, 'credentials': []}, timeout=3600)
         if total_created:
             invalidate_student_dependent_caches(school.id, default_academic_year)
 
@@ -1431,7 +1429,7 @@ class StudentViewSet(TenantScopedViewSet):
     def delete_all(self, request):
         """Wipe all student data for this school tenant after verifying admin credentials."""
         user = request.user
-        if not (user and user.is_authenticated and user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]):
+        if not (user and user.is_authenticated and user.role == User.Role.SCHOOL_ADMIN):
             return Response(
                 {'detail': 'Only School Admins can delete student roster data.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -1461,14 +1459,6 @@ class StudentViewSet(TenantScopedViewSet):
             )
 
         school = user.school
-        if user.role == User.Role.SUPER_ADMIN:
-            school_id = request.data.get('schoolId')
-            if school_id:
-                from apps.schools.models import School
-                school = School.objects.filter(pk=school_id).first()
-            elif not school:
-                from apps.schools.models import School
-                school = School.objects.first()
 
         if not school:
             return Response({'detail': 'A valid school tenant is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1514,6 +1504,14 @@ class StudentViewSet(TenantScopedViewSet):
             )
             if orphan_parent_user_ids:
                 User.objects.filter(pk__in=orphan_parent_user_ids).delete()
+
+            from apps.common.audit import record_admin_audit_event
+            record_admin_audit_event(
+                request,
+                'student_roster_deleted_all',
+                school=school,
+                metadata={'deleted_count': deleted_count},
+            )
 
         if school and school.id:
             invalidate_student_dependent_caches(school.id)
@@ -1708,7 +1706,7 @@ class StudentDocumentCollectionView(APIView):
 class SchoolDocumentQueueView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    @extend_schema(responses={200: OpenApiResponse(description='All student and teacher documents for the school')})
+    @extend_schema(responses={200: OpenApiResponse(description='Paginated student and teacher documents for the school')})
     def get(self, request):
         user = request.user
         if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
@@ -1719,20 +1717,54 @@ class SchoolDocumentQueueView(APIView):
             school_id = request.query_params.get('school_id')
         if not school_id:
             return Response({'detail': 'A school context is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            school_id = int(school_id)
+            page_number = max(1, int(request.query_params.get('page', '1')))
+            page_size = min(100, max(1, int(request.query_params.get('page_size', '25'))))
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid school or page value.'}, status=status.HTTP_400_BAD_REQUEST)
+        status_filter = request.query_params.get('status', '').strip()
+        doc_type_filter = request.query_params.get('docType', '').strip().lower()
+        if status_filter and status_filter not in {'Pending', 'Verified', 'Rejected', 'Uploaded'}:
+            return Response({'detail': 'Invalid document status filter.'}, status=status.HTTP_400_BAD_REQUEST)
+        if doc_type_filter and doc_type_filter not in {'student', 'teacher'}:
+            return Response({'detail': 'Invalid document type filter.'}, status=status.HTTP_400_BAD_REQUEST)
+        search = request.query_params.get('search', '').strip()[:100]
 
-        # 1. Fetch Student Documents
-        student_docs_qs = StudentDocument.objects.filter(
+        student_docs_all = StudentDocument.objects.filter(
             student__school_id=school_id
-        ).select_related('student', 'verified_by').order_by('-created_at')
-
-        # 2. Fetch Teacher Documents
+        )
+        teacher_docs_all = None
         from apps.staff.models import TeacherDocument
-        teacher_docs_qs = TeacherDocument.objects.filter(
-            teacher__school_id=school_id
-        ).select_related('teacher', 'teacher__user', 'verified_by').order_by('-created_at')
+        teacher_docs_all = TeacherDocument.objects.filter(teacher__school_id=school_id)
+        student_docs_qs = student_docs_all.select_related('student', 'verified_by').defer('file_data')
+        teacher_docs_qs = teacher_docs_all.select_related('teacher', 'teacher__user', 'verified_by').defer('file_data')
+        if status_filter:
+            student_docs_qs = student_docs_qs.filter(status=status_filter)
+            teacher_docs_qs = teacher_docs_qs.filter(status=status_filter)
+        if search:
+            student_docs_qs = student_docs_qs.filter(
+                Q(name__icontains=search) | Q(category__icontains=search) | Q(file_name__icontains=search)
+                | Q(student__name__icontains=search) | Q(student__admission_no__icontains=search)
+                | Q(student__class_name__icontains=search)
+            )
+            teacher_docs_qs = teacher_docs_qs.filter(
+                Q(name__icontains=search) | Q(category__icontains=search) | Q(file_name__icontains=search)
+                | Q(teacher__user__first_name__icontains=search) | Q(teacher__user__last_name__icontains=search)
+                | Q(teacher__user__email__icontains=search)
+            )
+        if doc_type_filter == 'teacher':
+            student_docs_qs = student_docs_qs.none()
+        elif doc_type_filter == 'student':
+            teacher_docs_qs = teacher_docs_qs.none()
+
+        total_count = student_docs_qs.count() + teacher_docs_qs.count()
+        page_end = page_number * page_size
+        student_docs_page = list(student_docs_qs.order_by('-created_at', '-id')[:page_end])
+        teacher_docs_page = list(teacher_docs_qs.order_by('-created_at', '-id')[:page_end])
 
         student_list = []
-        for d in student_docs_qs:
+        for d in student_docs_page:
             student_list.append({
                 'id': d.id,
                 'docType': 'student',
@@ -1754,7 +1786,7 @@ class SchoolDocumentQueueView(APIView):
             })
 
         teacher_list = []
-        for d in teacher_docs_qs:
+        for d in teacher_docs_page:
             t_user = d.teacher.user if d.teacher else None
             t_name = f"{t_user.first_name or ''} {t_user.last_name or ''}".strip() if t_user else 'Teacher'
             if not t_name and t_user:
@@ -1778,24 +1810,43 @@ class SchoolDocumentQueueView(APIView):
                 'downloadUrl': f'/api/v1/teachers/{d.teacher_id}/documents/{d.id}/',
             })
 
-        all_docs = student_list + teacher_list
-        all_docs.sort(key=lambda x: x.get('uploadedAt') or '', reverse=True)
-
-        pending_count = sum(1 for d in all_docs if d['status'] == 'Pending')
-        verified_count = sum(1 for d in all_docs if d['status'] == 'Verified')
-        rejected_count = sum(1 for d in all_docs if d['status'] == 'Rejected')
+        all_docs = sorted(
+            student_list + teacher_list,
+            key=lambda item: (item.get('uploadedAt') or '', item['id'], item['docType']),
+            reverse=True,
+        )[page_end - page_size:page_end]
+        student_counts = student_docs_all.aggregate(
+            total=Count('id'), pending=Count('id', filter=Q(status='Pending')),
+            verified=Count('id', filter=Q(status='Verified')), rejected=Count('id', filter=Q(status='Rejected')),
+        )
+        teacher_counts = teacher_docs_all.aggregate(
+            total=Count('id'), pending=Count('id', filter=Q(status='Pending')),
+            verified=Count('id', filter=Q(status='Verified')), rejected=Count('id', filter=Q(status='Rejected')),
+        )
+        query = request.query_params.copy()
+        query['page'] = str(page_number + 1)
+        next_url = request.build_absolute_uri(f'{request.path}?{query.urlencode()}') if page_end < total_count else None
+        if page_number > 1:
+            query['page'] = str(page_number - 1)
+            previous_url = request.build_absolute_uri(f'{request.path}?{query.urlencode()}')
+        else:
+            previous_url = None
 
         return Response({
+            'count': total_count,
+            'next': next_url,
+            'previous': previous_url,
             'documents': all_docs,
-            'studentDocuments': student_list,
-            'teacherDocuments': teacher_list,
+            'results': all_docs,
+            'studentDocuments': [item for item in all_docs if item['docType'] == 'student'],
+            'teacherDocuments': [item for item in all_docs if item['docType'] == 'teacher'],
             'summary': {
-                'totalDocs': len(all_docs),
-                'totalPending': pending_count,
-                'totalVerified': verified_count,
-                'totalRejected': rejected_count,
-                'totalStudentDocs': len(student_list),
-                'totalTeacherDocs': len(teacher_list),
+                'totalDocs': student_counts['total'] + teacher_counts['total'],
+                'totalPending': student_counts['pending'] + teacher_counts['pending'],
+                'totalVerified': student_counts['verified'] + teacher_counts['verified'],
+                'totalRejected': student_counts['rejected'] + teacher_counts['rejected'],
+                'totalStudentDocs': student_counts['total'],
+                'totalTeacherDocs': teacher_counts['total'],
             }
         })
 

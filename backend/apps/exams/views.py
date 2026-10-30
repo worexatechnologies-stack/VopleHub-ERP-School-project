@@ -50,6 +50,10 @@ class ExamScheduleViewSet(TenantScopedViewSet):
     queryset = ExamSchedule.objects.select_related('school', 'classroom').prefetch_related('items', 'classroom__sections').order_by('-created_at')
     serializer_class = ExamScheduleSerializer
     permission_classes = [ExamSchedulePermission]
+    filterset_fields = ['class_name', 'status']
+    search_fields = ['name', 'class_name']
+    ordering_fields = ['created_at', 'name', 'class_name', 'status']
+    ordering = ['-created_at', '-id']
 
     def get_queryset(self):
         qs = super().get_queryset()

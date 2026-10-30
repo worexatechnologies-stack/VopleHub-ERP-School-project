@@ -1,4 +1,5 @@
 from rest_framework import permissions, status, viewsets
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.decorators import action
 from rest_framework import serializers
 from rest_framework.response import Response
@@ -12,15 +13,22 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.conf import settings
 import logging
+import datetime
+import secrets
+from django.core.validators import validate_email
+from django.db import IntegrityError
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 import hashlib
 from .serializers import UserSerializer, CredentialVaultSerializer
-from .models import RefreshTokenRecord, User, CredentialVaultRecord
+from .models import RefreshTokenRecord, User, CredentialVaultRecord, PublicLearnerSubscription
 from .credential_generator import create_user_with_credentials, generate_password
 from .credential_vault import record_credential, sync_school_credential_vault
+from .permissions import MustChangePasswordComplete
 from apps.common.fast_cache import fast_cache_response, bump_cache_version
+from apps.common.pagination import AdminListPagination
 from .auth_utils import (
     clear_refresh_cookie,
     issue_token_pair,
@@ -67,6 +75,254 @@ def _create_web_session(request, user):
 logger = logging.getLogger(__name__)
 
 
+class PublicLearnerRegistrationView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'public_signup'
+
+    def post(self, request):
+        name = str(request.data.get('name') or '').strip()
+        email = str(request.data.get('email') or '').strip().lower()
+        password = str(request.data.get('password') or '')
+        phone = str(request.data.get('phone') or '').strip()
+        plan = request.data.get('plan')
+        if not name or len(name) > 160 or not email or len(email) > 254:
+            return Response({'detail': 'Enter a valid name and email address.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_email(email)
+        except ValidationError:
+            return Response({'detail': 'Enter a valid email address.'}, status=status.HTTP_400_BAD_REQUEST)
+        if plan not in PublicLearnerSubscription.Plan.values:
+            return Response({'detail': 'Choose a valid subscription plan.'}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(email__iexact=email).exists():
+            return Response({'detail': 'This email is already registered. Please sign in or contact support.'}, status=status.HTTP_409_CONFLICT)
+        try:
+            validate_password(password)
+        except ValidationError as exc:
+            return Response({'detail': list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        first_name, _, last_name = name.partition(' ')
+        try:
+            with transaction.atomic():
+                user = User.objects.create_user(
+                    username=f'public-{secrets.token_hex(12)}',
+                    email=email,
+                    password=password,
+                    first_name=first_name[:150],
+                    last_name=last_name[:150],
+                    role=User.Role.PUBLIC_LEARNER,
+                    school=None,
+                    is_active=False,
+                )
+                PublicLearnerSubscription.objects.create(user=user, plan=plan, phone=phone[:30])
+        except IntegrityError:
+            return Response({'detail': 'This email is already registered. Please sign in or contact support.'}, status=status.HTTP_409_CONFLICT)
+        return Response({
+            'detail': 'Your account request was received. Access is enabled after your subscription is confirmed.',
+            'status': PublicLearnerSubscription.Status.PENDING,
+        }, status=status.HTTP_201_CREATED)
+
+
+class PublicLearnerSelfView(APIView):
+    permission_classes = [permissions.IsAuthenticated, MustChangePasswordComplete]
+
+    def get(self, request):
+        if request.user.role != User.Role.PUBLIC_LEARNER:
+            return Response({'detail': 'Public learner account required.'}, status=status.HTTP_403_FORBIDDEN)
+        subscription = getattr(request.user, 'public_subscription', None)
+        if not subscription or subscription.status != PublicLearnerSubscription.Status.ACTIVE:
+            return Response({'detail': 'An active subscription is required.'}, status=status.HTTP_403_FORBIDDEN)
+        if subscription.expiry_date and subscription.expiry_date < timezone.localdate():
+            subscription.status = PublicLearnerSubscription.Status.EXPIRED
+            subscription.save(update_fields=['status', 'updated_at'])
+            request.user.is_active = False
+            request.user.save(update_fields=['is_active'])
+            return Response({'detail': 'Your subscription has expired.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({
+            'id': subscription.pk,
+            'name': request.user.get_full_name() or request.user.username,
+            'email': request.user.email,
+            'phone': subscription.phone,
+            'plan': subscription.plan,
+            'status': subscription.status,
+            'paymentDate': subscription.payment_date,
+            'expiryDate': subscription.expiry_date,
+        })
+
+
+class SuperAdminPublicLearnerView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = AdminListPagination
+
+    def _authorize(self, request):
+        return request.user.role == User.Role.SUPER_ADMIN
+
+    def get(self, request):
+        if not self._authorize(request):
+            return Response({'detail': 'Only Super Admins can manage public learners.'}, status=status.HTTP_403_FORBIDDEN)
+        qs = PublicLearnerSubscription.objects.select_related('user').all()
+        search = request.query_params.get('search', '').strip()
+        plan = request.query_params.get('plan')
+        state = request.query_params.get('status')
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(Q(user__email__icontains=search) | Q(user__first_name__icontains=search) | Q(user__last_name__icontains=search))
+        if plan in PublicLearnerSubscription.Plan.values:
+            qs = qs.filter(plan=plan)
+        if state in PublicLearnerSubscription.Status.values:
+            qs = qs.filter(status=state)
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        data = [{
+            'id': item.pk,
+            'userId': item.user_id,
+            'name': item.user.get_full_name() or item.user.username,
+            'email': item.user.email,
+            'plan': item.plan,
+            'status': item.status,
+            'phone': item.phone,
+            'paymentDate': item.payment_date,
+            'expiryDate': item.expiry_date,
+            'notes': item.notes,
+            'createdAt': item.created_at,
+        } for item in page]
+        return paginator.get_paginated_response(data)
+
+    def post(self, request, subscription_id, action_name):
+        if not self._authorize(request):
+            return Response({'detail': 'Only Super Admins can manage public learners.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            subscription = PublicLearnerSubscription.objects.select_related('user').get(pk=subscription_id)
+        except PublicLearnerSubscription.DoesNotExist:
+            return Response({'detail': 'Public learner subscription not found.'}, status=status.HTTP_404_NOT_FOUND)
+        user = subscription.user
+        if action_name == 'activate':
+            paid_on = timezone.localdate()
+            duration_months = {PublicLearnerSubscription.Plan.MONTHLY: 1, PublicLearnerSubscription.Plan.QUARTERLY: 3, PublicLearnerSubscription.Plan.ANNUAL: 12}[subscription.plan]
+            expiry = paid_on + datetime.timedelta(days=30 * duration_months)
+            subscription.status = PublicLearnerSubscription.Status.ACTIVE
+            subscription.payment_date = paid_on
+            subscription.expiry_date = expiry
+            user.is_active = True
+            user.save(update_fields=['is_active'])
+            subscription.save(update_fields=['status', 'payment_date', 'expiry_date', 'updated_at'])
+        elif action_name in {'suspend', 'expire'}:
+            subscription.status = PublicLearnerSubscription.Status.SUSPENDED if action_name == 'suspend' else PublicLearnerSubscription.Status.EXPIRED
+            subscription.save(update_fields=['status', 'updated_at'])
+            user.is_active = False
+            user.save(update_fields=['is_active'])
+            revoke_all_user_sessions(user)
+        else:
+            return Response({'detail': 'Unsupported public learner action.'}, status=status.HTTP_400_BAD_REQUEST)
+        from apps.common.audit import record_admin_audit_event
+        audit_action = {
+            'activate': 'public_learner_activated',
+            'suspend': 'public_learner_suspended',
+            'expire': 'public_learner_expired',
+        }[action_name]
+        record_admin_audit_event(request, audit_action, target=subscription, metadata={'user_id': user.pk})
+        return Response({'id': subscription.pk, 'status': subscription.status, 'expiryDate': subscription.expiry_date})
+
+
+class SuperAdminLegacyPublicLearnerMigrationView(APIView):
+    """One-time import of the former browser-only learner directory."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role != User.Role.SUPER_ADMIN:
+            return Response({'detail': 'Only Super Admins can import public learners.'}, status=status.HTTP_403_FORBIDDEN)
+        rows = request.data.get('learners')
+        if not isinstance(rows, list) or len(rows) > 100:
+            return Response({'detail': 'Submit between 1 and 100 learner records per import.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not rows:
+            return Response({'created': 0, 'already_imported': 0})
+
+        parsed = []
+        seen_emails = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                return Response({'detail': 'Each learner record must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+            name = str(row.get('name') or '').strip()
+            email = str(row.get('email') or '').strip().lower()
+            password = str(row.get('password') or '')
+            plan = row.get('plan')
+            state = row.get('status')
+            if not name or len(name) > 160 or not email or len(email) > 254 or not password or len(password) > 128:
+                return Response({'detail': 'Each record needs a name, email, and password within the supported length.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                validate_email(email)
+            except ValidationError:
+                return Response({'detail': f'Invalid email address in import: {email}.'}, status=status.HTTP_400_BAD_REQUEST)
+            if email in seen_emails:
+                return Response({'detail': f'Duplicate email in import: {email}.'}, status=status.HTTP_400_BAD_REQUEST)
+            if plan not in PublicLearnerSubscription.Plan.values:
+                return Response({'detail': f'Invalid subscription plan for {email}.'}, status=status.HTTP_400_BAD_REQUEST)
+            if state not in PublicLearnerSubscription.Status.values:
+                return Response({'detail': f'Invalid subscription status for {email}.'}, status=status.HTTP_400_BAD_REQUEST)
+            payment_date = parse_date(str(row.get('paymentDate') or ''))
+            expiry_date = parse_date(str(row.get('expiryDate') or ''))
+            if (row.get('paymentDate') and not payment_date) or (row.get('expiryDate') and not expiry_date):
+                return Response({'detail': f'Invalid subscription dates for {email}.'}, status=status.HTTP_400_BAD_REQUEST)
+            if state == PublicLearnerSubscription.Status.ACTIVE and (not payment_date or not expiry_date):
+                return Response({'detail': f'Active imported subscriptions require payment and expiry dates for {email}.'}, status=status.HTTP_400_BAD_REQUEST)
+            seen_emails.add(email)
+            parsed.append({
+                'name': name,
+                'email': email,
+                'password': password,
+                'plan': plan,
+                'status': state,
+                'payment_date': payment_date,
+                'expiry_date': expiry_date,
+                'phone': str(row.get('phone') or '')[:30],
+                'notes': str(row.get('notes') or '')[:500],
+            })
+
+        created = 0
+        already_imported = 0
+        try:
+            with transaction.atomic():
+                for item in parsed:
+                    existing = User.objects.select_for_update().filter(email__iexact=item['email']).first()
+                    if existing:
+                        if existing.role == User.Role.PUBLIC_LEARNER and hasattr(existing, 'public_subscription'):
+                            already_imported += 1
+                            continue
+                        raise ValueError(f'The email {item["email"]} already belongs to another account.')
+                    subscription_state = item['status']
+                    if subscription_state == PublicLearnerSubscription.Status.ACTIVE and item['expiry_date'] and item['expiry_date'] < timezone.localdate():
+                        subscription_state = PublicLearnerSubscription.Status.EXPIRED
+                    is_active = subscription_state == PublicLearnerSubscription.Status.ACTIVE
+                    first_name, _, last_name = item['name'].partition(' ')
+                    user = User.objects.create_user(
+                        username=f'public-{secrets.token_hex(12)}',
+                        email=item['email'],
+                        password=item['password'],
+                        first_name=first_name[:150],
+                        last_name=last_name[:150],
+                        role=User.Role.PUBLIC_LEARNER,
+                        school=None,
+                        is_active=is_active,
+                        must_change_password=True,
+                    )
+                    PublicLearnerSubscription.objects.create(
+                        user=user,
+                        plan=item['plan'],
+                        status=subscription_state,
+                        phone=item['phone'],
+                        payment_date=item['payment_date'],
+                        expiry_date=item['expiry_date'],
+                        notes=item['notes'],
+                    )
+                    created += 1
+        except (IntegrityError, ValueError) as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
+
+        if created:
+            from apps.common.audit import record_admin_audit_event
+            record_admin_audit_event(request, 'public_learner_legacy_migration', metadata={'created': created, 'already_imported': already_imported})
+        return Response({'created': created, 'already_imported': already_imported})
+
+
 @method_decorator(ensure_csrf_cookie, name='dispatch')
 class CsrfTokenView(APIView):
     """Exposes CSRF token to frontend and ensures csrftoken cookie is set."""
@@ -85,33 +341,13 @@ class CsrfTokenView(APIView):
         return response
 
 
-def _enforce_vault_temp_password(user):
-    """Enforce must_change_password=True if the user is using an admin-generated/temporary password."""
-    if not user or user.role not in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT, User.Role.SCHOOL_ADMIN]:
-        return
-    from apps.accounts.models import CredentialVaultRecord
-    # Prefer the account's direct relation. A stale login-id match must not
-    # override the current credential record when an email has changed.
-    vault_rec = CredentialVaultRecord.objects.filter(user=user).first()
-    if not vault_rec:
-        vault_rec = CredentialVaultRecord.objects.filter(
-            school=user.school, login_id__iexact=user.email
-        ).first()
-    if vault_rec:
-        # The vault's explicit flag is authoritative. A historic plaintext
-        # value can remain after a user changes their password and is not by
-        # itself evidence that another reset is needed.
-        is_temporary = (
-            vault_rec.must_change_password
-            and vault_rec.plaintext_password != '[User Managed]'
-            and vault_rec.source != 'user_password_change'
-        )
-        if is_temporary and not user.must_change_password:
-            user.must_change_password = True
-            user.save(update_fields=['must_change_password'])
-    elif not user.must_change_password and user.last_login is None:
-        user.must_change_password = True
-        user.save(update_fields=['must_change_password'])
+def _enforce_first_login_password_change(user):
+    """Keep the account's explicit temporary-password flag authoritative."""
+    # Credential creation and reset flows set must_change_password directly.
+    # last_login is not enough to infer a temporary password: an admin may
+    # reset an account before its first successful sign-in, after which this
+    # check must not re-lock the newly chosen password.
+    return None
 
 
 class LoginView(APIView):
@@ -217,18 +453,27 @@ class LoginView(APIView):
                 }, status=status.HTTP_403_FORBIDDEN)
 
         # Enforce password reset on login if account is using an admin-generated/temporary password
-        _enforce_vault_temp_password(user)
+        _enforce_first_login_password_change(user)
 
-        # Multi-Factor Authentication: Super Admins skip OTP; all other roles require 2FA OTP
+        # Super Admin accounts always require a second factor.
         is_super_admin = (
             user.role == User.Role.SUPER_ADMIN
             or getattr(user, 'is_superuser', False)
         )
 
-        # Multi-Factor Authentication: Non-superadmin roles require 2FA OTP
-        # only when MFA is configured and active on the server.
-        from apps.accounts.mfa_service import MfaDeliveryError, create_mfa_challenge, is_mfa_configured
-        if not is_super_admin and is_mfa_configured():
+        # Other roles require MFA when the deployment has enabled it.
+        from apps.accounts.mfa_service import (
+            MfaDeliveryError,
+            create_mfa_challenge,
+            is_mfa_configured,
+            is_mfa_delivery_configured,
+        )
+        if is_super_admin and not is_mfa_delivery_configured():
+            return Response(
+                {'detail': 'Super Admin sign-in requires configured MFA delivery. Contact the system administrator.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if is_super_admin or is_mfa_configured():
             AccountLoginRateThrottle.record_success(raw_email, request=request)
             try:
                 challenge = create_mfa_challenge(user, request=request, requested_role=requested_role)
@@ -369,7 +614,7 @@ class RefreshView(APIView):
         return response
 
 class MeView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, MustChangePasswordComplete]
     # Put bearer authentication first so an inactive/deleted JWT is reported
     # as 401 instead of falling through to SessionAuthentication's 403.
     authentication_classes = [CachedJWTAuthentication, SessionAuthentication]
@@ -377,7 +622,7 @@ class MeView(APIView):
     @extend_schema(responses=UserSerializer)
     def get(self, request):
         user = request.user
-        _enforce_vault_temp_password(user)
+        _enforce_first_login_password_change(user)
         return Response(UserSerializer(user).data)
 
 
@@ -402,6 +647,44 @@ class UserListView(APIView):
             ).order_by('role', 'email')
         else:
             return Response({'detail': 'Administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Preserve the legacy complete-directory response for existing callers.
+        # Admin list screens opt into bounded server-side pages with ?page=.
+        if 'page' in request.query_params:
+            from django.db.models import Q
+            from apps.common.pagination import AdminListPagination
+
+            role = request.query_params.get('role', '').strip().lower()
+            if role:
+                users = users.filter(role=role)
+            active = request.query_params.get('is_active')
+            if active in {'true', 'false'}:
+                users = users.filter(is_active=(active == 'true'))
+            school_id = request.query_params.get('school_id')
+            if school_id and request.user.role == User.Role.SUPER_ADMIN:
+                users = users.filter(school_id=school_id)
+            search = request.query_params.get('search', '').strip()[:100]
+            if search:
+                users = users.filter(
+                    Q(first_name__icontains=search)
+                    | Q(last_name__icontains=search)
+                    | Q(email__icontains=search)
+                    | Q(username__icontains=search)
+                )
+
+            ordering_fields = {
+                'email': 'email', '-email': '-email',
+                'name': 'first_name', '-name': '-first_name',
+                'role': 'role', '-role': '-role',
+                'created_at': 'date_joined', '-created_at': '-date_joined',
+            }
+            ordering = request.query_params.get('ordering', 'email')
+            ordering = ordering_fields.get(ordering, 'email')
+            users = users.order_by(ordering, 'pk')
+            paginator = AdminListPagination()
+            page = paginator.paginate_queryset(users, request, view=self)
+            return paginator.get_paginated_response(UserSerializer(page, many=True).data)
+
         return Response(UserSerializer(users, many=True).data)
 
 class SchoolAdminCreateView(APIView):
@@ -441,7 +724,6 @@ class SchoolAdminCreateView(APIView):
                 'user': user,
                 'role': CredentialVaultRecord.Role.ADMIN,
                 'name': user.get_full_name() or user.first_name or name,
-                'plaintext_password': credentials['plaintext_password'],
                 'identifier': f"ADM-{user.pk:04d}",
                 'source': 'admin_creation',
                 'must_change_password': True,
@@ -449,6 +731,8 @@ class SchoolAdminCreateView(APIView):
         )
         data = UserSerializer(user).data
         data['loginCredentials'] = {'loginId': credentials['login_id'], 'temporaryPassword': credentials['plaintext_password'], 'mustChangePassword': True}
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, 'school_admin_created', target=user, school=school)
         return Response(data, status=status.HTTP_201_CREATED)
 
 
@@ -481,6 +765,8 @@ class SchoolAdminLifecycleView(APIView):
             'school_admin_%s actor_user_id=%s target_user_id=%s',
             action, request.user.pk, user.pk,
         )
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, f'school_admin_{action}d', target=user, school=user.school)
         return Response(UserSerializer(user).data)
 
 
@@ -504,6 +790,8 @@ class SchoolAdminDeleteView(APIView):
             return Response({'detail': 'Type the exact School Admin email to confirm deletion.'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             target_id, target_email = target.pk, target.email
+            from apps.common.audit import record_admin_audit_event
+            record_admin_audit_event(request, 'school_admin_deleted', target=target, school=target.school)
             CredentialVaultRecord.objects.filter(login_id__iexact=target_email).delete()
             target.delete()
         logger.warning('school_admin_deleted actor_user_id=%s target_user_id=%s', request.user.pk, target_id)
@@ -517,8 +805,13 @@ class SchoolAdminPasswordSetView(APIView):
 
     @extend_schema(
         operation_id='school_admin_set_password',
-        request=inline_serializer('SchoolAdminPasswordSetRequest', {'password': serializers.CharField(write_only=True)}),
-        responses={200: OpenApiResponse(description='Password updated'), 400: OpenApiResponse(description='Password validation failed'), 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Not found')},
+        request=None,
+        responses={200: inline_serializer('SchoolAdminOneTimeCredential', {
+            'userId': serializers.IntegerField(),
+            'loginId': serializers.CharField(),
+            'temporaryPassword': serializers.CharField(),
+            'mustChangePassword': serializers.BooleanField(),
+        }), 403: OpenApiResponse(description='Forbidden'), 404: OpenApiResponse(description='Not found')},
     )
     def post(self, request, user_id):
         if request.user.role != User.Role.SUPER_ADMIN:
@@ -527,32 +820,23 @@ class SchoolAdminPasswordSetView(APIView):
         if not target:
             return Response({'detail': 'The target must be a School Admin account.'}, status=status.HTTP_404_NOT_FOUND)
 
-        password = str(
-            request.data.get('password')
-            or request.data.get('newPassword')
-            or request.data.get('new_password')
-            or ''
-        ).strip()
-        try:
-            validate_password(password, user=target)
-        except ValidationError as exc:
-            return Response(
-                {'errors': [{'field': 'password', 'error': message} for message in exc.messages], 'detail': exc.messages[0]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+        password = generate_password(target.first_name or target.username, target.role)
         target.set_password(password)
-        force_change = request.data.get('must_change_password', True)
-        if isinstance(force_change, str):
-            force_change = force_change.lower() not in ['false', '0']
-        target.must_change_password = bool(force_change)
+        target.must_change_password = True
         target.save(update_fields=['password', 'must_change_password'])
         CredentialVaultRecord.objects.filter(login_id__iexact=target.email).update(
-            plaintext_password=password,
-            must_change_password=target.must_change_password,
+            must_change_password=True,
         )
+        revoke_all_user_sessions(target)
         logger.warning('school_admin_password_set actor_user_id=%s target_user_id=%s', request.user.pk, target.pk)
-        return Response({'detail': 'Password updated successfully.'})
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, 'school_admin_password_reset', target=target, school=target.school, metadata={'must_change_password': True})
+        return Response({
+            'userId': target.pk,
+            'loginId': target.email or target.username,
+            'temporaryPassword': password,
+            'mustChangePassword': True,
+        })
 
 
 class ChangePasswordView(APIView):
@@ -641,13 +925,14 @@ class ChangePasswordView(APIView):
                 )
             admin_credentials.update(
                 user=request.user,
-                plaintext_password='[User Managed]',
                 must_change_password=False,
                 source='user_password_change',
             )
 
         # Revoke all previous active refresh tokens on password change to terminate stale sessions
         RefreshTokenRecord.objects.filter(user=request.user, revoked_at__isnull=True).update(revoked_at=timezone.now())
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, 'admin_password_changed', target=request.user, school=request.user.school)
 
         # Update session auth hash to preserve the user's active session on password change
         if hasattr(request, 'session'):
@@ -684,6 +969,7 @@ def _reset_user_credentials(user):
     user.set_password(password)
     user.must_change_password = True
     user.save(update_fields=['password', 'must_change_password'])
+    revoke_all_user_sessions(user)
 
     if user.role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]:
         try:
@@ -692,7 +978,6 @@ def _reset_user_credentials(user):
                 role=user.role,
                 name=user.get_full_name() or user.first_name or user.username,
                 login_id=user.email or user.username,
-                plaintext_password=password,
                 user=user,
                 source='admin_reset',
                 must_change_password=True,
@@ -729,7 +1014,10 @@ class ResetCredentialsView(APIView):
             return Response({'detail': 'Super Admins may reset School Admin accounts only.'}, status=status.HTTP_403_FORBIDDEN)
         if request.user.role == User.Role.SCHOOL_ADMIN and (user.school_id != request.user.school_id or user.role not in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]):
             return Response({'detail': 'School Admins may reset in-school Teacher, Student, and Parent accounts only.'}, status=status.HTTP_403_FORBIDDEN)
-        return Response(_reset_user_credentials(user))
+        credentials = _reset_user_credentials(user)
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, 'user_credentials_reset', target=user, school=user.school, metadata={'target_role': user.role})
+        return Response(credentials)
 
 
 class ResetStudentCredentialsView(APIView):
@@ -774,6 +1062,9 @@ class ResetStudentCredentialsView(APIView):
             else:
                 from apps.sis.services import create_student_login
                 credentials = create_student_login(student)
+                from apps.common.audit import record_admin_audit_event
+                created_user = User.objects.filter(pk=credentials.get('userId')).first()
+                record_admin_audit_event(request, 'student_credentials_created', target=created_user, school=student.school, metadata={'target_role': 'student'})
                 return Response({
                     'userId': credentials['userId'],
                     'loginId': credentials['email'],
@@ -806,6 +1097,8 @@ class ResetStudentCredentialsView(APIView):
                 if not user:
                     return Response({'detail': 'Could not create or link a parent login for this student.'}, status=status.HTTP_400_BAD_REQUEST)
                 if credentials.get('created'):
+                    from apps.common.audit import record_admin_audit_event
+                    record_admin_audit_event(request, 'parent_credentials_created', target=user, school=student.school, metadata={'target_role': 'parent'})
                     return Response({
                         'userId': user.pk,
                         'loginId': credentials['email'],
@@ -813,7 +1106,10 @@ class ResetStudentCredentialsView(APIView):
                         'mustChangePassword': True,
                     })
 
-        return Response(_reset_user_credentials(user))
+        credentials = _reset_user_credentials(user)
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, 'user_credentials_reset', target=user, school=user.school, metadata={'target_role': user.role})
+        return Response(credentials)
 
 
 class LogoutView(APIView):
@@ -893,7 +1189,8 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
     """
     serializer_class = CredentialVaultSerializer
     permission_classes = [CredentialVaultPermission]
-    pagination_class = None
+    pagination_class = AdminListPagination
+    ordering_fields = ['name', 'role', 'updated_at', 'school__name']
 
     def _sync_admin_vault_records(self):
         admin_users = User.objects.filter(role=User.Role.SCHOOL_ADMIN).select_related('school')
@@ -908,20 +1205,14 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
                     role=CredentialVaultRecord.Role.ADMIN,
                     name=admin.get_full_name() or admin.first_name or admin.email.split('@')[0],
                     login_id=admin.email,
-                    # The actual password hash cannot be reversed. Keep the
-                    # vault honest and masked instead of displaying a fake default.
-                    plaintext_password='[User Managed]',
                     identifier=f"ADM-{admin.pk:04d}",
                     source='admin_roster',
                     must_change_password=admin.must_change_password,
                 )
-            elif rec.source == 'admin_roster' and rec.plaintext_password == 'Admin@123':
-                # Repair legacy records previously populated with a fake default.
-                # Never attempt to infer a real password from the user's hash.
-                rec.plaintext_password = '[User Managed]'
+            elif rec.source == 'admin_roster':
                 rec.user = admin
                 rec.must_change_password = admin.must_change_password
-                rec.save(update_fields=['plaintext_password', 'user', 'must_change_password', 'updated_at'])
+                rec.save(update_fields=['user', 'must_change_password', 'updated_at'])
 
     def get_queryset(self):
         user = self.request.user
@@ -947,7 +1238,7 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
                     | Q(school__name__icontains=search_str)
                 )
 
-            return qs.order_by('name')
+            return qs.order_by('name', 'pk')
 
         school = user.school
         if not school:
@@ -994,7 +1285,18 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
                 | Q(linked_student_name__icontains=search_str)
             )
 
-        return qs.order_by('role', 'name')
+        return qs.order_by('role', 'name', 'pk')
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        qs = self.get_queryset()
+        from django.db.models import Count, Q
+        rows = qs.values('role').annotate(
+            total=Count('id'),
+            temporary=Count('id', filter=Q(must_change_password=True)),
+        )
+        by_role = {row['role']: {'total': row['total'], 'temporary': row['temporary']} for row in rows}
+        return Response({'byRole': by_role, 'total': sum(item['total'] for item in by_role.values())})
 
     def perform_create(self, serializer):
         # Never trust a school ID supplied by a school administrator.
@@ -1041,6 +1343,14 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
 
     def perform_destroy(self, instance):
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(
+            self.request,
+            'credential_vault_entry_deleted',
+            target=instance,
+            school=instance.school,
+            metadata={'target_role': instance.role},
+        )
         if instance.user and instance.role == CredentialVaultRecord.Role.ADMIN:
             with transaction.atomic():
                 user = instance.user
@@ -1050,16 +1360,23 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
             instance.delete()
 
     def perform_update(self, serializer):
-        record = serializer.save()
-        user = record.user or User.objects.filter(school=record.school, email__iexact=record.login_id).first() or User.objects.filter(school=record.school, username__iexact=record.login_id).first()
-        if user and record.plaintext_password and record.plaintext_password != '[User Managed]':
-            user.set_password(record.plaintext_password)
-            user.must_change_password = True
-            user.save(update_fields=['password', 'must_change_password'])
-            record.must_change_password = True
-            if not record.user:
-                record.user = user
-            record.save(update_fields=['user', 'must_change_password'])
+        serializer.save()
+
+    def update(self, request, *args, **kwargs):
+        if any(key in request.data for key in ('password', 'plaintext_password', 'temporaryPassword')):
+            return Response(
+                {'detail': 'Passwords cannot be read or written through credential-vault records. Use the reset action.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        if any(key in request.data for key in ('password', 'plaintext_password', 'temporaryPassword')):
+            return Response(
+                {'detail': 'Passwords cannot be read or written through credential-vault records. Use the reset action.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().partial_update(request, *args, **kwargs)
 
     @action(detail=False, methods=['post'], url_path='sync')
     def sync_roster(self, request):
@@ -1070,10 +1387,9 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
         school = user.school
         if user.role == User.Role.SUPER_ADMIN:
             school_id = request.data.get('schoolId') or request.query_params.get('school_id')
-            if school_id:
-                school = School.objects.filter(pk=school_id).first()
-            elif not school:
-                school = School.objects.first()
+            if not school_id:
+                return Response({'detail': 'Super Admins must specify a schoolId.'}, status=status.HTTP_400_BAD_REQUEST)
+            school = School.objects.filter(pk=school_id).first()
 
         if not school:
             return Response({'detail': 'No school tenant identified.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1088,22 +1404,31 @@ class CredentialVaultViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Administrator access is required.'}, status=status.HTTP_403_FORBIDDEN)
 
         record = self.get_object()
+        target_user = record.user or User.objects.filter(school=record.school, email__iexact=record.login_id).first() or User.objects.filter(school=record.school, username__iexact=record.login_id).first()
+        if not target_user:
+            return Response({'detail': 'The account no longer exists. Refresh the directory and try again.'}, status=status.HTTP_404_NOT_FOUND)
+
         new_pwd = generate_password(record.name, record.role)
-        record.plaintext_password = new_pwd
         record.must_change_password = True
         record.source = 'admin_reset'
-        record.save(update_fields=['plaintext_password', 'must_change_password', 'source', 'updated_at'])
+        record.save(update_fields=['must_change_password', 'source', 'updated_at'])
 
-        target_user = record.user or User.objects.filter(school=record.school, email__iexact=record.login_id).first() or User.objects.filter(school=record.school, username__iexact=record.login_id).first()
-        if target_user:
-            if not record.user:
-                record.user = target_user
-                record.save(update_fields=['user'])
-            target_user.set_password(new_pwd)
-            target_user.must_change_password = True
-            target_user.save(update_fields=['password', 'must_change_password'])
+        if not record.user:
+            record.user = target_user
+            record.save(update_fields=['user'])
+        target_user.set_password(new_pwd)
+        target_user.must_change_password = True
+        target_user.save(update_fields=['password', 'must_change_password'])
+        revoke_all_user_sessions(target_user)
 
-        return Response(self.get_serializer(record).data)
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(request, 'credential_vault_password_reset', target=record, school=record.school, metadata={'target_role': record.role})
+        return Response({
+            'userId': target_user.pk if target_user else record.user_id,
+            'loginId': record.login_id,
+            'temporaryPassword': new_pwd,
+            'mustChangePassword': True,
+        })
 
 
 
@@ -1137,7 +1462,7 @@ class VerifyOtpView(APIView):
             return Response({'detail': result['error']}, status=status.HTTP_400_BAD_REQUEST)
 
         user = result['user']
-        _enforce_vault_temp_password(user)
+        _enforce_first_login_password_change(user)
         user.last_login = timezone.now()
         user.is_online = True
         user.last_seen_at = timezone.now()

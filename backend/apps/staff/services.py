@@ -94,7 +94,6 @@ def create_teacher_with_login(*, school, data, created_by=None):
             role='teacher',
             name=user.get_full_name() or user.username or data.get('name', ''),
             login_id=credentials['login_id'],
-            plaintext_password=credentials['plaintext_password'],
             user=user,
             identifier=f"TCH-{teacher.id}",
             phone=teacher.phone or '',

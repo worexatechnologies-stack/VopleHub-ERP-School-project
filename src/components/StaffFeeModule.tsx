@@ -1,5 +1,5 @@
 import { getStoredAuthenticatedUser } from '../utils/auth';
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Wallet,
@@ -21,14 +21,16 @@ import {
   X,
 } from 'lucide-react';
 import AuthenticatedImage from './AuthenticatedImage';
-import { useGetTeachersQuery } from '../store/api/teacherApi';
 import {
-  useGetStaffSalariesQuery,
+  useGetStaffPayrollSummaryQuery,
+  useLazyGetStaffPayrollSummaryQuery,
   usePayStaffSalaryMutation,
   type StaffSalaryPayment,
+  type StaffPayrollRow,
 } from '../store/api/staffSalaryApi';
 import { emitNotification } from '../services/notificationBus';
 import { exportStaffPayrollToExcel } from '../utils/staffPayrollExport';
+import { ListPagination } from './common/QueryStates';
 
 interface StaffFeeModuleProps {
   schoolName?: string;
@@ -62,19 +64,22 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
   const [selectedYear, setSelectedYear] = useState<number>(currentDate.getFullYear());
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Paid' | 'Pending'>('All');
+  const [salaryPage, setSalaryPage] = useState(1);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const SALARY_PAGE_SIZE = 25;
 
   // Server queries
-  const { data: teachers = [], isLoading: isTeachersLoading } = useGetTeachersQuery(undefined, { skip: !isServerBacked });
-  const { data: serverSalaries = [], refetch: refetchSalaries } = useGetStaffSalariesQuery(
-    { month: selectedMonth, year: selectedYear },
+  const { data: serverPayrollPage, refetch: refetchSalaries } = useGetStaffPayrollSummaryQuery(
+    { month: selectedMonth, year: selectedYear, page: salaryPage, page_size: SALARY_PAGE_SIZE, search: debouncedSearch || undefined, status: statusFilter === 'All' ? undefined : statusFilter },
     { skip: !isServerBacked }
   );
+  const [loadPayrollPage] = useLazyGetStaffPayrollSummaryQuery();
   const [payStaffSalaryMutation, { isLoading: isPaying }] = usePayStaffSalaryMutation();
 
   // Local storage state for fallback
   const [localSalaries, setLocalSalaries] = useState<StaffSalaryPayment[]>(loadLocalSalaries);
 
-  const salaries = isServerBacked ? serverSalaries : localSalaries;
+  const salaries = localSalaries;
 
   // Modals state
   const [payingTeacher, setPayingTeacher] = useState<{
@@ -97,26 +102,25 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
   const [viewingReceipt, setViewingReceipt] = useState<StaffSalaryPayment | null>(null);
 
   // Match teachers with salary payments for the selected month & year
-  const teacherPayrollRows = useMemo(() => {
+  const teacherPayrollRows = useMemo<StaffPayrollRow[]>(() => {
+    if (isServerBacked) return serverPayrollPage?.results || [];
     // If local mode and no server teachers, fallback to local teachers
-    let teacherList = teachers;
-    if (!isServerBacked && (!teacherList || !teacherList.length)) {
-      try {
-        const raw = localStorage.getItem('erp_teachers');
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          teacherList = parsed.map((t: any) => ({
-            id: Number(t.id) || Date.now(),
-            name: t.name || 'Teacher',
-            email: t.email || '',
-            phone: t.phone || '',
-            salary: t.salary || 0,
-            status: t.status || 'Active',
-          }));
-        }
-      } catch {
-        teacherList = [];
+    let teacherList: any[] = [];
+    try {
+      const raw = localStorage.getItem('erp_teachers');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        teacherList = parsed.map((t: any) => ({
+          id: Number(t.id) || Date.now(),
+          name: t.name || 'Teacher',
+          email: t.email || '',
+          phone: t.phone || '',
+          salary: t.salary || 0,
+          status: t.status || 'Active',
+        }));
       }
+    } catch {
+      teacherList = [];
     }
 
     return teacherList
@@ -134,14 +138,15 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
         return {
           teacher,
           fixedSalary: fixedSalaryNum,
-          payment,
+          payment: payment || null,
           isPaid,
         };
       });
-  }, [teachers, salaries, selectedMonth, selectedYear, isServerBacked]);
+  }, [serverPayrollPage, salaries, selectedMonth, selectedYear, isServerBacked]);
 
   // Filtered rows
   const filteredRows = useMemo(() => {
+    if (isServerBacked) return teacherPayrollRows;
     return teacherPayrollRows.filter((row) => {
       const matchesSearch =
         row.teacher.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -157,31 +162,59 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
 
       return matchesSearch && matchesStatus;
     });
-  }, [teacherPayrollRows, searchTerm, statusFilter]);
+  }, [teacherPayrollRows, searchTerm, statusFilter, isServerBacked]);
+  const visibleRows = useMemo(
+    () => isServerBacked ? filteredRows : filteredRows.slice((salaryPage - 1) * SALARY_PAGE_SIZE, salaryPage * SALARY_PAGE_SIZE),
+    [filteredRows, salaryPage, isServerBacked],
+  );
+  useEffect(() => {
+    const timer = window.setTimeout(() => { setDebouncedSearch(searchTerm.trim()); setSalaryPage(1); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchTerm]);
+  useEffect(() => setSalaryPage(1), [selectedMonth, selectedYear, statusFilter]);
 
   // Aggregate stats
   const stats = useMemo(() => {
-    const totalPayroll = teacherPayrollRows.reduce((acc, row) => acc + row.fixedSalary, 0);
-    const totalPaid = teacherPayrollRows.reduce(
-      (acc, row) => acc + (row.isPaid && row.payment ? Number(row.payment.amount) : 0),
-      0
-    );
+    if (isServerBacked && serverPayrollPage?.summary) {
+      return {
+        totalPayroll: Number(serverPayrollPage.summary.totalPayroll),
+        totalPaid: Number(serverPayrollPage.summary.totalPaid),
+        totalPending: Number(serverPayrollPage.summary.totalPending),
+        paidCount: serverPayrollPage.summary.paidCount,
+        totalCount: serverPayrollPage.summary.totalCount,
+      };
+    }
+    const totalPayroll = teacherPayrollRows.reduce((acc, row) => acc + Number(row.fixedSalary), 0);
+    const totalPaid = teacherPayrollRows.reduce((acc, row) => acc + (row.isPaid && row.payment ? Number(row.payment.amount) : 0), 0);
     const totalPending = Math.max(0, totalPayroll - totalPaid);
     const paidCount = teacherPayrollRows.filter((row) => row.isPaid).length;
     const totalCount = teacherPayrollRows.length;
 
     return { totalPayroll, totalPaid, totalPending, paidCount, totalCount };
-  }, [teacherPayrollRows]);
+  }, [teacherPayrollRows, serverPayrollPage, isServerBacked]);
 
   // Export staff payroll to Excel (.xlsx)
-  const handleExportToExcel = () => {
+  const handleExportToExcel = async () => {
     try {
+      let exportRows = teacherPayrollRows;
+      if (isServerBacked) {
+        exportRows = [];
+        const pageSize = 200;
+        let page = 1;
+        let total = 0;
+        do {
+          const response = await loadPayrollPage({ month: selectedMonth, year: selectedYear, page, page_size: pageSize }).unwrap();
+          exportRows.push(...response.results);
+          total = response.count;
+          page += 1;
+        } while (exportRows.length < total);
+      }
       exportStaffPayrollToExcel({
         schoolName,
         month: selectedMonth,
         year: selectedYear,
         monthName: MONTHS[selectedMonth - 1],
-        rows: teacherPayrollRows,
+        rows: exportRows.map((row) => ({ ...row, fixedSalary: Number(row.fixedSalary), payment: row.payment || undefined })),
         stats,
       });
       emitNotification({
@@ -209,8 +242,8 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
       name: row.teacher.name,
       email: row.teacher.email,
       phone: row.teacher.phone,
-      fixedSalary: row.fixedSalary,
-      existingPayment: row.payment,
+      fixedSalary: Number(row.fixedSalary),
+      existingPayment: row.payment || undefined,
     });
 
     setPaymentForm({
@@ -518,14 +551,14 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredRows.length === 0 ? (
+      {filteredRows.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-400">
                     No teacher profiles found for this criteria.
                   </td>
                 </tr>
               ) : (
-                filteredRows.map(({ teacher, fixedSalary, payment, isPaid }) => (
+                visibleRows.map(({ teacher, fixedSalary, payment, isPaid }) => (
                   <tr key={teacher.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -617,6 +650,7 @@ export default function StaffFeeModule({ schoolName = 'School Management Portal'
             </tbody>
           </table>
         </div>
+        <ListPagination page={salaryPage} pageSize={SALARY_PAGE_SIZE} total={isServerBacked ? (serverPayrollPage?.count || 0) : filteredRows.length} onPageChange={setSalaryPage} />
       </div>
 
       {/* Pay Teacher Salary Modal */}

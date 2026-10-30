@@ -1,4 +1,5 @@
 import { baseApi } from './baseApi';
+import type { TeacherRecord } from './teacherApi';
 
 export interface StaffSalaryPayment {
   id: number;
@@ -20,6 +21,13 @@ export interface StaffSalaryPayment {
   createdAt: string;
 }
 
+export interface StaffSalaryPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: StaffSalaryPayment[];
+}
+
 export interface PayStaffSalaryPayload {
   teacherId: number;
   month: number;
@@ -32,20 +40,38 @@ export interface PayStaffSalaryPayload {
   notes?: string;
 }
 
-type Page<T> = { next?: string | null; results?: T[] } | T[];
+export interface StaffPayrollSummary {
+  totalPayroll: string | number;
+  totalPaid: string | number;
+  totalPending: string | number;
+  paidCount: number;
+  totalCount: number;
+  pendingCount: number;
+}
 
-function unwrapPage<T>(payload: Page<T>): T[] {
-  return Array.isArray(payload) ? payload : payload.results || [];
+export interface StaffPayrollRow {
+  teacher: TeacherRecord;
+  fixedSalary: number;
+  payment: StaffSalaryPayment | null;
+  isPaid: boolean;
+}
+
+export interface StaffPayrollPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: StaffPayrollRow[];
+  summary: StaffPayrollSummary;
 }
 
 export const staffSalaryApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
-    getStaffSalaries: build.query<StaffSalaryPayment[], { month?: number; year?: number; teacherId?: number } | void>({
-      query: (params) => ({
-        url: '/staff-salaries/',
-        params: params || undefined,
-      }),
-      transformResponse: (response: Page<StaffSalaryPayment>) => unwrapPage(response),
+    getStaffPayrollSummary: build.query<StaffPayrollPage, { month: number; year: number; page: number; page_size?: number; search?: string; status?: string }>({
+      query: (params) => ({ url: '/staff-salaries/payroll-summary/', params }),
+      providesTags: ['StaffSalary'],
+    }),
+    getStaffSalaries: build.query<StaffSalaryPage, { month?: number; year?: number; teacherId?: number; page: number; page_size?: number }>({
+      query: (params) => ({ url: '/staff-salaries/', params }),
       providesTags: ['StaffSalary'],
     }),
     getStaffSalary: build.query<StaffSalaryPayment, number>({
@@ -79,6 +105,8 @@ export const staffSalaryApi = baseApi.injectEndpoints({
 });
 
 export const {
+  useGetStaffPayrollSummaryQuery,
+  useLazyGetStaffPayrollSummaryQuery,
   useGetStaffSalariesQuery,
   useGetStaffSalaryQuery,
   usePayStaffSalaryMutation,

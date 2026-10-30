@@ -31,17 +31,12 @@ export interface ExamResultRecord {
   submitted_at: string | null;
 }
 
-type Page<T> = { next?: string | null; results?: T[] } | T[];
-
-function unwrapPage<T>(payload: Page<T>): T[] {
-  return Array.isArray(payload) ? payload : payload.results || [];
-}
+export interface Page<T> { count: number; next: string | null; previous: string | null; results: T[] }
 
 export const examApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
-    getExams: build.query<ExamRecord[], void>({
-      query: () => ({ url: '/exams/' }),
-      transformResponse: (response: Page<ExamRecord>) => unwrapPage(response),
+    getExams: build.query<Page<ExamRecord>, { page?: number; page_size?: number } | void>({
+      query: (params) => ({ url: '/exams/', params: params || { page: 1, page_size: 200 } }),
       providesTags: ['Exam'],
     }),
     createExam: build.mutation<ExamRecord, Omit<ExamRecord, 'id'>>({
@@ -52,9 +47,8 @@ export const examApi = baseApi.injectEndpoints({
       query: (id) => ({ url: `/exams/${id}/`, method: 'DELETE' }),
       invalidatesTags: ['Exam', 'ExamResult'],
     }),
-    getExamSchedules: build.query<ExamTimetableRecord[], void>({
-      query: () => ({ url: '/exam-schedules/' }),
-      transformResponse: (response: Page<ExamTimetableRecord>) => unwrapPage(response),
+    getExamSchedules: build.query<Page<ExamTimetableRecord>, { page?: number; page_size?: number; class_name?: string; status?: string; ordering?: string } | void>({
+      query: (params) => ({ url: '/exam-schedules/', params: params || { page: 1, page_size: 200 } }),
       providesTags: ['Exam'],
     }),
     createExamSchedule: build.mutation<ExamTimetableRecord, Partial<ExamTimetableRecord>>({

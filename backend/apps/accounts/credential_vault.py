@@ -17,7 +17,6 @@ def record_credential(
     role: str,
     name: str,
     login_id: str,
-    plaintext_password: str,
     user=None,
     identifier: str = '',
     class_name: str = '',
@@ -33,7 +32,7 @@ def record_credential(
     STRICT SECURITY INVARIANT:
     Superadmin root credentials MUST NEVER be recorded. Any attempt is rejected.
     """
-    if not school or not login_id or not plaintext_password:
+    if not school or not login_id:
         return None
 
     raw_role = str(role or '').strip().lower().replace(' ', '_')
@@ -62,8 +61,6 @@ def record_credential(
 
     clean_login = login_id.strip().lower()
     clean_name = (name or clean_login).strip()
-    clean_pwd = plaintext_password.strip()
-
     try:
         record, created = CredentialVaultRecord.objects.update_or_create(
             school=school,
@@ -72,7 +69,6 @@ def record_credential(
                 'user': user,
                 'role': vault_role,
                 'name': clean_name,
-                'plaintext_password': clean_pwd,
                 'identifier': (identifier or '').strip(),
                 'class_name': (class_name or '').strip(),
                 'section': (section or '').strip(),
@@ -167,7 +163,6 @@ def sync_school_credential_vault(school):
                 role='student',
                 name=student.name,
                 login_id=user.email or user.username,
-                plaintext_password='[User Managed]',
                 user=user,
                 identifier=student.admission_no,
                 class_name=student.class_name,
@@ -181,16 +176,8 @@ def sync_school_credential_vault(school):
             existing_student_user_ids.add(user.pk)
             existing_student_logins.add(login_id)
             synced_students += 1
-        else:
-            # Create login via SIS helper
-            try:
-                from apps.sis.services import create_student_login
-                creds = create_student_login(student)
-                if creds and creds.get('temporaryPassword'):
-                    existing_student_identifiers.add(student.admission_no)
-                    synced_students += 1
-            except Exception as exc:
-                logger.warning('Failed auto-syncing student %s: %s', student.id, exc)
+        # Roster sync only catalogs accounts; it must not silently create
+        # accounts whose one-time credentials cannot be handed to an admin.
 
     # 2. Sync Teachers
     teachers = Teacher.objects.filter(school=school, status=Teacher.Status.ACTIVE).select_related('user', 'school')
@@ -208,7 +195,6 @@ def sync_school_credential_vault(school):
             role='teacher',
             name=user.get_full_name() or user.username,
             login_id=user.email,
-            plaintext_password='[User Managed]',
             user=user,
             identifier=f"TCH-{teacher.id}",
             phone=teacher.phone,
@@ -240,7 +226,6 @@ def sync_school_credential_vault(school):
             role='parent',
             name=user.get_full_name() or f"Parent of {linked_name}".strip(),
             login_id=user.email,
-            plaintext_password='[User Managed]',
             user=user,
             identifier=f"P-{parent_prof.id}",
             class_name=class_name,
@@ -282,13 +267,13 @@ def sync_school_credential_vault(school):
     }
 
 
-def update_vault_password_for_user(user, plaintext_password: str = ''):
+def update_vault_password_for_user(user):
     """Automatically update the CredentialVaultRecord when a user sets or changes their password.
 
     Applies ONLY to non-privileged roles (Student, Teacher, Parent).
     Strictly ignores Admin and Super Admin accounts.
-    User-managed private passwords are encrypted via Argon2id in User.password and
-    NEVER stored in plaintext in the CredentialVaultRecord.
+    User-managed private passwords are stored only as Django password hashes
+    in User.password and never copied into the roster record.
     """
     if not user:
         return None
@@ -313,10 +298,9 @@ def update_vault_password_for_user(user, plaintext_password: str = ''):
 
     if record:
         record.user = user
-        record.plaintext_password = '[User Managed]'
         record.must_change_password = False
         record.source = 'user_password_change'
-        record.save(update_fields=['user', 'plaintext_password', 'must_change_password', 'source', 'updated_at'])
+        record.save(update_fields=['user', 'must_change_password', 'source', 'updated_at'])
         logger.info(
             'Updated credential vault record for user %s (role=%s) in school %s to [User Managed]',
             user.pk,
@@ -364,7 +348,6 @@ def update_vault_password_for_user(user, plaintext_password: str = ''):
         role=user.role,
         name=clean_name,
         login_id=clean_login,
-        plaintext_password='[User Managed]',
         user=user,
         identifier=identifier,
         class_name=class_name,

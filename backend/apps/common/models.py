@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 from django.conf import settings
+from django.utils import timezone
 
 
 class ExportJob(models.Model):
@@ -58,3 +59,45 @@ class ExportJob(models.Model):
 
     def __str__(self):
         return f"Export {self.resource_type} ({self.status}) - {self.id}"
+
+
+class AdminAuditEvent(models.Model):
+    """Append-only record of privileged actions across school tenants."""
+
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='admin_audit_events')
+    school = models.ForeignKey('schools.School', null=True, blank=True, on_delete=models.SET_NULL, related_name='admin_audit_events')
+    action = models.CharField(max_length=80)
+    object_type = models.CharField(max_length=80, blank=True)
+    object_id = models.CharField(max_length=120, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    remote_addr = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['school', '-created_at', '-id'], name='aud_school_created_id_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError('Admin audit events are immutable.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Admin audit events are immutable.')
+
+    def __str__(self):
+        return f'{self.action} by {self.actor_id} at {self.created_at}'
+
+
+class PlatformSetting(models.Model):
+    """Allowlisted platform-wide configuration controlled by Super Admins."""
+
+    key = models.CharField(max_length=80, primary_key=True)
+    value = models.JSONField(default=dict)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.key

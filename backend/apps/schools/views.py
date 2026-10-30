@@ -80,11 +80,14 @@ class IsSuperAdminOnly(BasePermission):
 class SchoolViewSet(viewsets.ModelViewSet):
     serializer_class, permission_classes = SchoolSerializer, [IsSuperAdminOnly]
     queryset = School.objects.defer('logo_data').order_by('name')
+    search_fields = ['name', 'code', 'subdomain']
+    filterset_fields = ['is_active', 'is_demo']
+    ordering_fields = ['name', 'code', 'created_at', 'student_count']
 
     def get_queryset(self):
         from django.db.models import Count
         qs = super().get_queryset().annotate(student_count=Count('students', distinct=True))
-        return qs if self.request.user.role == 'super_admin' else qs.filter(pk=self.request.user.school_id)
+        return (qs if self.request.user.role == 'super_admin' else qs.filter(pk=self.request.user.school_id)).order_by('name', 'pk')
 
     @action(detail=False, methods=['get'], url_path='school-counts')
     def school_counts(self, request):
@@ -119,7 +122,9 @@ class SchoolViewSet(viewsets.ModelViewSet):
         return super().retrieve(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        super().perform_create(serializer)
+        school = serializer.save()
+        from apps.common.audit import record_admin_audit_event
+        record_admin_audit_event(self.request, 'school_created', target=school, school=school, metadata={'school_code': school.code})
         bump_cache_version('schools')
 
     def perform_destroy(self, instance):
@@ -140,6 +145,15 @@ class SchoolViewSet(viewsets.ModelViewSet):
         previous_instance = self.get_object()
         was_active = previous_instance.is_active
         instance = serializer.save()
+        from apps.common.audit import record_admin_audit_event
+        changed_fields = sorted(serializer.validated_data.keys())
+        record_admin_audit_event(
+            self.request,
+            'school_updated',
+            target=instance,
+            school=instance,
+            metadata={'changed_fields': changed_fields},
+        )
         bump_cache_version('schools')
         if 'is_active' in serializer.validated_data and was_active != instance.is_active:
             with transaction.atomic():
@@ -174,6 +188,14 @@ class SchoolViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
+            from apps.common.audit import record_admin_audit_event
+            record_admin_audit_event(
+                request,
+                'school_deleted',
+                target=school,
+                school=school,
+                metadata={'school_code': school.code},
+            )
             # Remove every tenant identity before the School cascade deletes tenant records.
             users = User.objects.filter(school=school)
             user_count = users.count()

@@ -1,0 +1,9 @@
+http://localhost {
+	redir https://localhost:3443{uri} permanent
+}
+
+https://localhost:3443 {
+	tls internal
+	encode zstd gzip
+	reverse_proxy web:80
+}

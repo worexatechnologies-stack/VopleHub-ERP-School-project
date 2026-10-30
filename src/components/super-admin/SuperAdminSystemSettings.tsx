@@ -29,7 +29,8 @@ import {
   GraduationCap,
   BellRing
 } from 'lucide-react';
-import { getStoredAuthenticatedUser, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME, SUPER_ADMIN_PASSWORD } from '../../utils/auth';
+import { getStoredAuthenticatedUser, SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME } from '../../utils/auth';
+import { useGetPlatformSettingsQuery, useSavePlatformSettingMutation } from '../../store/api/schoolApi';
 
 interface SystemSettingsData {
   schoolName: string;
@@ -99,9 +100,7 @@ interface ToastNotice {
 
 export default function SuperAdminSystemSettings() {
   const [activeSection, setActiveSection] = useState<string>('profile');
-  const [profileName, setProfileName] = useState(SUPER_ADMIN_NAME);
-  const [profilePassword, setProfilePassword] = useState(SUPER_ADMIN_PASSWORD);
-  const [showProfilePassword, setShowProfilePassword] = useState(false);
+  const [profileName] = useState(getStoredAuthenticatedUser()?.name || SUPER_ADMIN_NAME);
   // Payment gateway secrets are strictly managed server-side and never persisted in browser storage.
 
   // Dynamic lists
@@ -117,7 +116,8 @@ export default function SuperAdminSystemSettings() {
   // Toast feedback state
   const [toast, setToast] = useState<ToastNotice | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [isBackingUp, setIsBackingUp] = useState(false);
+  const { data: platformSettings } = useGetPlatformSettingsQuery();
+  const [savePlatformSetting] = useSavePlatformSettingMutation();
 
   const showToast = (type: 'success' | 'info' | 'error', title: string, message: string) => {
     const id = Date.now();
@@ -128,85 +128,20 @@ export default function SuperAdminSystemSettings() {
   };
 
   useEffect(() => {
-    // Load system settings
-    const savedSettings = localStorage.getItem('sa_system_settings');
-    if (savedSettings) {
-      try {
-        setSysSettings(JSON.parse(savedSettings));
-      } catch (e) {
-        setSysSettings(DEFAULT_SETTINGS);
-      }
-    } else {
-      localStorage.setItem('sa_system_settings', JSON.stringify(DEFAULT_SETTINGS));
-    }
+    if (!platformSettings) return;
+    setSysSettings({ ...DEFAULT_SETTINGS, ...((platformSettings.system as Partial<SystemSettingsData>) || {}) });
+    setModules((platformSettings.modules as typeof DEFAULT_MODULES) || DEFAULT_MODULES);
+    setFeeCategories((platformSettings.fee_categories as string[]) || ['Tuition', 'Transport', 'Exam', 'Admission', 'Library', 'Sports', 'Laboratories']);
+    setExamTypes((platformSettings.exam_types as string[]) || ['Midterm Test', 'Final Exams', 'Quarterly Assessment', 'Class Unit Quiz', 'Practical Exams']);
+  }, [platformSettings]);
 
-    // Load feature modules
-    const savedModules = localStorage.getItem('sa_feature_modules');
-    if (savedModules) {
-      try {
-        setModules(JSON.parse(savedModules));
-      } catch (e) {
-        setModules(DEFAULT_MODULES);
-      }
-    } else {
-      localStorage.setItem('sa_feature_modules', JSON.stringify(DEFAULT_MODULES));
+  const persistSetting = async (key: string, value: unknown) => {
+    try {
+      await savePlatformSetting({ key, value }).unwrap();
+      showToast('success', 'Saved', 'The setting was saved to the platform database and recorded in the audit log.');
+    } catch (error: any) {
+      showToast('error', 'Save failed', error?.data?.detail || 'The setting could not be saved. Please try again.');
     }
-
-    // Load Super Admin profile
-    const savedUsers = localStorage.getItem('sa_users');
-    if (savedUsers) {
-      try {
-        const usersList = JSON.parse(savedUsers);
-        const superAdmin = usersList.find((u: any) => String(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase());
-        if (superAdmin) {
-          if (superAdmin.name) setProfileName(superAdmin.name);
-          if (superAdmin.password) setProfilePassword(superAdmin.password);
-        }
-      } catch (e) {}
-    }
-
-    // Load Fee Categories
-    const savedFees = localStorage.getItem('sa_fee_categories');
-    if (savedFees) {
-      try {
-        setFeeCategories(JSON.parse(savedFees));
-      } catch (e) {
-        setFeeCategories(['Tuition', 'Transport', 'Exam', 'Admission', 'Library', 'Sports', 'Laboratories']);
-      }
-    } else {
-      const defaultFees = ['Tuition', 'Transport', 'Exam', 'Admission', 'Library', 'Sports', 'Laboratories'];
-      localStorage.setItem('sa_fee_categories', JSON.stringify(defaultFees));
-      setFeeCategories(defaultFees);
-    }
-
-    // Load Exam Types
-    const savedExams = localStorage.getItem('sa_exam_types');
-    if (savedExams) {
-      try {
-        setExamTypes(JSON.parse(savedExams));
-      } catch (e) {
-        setExamTypes(['Midterm Test', 'Final Exams', 'Quarterly Assessment', 'Class Unit Quiz', 'Practical Exams']);
-      }
-    } else {
-      const defaultExams = ['Midterm Test', 'Final Exams', 'Quarterly Assessment', 'Class Unit Quiz', 'Practical Exams'];
-      localStorage.setItem('sa_exam_types', JSON.stringify(defaultExams));
-      setExamTypes(defaultExams);
-    }
-  }, []);
-
-  const addAuditLog = (action: string) => {
-    const user = getStoredAuthenticatedUser();
-    const operatorName = user?.name || SUPER_ADMIN_NAME;
-    const newLog = {
-      id: `audit-${Date.now()}`,
-      userName: operatorName,
-      action,
-      timestamp: new Date().toISOString(),
-      ipAddress: '157.45.192.' + Math.floor(Math.random() * 254 + 1)
-    };
-    const saved = localStorage.getItem('sa_audit_logs');
-    const existing = saved ? JSON.parse(saved) : [];
-    localStorage.setItem('sa_audit_logs', JSON.stringify([newLog, ...existing]));
   };
 
   const handleCopyText = (text: string, key: string, label: string) => {
@@ -216,42 +151,13 @@ export default function SuperAdminSystemSettings() {
     setTimeout(() => setCopiedKey(null), 2500);
   };
 
-  const handleSaveProfile = (e: React.FormEvent) => {
-    e.preventDefault();
-    const savedUsersStr = localStorage.getItem('sa_users');
-    if (savedUsersStr) {
-      try {
-        const list = JSON.parse(savedUsersStr);
-        const updated = list.map((u: any) => {
-          if (String(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()) {
-            return { ...u, name: profileName, password: profilePassword };
-          }
-          return u;
-        });
-        localStorage.setItem('sa_users', JSON.stringify(updated));
-      } catch (err) {}
-    }
-    addAuditLog(`Updated profile details and password credentials for Super Admin account.`);
-    showToast('success', 'Profile Updated', 'Super Admin particulars and password credentials were saved successfully.');
-  };
+  const handleSaveFeeCategories = () => { void persistSetting('fee_categories', feeCategories); };
 
-  const handleSaveFeeCategories = () => {
-    localStorage.setItem('sa_fee_categories', JSON.stringify(feeCategories));
-    addAuditLog('Updated global system Fee Categories configuration array.');
-    showToast('success', 'Fee Categories Saved', `${feeCategories.length} fee category types are active across all branches.`);
-  };
-
-  const handleSaveExamTypes = () => {
-    localStorage.setItem('sa_exam_types', JSON.stringify(examTypes));
-    addAuditLog('Updated global system Exam Types configuration list.');
-    showToast('success', 'Exam Types Saved', `${examTypes.length} examination assessment schedules are preserved.`);
-  };
+  const handleSaveExamTypes = () => { void persistSetting('exam_types', examTypes); };
 
   const handleSaveGeneralSettings = (e: React.FormEvent) => {
     e.preventDefault();
-    localStorage.setItem('sa_system_settings', JSON.stringify(sysSettings));
-    addAuditLog('Updated global ERP system parameters.');
-    showToast('success', 'System Settings Saved', 'Your system configurations have been committed to local and tenant storage.');
+    void persistSetting('system', sysSettings);
   };
 
   const addFeeCat = () => {
@@ -264,14 +170,12 @@ export default function SuperAdminSystemSettings() {
     const updated = [...feeCategories, trimmed];
     setFeeCategories(updated);
     setNewFeeCat('');
-    localStorage.setItem('sa_fee_categories', JSON.stringify(updated));
     showToast('success', 'Category Added', `Added "${trimmed}" to fee categories.`);
   };
 
   const removeFeeCat = (cat: string) => {
     const updated = feeCategories.filter((c) => c !== cat);
     setFeeCategories(updated);
-    localStorage.setItem('sa_fee_categories', JSON.stringify(updated));
   };
 
   const addExamType = () => {
@@ -284,30 +188,20 @@ export default function SuperAdminSystemSettings() {
     const updated = [...examTypes, trimmed];
     setExamTypes(updated);
     setNewExamType('');
-    localStorage.setItem('sa_exam_types', JSON.stringify(updated));
     showToast('success', 'Exam Type Added', `Added "${trimmed}" to examination types.`);
   };
 
   const removeExamType = (type: string) => {
     const updated = examTypes.filter((t) => t !== type);
     setExamTypes(updated);
-    localStorage.setItem('sa_exam_types', JSON.stringify(updated));
   };
 
   const saveModules = () => {
-    localStorage.setItem('sa_feature_modules', JSON.stringify(modules));
-    addAuditLog('Updated school feature module availability controls.');
-    const activeCount = modules.filter((m) => m.enabled).length;
-    showToast('success', 'Modules Configured', `${activeCount} of ${modules.length} modules enabled for school branches.`);
+    void persistSetting('modules', modules);
   };
 
   const triggerInstantBackup = () => {
-    setIsBackingUp(true);
-    setTimeout(() => {
-      setIsBackingUp(false);
-      addAuditLog(`Super Admin triggered immediate system database snapshot to ${sysSettings.backupDestination}.`);
-      showToast('success', 'Snapshot Captured', `Instant database snapshot created and stored in ${sysSettings.backupDestination}.`);
-    }, 1500);
+    showToast('info', 'Backup action unavailable', 'Snapshots must be triggered by the configured database backup service; this screen cannot create one.');
   };
 
   const insertSmsTag = (tag: string) => {
@@ -457,15 +351,14 @@ export default function SuperAdminSystemSettings() {
                 </p>
               </div>
 
-              <form onSubmit={handleSaveProfile} className="space-y-6">
+              <div className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-700">Display Officer Name</label>
                     <input
-                      required
+                      readOnly
                       type="text"
                       value={profileName}
-                      onChange={(e) => setProfileName(e.target.value)}
                       placeholder="e.g. Worexa Technologies"
                       className="w-full text-xs bg-slate-50 border border-slate-200 px-3.5 py-2.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-800 font-medium"
                     />
@@ -489,77 +382,8 @@ export default function SuperAdminSystemSettings() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <label className="text-xs font-bold text-slate-800">Root Access Password</label>
-                      <p className="text-[11px] text-slate-500">Master passphrase for Super Admin console clearance.</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*';
-                        let pass = '';
-                        for (let i = 0; i < 14; i++) pass += chars.charAt(Math.floor(Math.random() * chars.length));
-                        setProfilePassword(pass);
-                        setShowProfilePassword(true);
-                        showToast('info', 'Generated Password', 'Created strong 14-character random password.');
-                      }}
-                      className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
-                    >
-                      <Key className="w-3.5 h-3.5 text-indigo-500" />
-                      <span>Generate Strong Key</span>
-                    </button>
-                  </div>
-
-                  <div className="relative">
-                    <Key className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      required
-                      type={showProfilePassword ? 'text' : 'password'}
-                      minLength={8}
-                      value={profilePassword}
-                      onChange={(e) => setProfilePassword(e.target.value)}
-                      className="w-full text-xs bg-white border border-slate-200 pl-10 pr-24 py-2.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-800 font-mono"
-                    />
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setShowProfilePassword(!showProfilePassword)}
-                        className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
-                        title={showProfilePassword ? 'Hide password' : 'Show password'}
-                      >
-                        {showProfilePassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleCopyText(profilePassword, 'admin-pass', 'Password')}
-                        className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
-                        title="Copy password"
-                      >
-                        {copiedKey === 'admin-pass' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-[11px] text-slate-500 pt-1">
-                    <span className="font-semibold">Strength:</span>
-                    <span className={`font-bold ${profilePassword.length >= 10 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                      {profilePassword.length >= 12 ? 'Excellent (Enterprise Safe)' : profilePassword.length >= 8 ? 'Good (8+ chars)' : 'Too Short'}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="pt-2 flex justify-end">
-                  <button
-                    type="submit"
-                    className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-indigo-600/25 transition-all cursor-pointer"
-                  >
-                    <Save className="w-4 h-4" />
-                    <span>Save Profile Credentials</span>
-                  </button>
-                </div>
-              </form>
+                <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">Passwords are never displayed or stored by this settings panel. Change the account password through the authenticated password-change flow.</p>
+              </div>
             </div>
           )}
 
@@ -1148,11 +972,11 @@ export default function SuperAdminSystemSettings() {
                     <button
                       type="button"
                       onClick={triggerInstantBackup}
-                      disabled={isBackingUp}
+                      disabled
                       className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 hover:bg-black px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-all cursor-pointer disabled:opacity-50"
                     >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isBackingUp ? 'animate-spin' : ''}`} />
-                      <span>{isBackingUp ? 'Capturing Snapshot…' : 'Capture Snapshot Now'}</span>
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Backup service required</span>
                     </button>
                   </div>
 

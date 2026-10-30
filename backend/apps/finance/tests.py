@@ -3,7 +3,7 @@ from rest_framework.test import APIClient
 from apps.schools.models import School
 from apps.academics.models import Class, Section, AcademicYear
 from apps.sis.models import Student
-from apps.finance.models import FeeStructure, FeeQuarter
+from apps.finance.models import FeeStructure, FeeQuarter, StudentFeeRecord
 
 class FeeStructureTestCase(TestCase):
     def setUp(self):
@@ -352,7 +352,7 @@ class FeeStructureTestCase(TestCase):
 
         # School 1: Create exactly 5 students in Class 1
         for i in range(1, 6):
-            Student.objects.create(
+            student = Student.objects.create(
                 school=school_1,
                 admission_no=f'S1-ADM-{i}',
                 name=f'S1 Student {i}',
@@ -364,10 +364,16 @@ class FeeStructureTestCase(TestCase):
                 gender='Female',
                 academic_year='2026-2027'
             )
+            StudentFeeRecord.objects.create(
+                school=school_1, student=student, student_id_str=str(student.pk),
+                student_name=student.name, admission_no=student.admission_no,
+                class_name=student.class_name, section_name=student.section,
+                academic_year=student.academic_year,
+            )
 
         # School 2: Create exactly 7 students in Class 1
         for i in range(1, 8):
-            Student.objects.create(
+            student = Student.objects.create(
                 school=school_2,
                 admission_no=f'S2-ADM-{i}',
                 name=f'S2 Student {i}',
@@ -378,6 +384,12 @@ class FeeStructureTestCase(TestCase):
                 dob='2018-05-10',
                 gender='Female',
                 academic_year='2026-2027'
+            )
+            StudentFeeRecord.objects.create(
+                school=school_2, student=student, student_id_str=str(student.pk),
+                student_name=student.name, admission_no=student.admission_no,
+                class_name=student.class_name, section_name=student.section,
+                academic_year=student.academic_year,
             )
 
         # Fee Structure for School 1
@@ -404,15 +416,17 @@ class FeeStructureTestCase(TestCase):
         self.client.force_authenticate(user=admin_1)
         resp_fs1 = self.client.get('/api/v1/fee-structures/')
         self.assertEqual(resp_fs1.status_code, 200)
-        fs1_ids = [item['id'] for item in resp_fs1.data]
+        fs1_rows = resp_fs1.data.get('results', resp_fs1.data)
+        fs1_ids = [item['id'] for item in fs1_rows]
         self.assertIn(fs_1.id, fs1_ids)
         self.assertNotIn(fs_2.id, fs1_ids)
 
         # 2. Test Admin 1 querying fee records -> Returns ONLY 5 students from School 1
         resp_rec1 = self.client.get('/api/v1/fee-records/')
         self.assertEqual(resp_rec1.status_code, 200)
-        self.assertEqual(len(resp_rec1.data), 5)
-        for rec in resp_rec1.data:
+        rec1_rows = resp_rec1.data.get('results', resp_rec1.data)
+        self.assertEqual(len(rec1_rows), 5)
+        for rec in rec1_rows:
             self.assertTrue(rec['admission_no'].startswith('S1-ADM-'))
 
         # 3. Test Admin 1 querying student-summaries -> Returns ONLY 5 students from School 1
@@ -427,15 +441,17 @@ class FeeStructureTestCase(TestCase):
         self.client.force_authenticate(user=admin_2)
         resp_fs2 = self.client.get('/api/v1/fee-structures/')
         self.assertEqual(resp_fs2.status_code, 200)
-        fs2_ids = [item['id'] for item in resp_fs2.data]
+        fs2_rows = resp_fs2.data.get('results', resp_fs2.data)
+        fs2_ids = [item['id'] for item in fs2_rows]
         self.assertIn(fs_2.id, fs2_ids)
         self.assertNotIn(fs_1.id, fs2_ids)
 
         # 5. Test Admin 2 querying fee records -> Returns ONLY 7 students from School 2
         resp_rec2 = self.client.get('/api/v1/fee-records/')
         self.assertEqual(resp_rec2.status_code, 200)
-        self.assertEqual(len(resp_rec2.data), 7)
-        for rec in resp_rec2.data:
+        rec2_rows = resp_rec2.data.get('results', resp_rec2.data)
+        self.assertEqual(len(rec2_rows), 7)
+        for rec in rec2_rows:
             self.assertTrue(rec['admission_no'].startswith('S2-ADM-'))
 
         # 6. Test Admin 2 querying student-summaries -> Returns ONLY 7 students from School 2
@@ -453,6 +469,9 @@ class FeeStructureTestCase(TestCase):
         self.assertIn('totalRevenue', resp_rev1.data)
         self.assertIn('totalInvoiced', resp_rev1.data)
         self.assertEqual(resp_rev1.data['totalInvoiced'], 5 * 15000.0)
+        self.assertEqual(resp_rev1.data['studentsCount'], 5)
+        self.assertEqual(resp_rev1.data['paidCount'], 0)
+        self.assertEqual(resp_rev1.data['unpaidCount'], 5)
 
     def test_fee_structure_total_amount_property(self):
         from apps.accounts.models import User

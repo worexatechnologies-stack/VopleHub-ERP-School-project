@@ -2,6 +2,7 @@ import logging
 from io import BytesIO
 
 from django.db import transaction
+from django.db.models import Count, Exists, OuterRef, Q, Sum
 
 logger = logging.getLogger(__name__)
 from django.db.models import Prefetch
@@ -16,6 +17,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema
 
 from apps.accounts.models import User
 from apps.common.tenancy import TenantScopedViewSet
+from apps.common.pagination import AdminListPagination
 from apps.common.fast_cache import fast_cache_response, bump_cache_version
 from apps.common.import_queue import CanManageSchoolImports, import_status_key, queue_import_batch
 
@@ -59,6 +61,7 @@ class TeacherPermission(permissions.BasePermission):
 
 class TeacherViewSet(TenantScopedViewSet):
     permission_classes = [TeacherPermission]
+    pagination_class = AdminListPagination
     serializer_class = TeacherSerializer
     queryset = Teacher.objects.defer(
         'photo_data'
@@ -226,6 +229,8 @@ class TeacherViewSet(TenantScopedViewSet):
             user.set_password(clean_pwd)
             user.must_change_password = True
             user.save(update_fields=['password', 'must_change_password'])
+            from apps.accounts.auth_utils import revoke_all_user_sessions
+            revoke_all_user_sessions(user)
             try:
                 from apps.accounts.credential_vault import record_credential
                 record_credential(
@@ -233,7 +238,6 @@ class TeacherViewSet(TenantScopedViewSet):
                     role='teacher',
                     name=teacher.user.get_full_name() or teacher.name,
                     login_id=teacher.user.email,
-                    plaintext_password=clean_pwd,
                     user=user,
                     source='admin_update',
                     must_change_password=True,
@@ -394,7 +398,7 @@ class TeacherViewSet(TenantScopedViewSet):
         High-throughput architecture supporting up to 50,000+ teacher records:
         - Memory-efficient streaming spreadsheet parsing
         - O(1) in-memory allocation of unique emails and login credentials
-        - Ultra-fast temporary credential hashing with native auto-upgrade on user login
+        - Standard Django password hashing for imported accounts
         - Batched database writes (bulk_create) to eliminate N+1 bottlenecks
         - Idempotent batch processing with cached job recovery
         - Structured, sanitized error diagnostics for high reliability
@@ -412,14 +416,13 @@ class TeacherViewSet(TenantScopedViewSet):
         )
         from apps.common.validators import validate_spreadsheet_upload
         from apps.sis.services import generate_temporary_password
-        from django.contrib.auth.hashers import MD5PasswordHasher
+        from django.contrib.auth.hashers import make_password
         from django.core.cache import cache
         from django.core.exceptions import ValidationError
         from django.db import DatabaseError, IntegrityError, transaction
         from django.db.models import Q
         from django.utils.text import slugify
         import json as json_lib
-        import secrets
 
         start_time = time.time()
 
@@ -454,7 +457,7 @@ class TeacherViewSet(TenantScopedViewSet):
             total_batches = 1
 
         # Check idempotency cache
-        cache_key = f"bulk_import_teacher:{school.id}:{user.id}:{job_id}:{batch_number}" if job_id else None
+        cache_key = f"bulk_import_teacher_v2:{school.id}:{user.id}:{job_id}:{batch_number}" if job_id else None
         if cache_key:
             cached_result = cache.get(cache_key)
             if cached_result:
@@ -546,12 +549,11 @@ class TeacherViewSet(TenantScopedViewSet):
         allocated_batch_usernames = set()
         subdomain_slug = slugify(getattr(school, 'subdomain', '') or getattr(school, 'code', '') or f'school-{school.id}') or f'school-{school.id}'
 
-        fast_hasher = MD5PasswordHasher()
         def get_fast_credentials(override_password=None):
             raw_pwd = str(override_password or '').strip()
             if not raw_pwd:
                 raw_pwd = generate_temporary_password(14)
-            encoded_pwd = fast_hasher.encode(raw_pwd, secrets.token_hex(8))
+            encoded_pwd = make_password(raw_pwd)
             return raw_pwd, encoded_pwd
 
         created_teachers = []
@@ -699,7 +701,6 @@ class TeacherViewSet(TenantScopedViewSet):
                             role=CredentialVaultRecord.Role.TEACHER,
                             name=meta['name'],
                             login_id=meta['email'],
-                            plaintext_password=meta['password'],
                             identifier=f"TCH-{t.id}",
                             phone=meta['phone'],
                             source='csv_bulk_import',
@@ -817,7 +818,9 @@ class TeacherViewSet(TenantScopedViewSet):
 
         # Cache response for idempotency
         if cache_key:
-            cache.set(cache_key, response_data, timeout=3600)
+            # Temporary passwords are returned to the caller once and must not
+            # be retained in Redis as part of the idempotency response.
+            cache.set(cache_key, {**response_data, 'credentials': []}, timeout=3600)
         if total_created:
             bump_cache_version('teachers', school.id)
 
@@ -1076,6 +1079,7 @@ class StaffSalaryPaymentPermission(permissions.BasePermission):
 
 class StaffSalaryPaymentViewSet(TenantScopedViewSet):
     permission_classes = [StaffSalaryPaymentPermission]
+    pagination_class = AdminListPagination
     serializer_class = StaffSalaryPaymentSerializer
     queryset = StaffSalaryPayment.objects.select_related('school', 'teacher__user', 'paid_by')
 
@@ -1102,6 +1106,90 @@ class StaffSalaryPaymentViewSet(TenantScopedViewSet):
         if year:
             qs = qs.filter(year=year)
         return qs
+
+    @action(detail=False, methods=['get'], url_path='payroll-summary')
+    def payroll_summary(self, request):
+        """Return the filtered teacher payroll roster as one server-paginated page."""
+        user = request.user
+        if user.role != User.Role.SCHOOL_ADMIN or not user.school_id:
+            return Response({'detail': 'A School Admin account is required.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            month = int(request.query_params.get('month', timezone.localdate().month))
+            year = int(request.query_params.get('year', timezone.localdate().year))
+            if month < 1 or month > 12 or year < 2000 or year > 2200:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'detail': 'Choose a valid payroll month and year.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        active_teachers = Teacher.objects.filter(school_id=user.school_id, status=Teacher.Status.ACTIVE)
+        payments = StaffSalaryPayment.objects.filter(school_id=user.school_id, month=month, year=year)
+        teacher_list = active_teachers.select_related('user').annotate(
+            has_paid_salary=Exists(payments.filter(teacher_id=OuterRef('pk'), status=StaffSalaryPayment.Status.PAID)),
+        )
+        search = request.query_params.get('search', '').strip()[:100]
+        if search:
+            teacher_list = teacher_list.filter(
+                Q(user__first_name__icontains=search)
+                | Q(user__last_name__icontains=search)
+                | Q(user__email__icontains=search)
+                | Q(phone__icontains=search)
+            )
+        state = request.query_params.get('status', '').strip()
+        if state == 'Paid':
+            teacher_list = teacher_list.filter(has_paid_salary=True)
+        elif state == 'Pending':
+            teacher_list = teacher_list.filter(has_paid_salary=False)
+
+        summary = active_teachers.aggregate(total_payroll=Sum('salary'))
+        paid_summary = payments.filter(status=StaffSalaryPayment.Status.PAID).aggregate(
+            total_paid=Sum('amount'),
+            paid_count=Count('teacher_id', distinct=True),
+        )
+        total_count = active_teachers.count()
+        paid_count = paid_summary['paid_count'] or 0
+        page = self.paginate_queryset(teacher_list.order_by('user__first_name', 'user__last_name', 'id'))
+        teachers_data = []
+        for teacher in page:
+            full_name = f'{teacher.user.first_name or ""} {teacher.user.last_name or ""}'.strip()
+            teacher_name = ' '.join((full_name or teacher.user.username or 'Teacher').split()).title()
+            teachers_data.append({
+                'id': teacher.pk,
+                'userId': teacher.user_id,
+                'name': teacher_name,
+                'email': teacher.user.email,
+                'phone': teacher.phone,
+                'salary': str(teacher.salary) if teacher.salary is not None else None,
+                'qualification': teacher.qualification,
+                'joiningDate': teacher.joining_date,
+                'status': teacher.status,
+                'subjects': teacher.subjects,
+                'assignedSections': teacher.assigned_sections,
+                'photoUrl': f'/api/v1/teachers/{teacher.pk}/photo/' if teacher.photo_key or teacher.photo_content_type else None,
+            })
+        page_ids = [teacher.pk for teacher in page]
+        payment_rows = StaffSalaryPayment.objects.filter(
+            school_id=user.school_id, month=month, year=year, teacher_id__in=page_ids,
+        ).select_related('teacher__user', 'paid_by')
+        payment_data = {
+            row.teacher_id: StaffSalaryPaymentSerializer(row, context={'request': request}).data
+            for row in payment_rows
+        }
+        results = [{
+            'teacher': teacher_data,
+            'fixedSalary': float(teacher_data.get('salary') or 0),
+            'payment': payment_data.get(teacher_data['id']),
+            'isPaid': bool(payment_data.get(teacher_data['id']) and payment_data[teacher_data['id']]['status'] == StaffSalaryPayment.Status.PAID),
+        } for teacher_data in teachers_data]
+        response = self.get_paginated_response(results)
+        response.data['summary'] = {
+            'totalPayroll': summary['total_payroll'] or 0,
+            'totalPaid': paid_summary['total_paid'] or 0,
+            'totalPending': max((summary['total_payroll'] or 0) - (paid_summary['total_paid'] or 0), 0),
+            'paidCount': paid_count,
+            'totalCount': total_count,
+            'pendingCount': max(total_count - paid_count, 0),
+        }
+        return response
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:

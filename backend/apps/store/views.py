@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models, transaction
+from django.db.models import Count, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -18,6 +19,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 
 from apps.accounts.models import User
 from apps.common.tenancy import TenantScopedViewSet
+from apps.common.pagination import AdminListPagination
 
 from .models import StoreOrder, StoreOrderItem, StorePaymentSettings, StoreProduct
 from .serializers import (
@@ -173,13 +175,59 @@ class StoreOrderViewSet(TenantScopedViewSet):
     queryset = StoreOrder.objects.select_related('school', 'buyer').prefetch_related('items__product')
     serializer_class = StoreOrderSerializer
     permission_classes = [StoreOrderPermission]
+    pagination_class = AdminListPagination
 
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
         if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             qs = qs.filter(buyer=user)
+        status_filter = self.request.query_params.get('status', '')
+        if status_filter in StoreOrder.Status.values:
+            qs = qs.filter(status=status_filter)
+        elif status_filter == 'Problem':
+            qs = qs.filter(status__in=[StoreOrder.Status.FAILED, StoreOrder.Status.CANCELLED, StoreOrder.Status.EXPIRED])
+        search = self.request.query_params.get('search', '').strip()[:100]
+        if search:
+            query = Q(buyer_name__icontains=search) | Q(buyer_email__icontains=search) | Q(buyer_phone__icontains=search) | Q(delivery_address__icontains=search) | Q(items__product_name__icontains=search) | Q(items__product__category__icontains=search)
+            if search.isdigit():
+                query |= Q(pk=int(search))
+            qs = qs.filter(query).distinct()
+        ordering = self.request.query_params.get('ordering', '')
+        ordering_fields = {
+            'newest': ('-created_at', '-id'),
+            'oldest': ('created_at', 'id'),
+            'amount_high': ('-subtotal', '-id'),
+            'amount_low': ('subtotal', 'id'),
+        }
+        if ordering in ordering_fields:
+            qs = qs.order_by(*ordering_fields[ordering])
+        else:
+            qs = qs.order_by('-created_at', '-id')
         return qs
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        orders = super().get_queryset()
+        user = request.user
+        if user.role not in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
+            orders = orders.filter(buyer=user)
+        stats = orders.aggregate(
+            total_count=Count('id'),
+            paid_count=Count('id', filter=Q(status=StoreOrder.Status.PAID)),
+            fulfilled_count=Count('id', filter=Q(status=StoreOrder.Status.FULFILLED)),
+            pending_count=Count('id', filter=Q(status=StoreOrder.Status.PENDING)),
+            problem_count=Count('id', filter=Q(status__in=[StoreOrder.Status.FAILED, StoreOrder.Status.CANCELLED, StoreOrder.Status.EXPIRED])),
+            total_revenue=Sum('subtotal', filter=Q(status__in=[StoreOrder.Status.PAID, StoreOrder.Status.FULFILLED])),
+        )
+        return Response({
+            'totalCount': stats['total_count'] or 0,
+            'paidCount': stats['paid_count'] or 0,
+            'fulfilledCount': stats['fulfilled_count'] or 0,
+            'pendingCount': stats['pending_count'] or 0,
+            'problemCount': stats['problem_count'] or 0,
+            'totalRevenue': stats['total_revenue'] or 0,
+        })
 
     def create(self, request, *args, **kwargs):
         input_serializer = StoreOrderCreateSerializer(data=request.data, context={'request': request})

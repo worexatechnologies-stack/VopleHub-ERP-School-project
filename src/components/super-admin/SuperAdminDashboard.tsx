@@ -55,7 +55,7 @@ interface SuperAdminDashboardProps {
 
 export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashboardProps) {
   const { data: schoolRecordCounts, refetch: refetchSchoolCounts } = useGetSchoolRecordCountsQuery(undefined, {
-    pollingInterval: 3000,
+    pollingInterval: 30000,
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
     refetchOnReconnect: true,
@@ -102,16 +102,19 @@ export default function SuperAdminDashboard({ onNavigateToTab }: SuperAdminDashb
 
       // 2. Fetch Real Admins from Django /auth/users/
       try {
-        const userList = await store.dispatch(authApi.endpoints.getUsers.initiate(undefined)).unwrap();
-        setAdmins(userList.filter((u: AdminUser) => u.role === 'school_admin' || u.role === 'School Admin'));
+        const adminPage = await store.dispatch(authApi.endpoints.getUsersPage.initiate(
+          { page: 1, page_size: 50, role: 'school_admin', ordering: 'email' },
+          { forceRefetch: true, subscribe: false },
+        )).unwrap();
+        setAdmins(adminPage.results.filter((u: AdminUser) => u.role === 'school_admin' || u.role === 'School Admin'));
       } catch {
         setAdmins([]);
       }
 
       // 3. Fetch Real Students count from /students/
       try {
-        const students = await store.dispatch(studentApi.endpoints.getStudents.initiate(undefined)).unwrap();
-        setStudentsCount(Array.isArray(students) ? students.length : 0);
+        const stats = await store.dispatch(studentApi.endpoints.getStudentStats.initiate(undefined)).unwrap();
+        setStudentsCount(stats.totalStudents || 0);
       } catch {
         setStudentsCount(0);
       }

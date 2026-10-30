@@ -74,7 +74,11 @@ import {
   loadAcademicStructure,
 } from '../services/academicStructure';
 import { exportFeeInvoicesToExcel } from '../utils/feeInvoiceExport';
+import ExportOptionsModal from './common/ExportOptionsModal';
 import { ListPagination } from './common/QueryStates';
+import { store } from '../store';
+import { studentApi } from '../store/api/studentApi';
+import { useGetSchoolRevenueQuery } from '../store/api/financeApi';
 
 // ==========================================
 // INTERFACES & MODEL TYPES
@@ -268,6 +272,14 @@ export default function FeesModule({
 
   // ------------------------------------------
   const [isFeeDataRefreshing, setIsFeeDataRefreshing] = useState(false);
+  const [isFeeExportOptionsOpen, setIsFeeExportOptionsOpen] = useState(false);
+  const [isPreparingFeeExport, setIsPreparingFeeExport] = useState(false);
+  const [feeExportScope, setFeeExportScope] = useState<'all' | 'filtered'>('all');
+  const [feeExportClass, setFeeExportClass] = useState('All');
+  const [feeExportSheets, setFeeExportSheets] = useState<string[]>([
+    'Fee_Invoices_Ledger', 'Payment_Receipts_Log', 'Quarterly_Collection_Tally',
+    'Component_Distribution', 'Class_Financial_Summary',
+  ]);
   const [trackingLedgerPage, setTrackingLedgerPage] = useState(1);
   const TRACKING_LEDGER_PAGE_SIZE = 100;
   // PERSISTENCE STATE (STORAGE)
@@ -330,7 +342,14 @@ export default function FeesModule({
   });
 
   useEffect(() => {
-    localStorage.setItem('erp_individual_fees', JSON.stringify(studentRecords));
+    const saveTimer = window.setTimeout(() => {
+      try {
+        localStorage.setItem('erp_individual_fees', JSON.stringify(studentRecords));
+      } catch (error) {
+        console.warn('Fee changes could not be saved to this browser cache:', error);
+      }
+    }, 250);
+    return () => window.clearTimeout(saveTimer);
   }, [studentRecords]);
 
   // Compiled present clean classes for selection & overview (only from created classes/students/structures)
@@ -993,7 +1012,7 @@ export default function FeesModule({
           payment_method: txnMethod,
           category,
           installment_type: `${txnMethod} Payment`,
-        });
+        }, selectedRecord.studentId);
       }
       if (!paymentResult?.payment || !paymentResult?.summary) {
         throw new Error('The server did not confirm this payment. No payment was recorded.');
@@ -1084,6 +1103,10 @@ export default function FeesModule({
   const [quarterFilter, setQuarterFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState(activeAcademicYear);
   const [selectedOverviewClass, setSelectedOverviewClass] = useState<string>('All');
+  const { data: aggregatedRevenue } = useGetSchoolRevenueQuery({
+    academicYear: activeAcademicYear,
+    className: selectedOverviewClass === 'All' ? undefined : selectedOverviewClass,
+  });
   const [selectedTrackingClass, setSelectedTrackingClass] = useState<string | null>(null);
   const [selectedTrackingSection, setSelectedTrackingSection] = useState<string>('All');
 
@@ -1482,39 +1505,15 @@ export default function FeesModule({
 
   // Aggregated Overall School / Class Statistics
 
-  const overallStats = useMemo(() => {
-    const targetStudents = selectedOverviewClass === 'All'
-      ? studentRecords
-      : studentRecords.filter((r) => matchClass(r.class, selectedOverviewClass));
-
-    let totalExpected = 0;
-    let totalCollected = 0;
-    let paidCount = 0;
-    let partialCount = 0;
-    let unpaidCount = 0;
-
-    targetStudents.forEach((r) => {
-      const summary = getStudentFeeSummary(r);
-      totalExpected += summary.totalFee;
-      totalCollected += summary.amountPaid;
-
-      if (summary.status === 'Paid') paidCount++;
-      else if (summary.status === 'Partially Paid') partialCount++;
-      else unpaidCount++;
-    });
-
-    const totalPending = Math.max(0, totalExpected - totalCollected);
-
-    return {
-      totalExpected,
-      totalCollected,
-      totalPending,
-      totalStudents: targetStudents.length,
-      paidCount,
-      partialCount,
-      unpaidCount,
-    };
-  }, [studentRecords, structures, selectedOverviewClass]);
+  const overallStats = {
+    totalExpected: aggregatedRevenue?.totalInvoiced || 0,
+    totalCollected: aggregatedRevenue?.totalRevenue || 0,
+    totalPending: aggregatedRevenue?.pendingReceivables || 0,
+    totalStudents: aggregatedRevenue?.studentsCount || 0,
+    paidCount: aggregatedRevenue?.paidCount || 0,
+    partialCount: aggregatedRevenue?.partialCount || 0,
+    unpaidCount: aggregatedRevenue?.unpaidCount || 0,
+  };
 
   // Aggregated Quarterly Fee Set & Collection Distribution Stats
   const quarterlyStats = useMemo(() => {
@@ -1653,65 +1652,126 @@ export default function FeesModule({
     { name: 'Unpaid', value: overallStats.unpaidCount, color: '#ef4444' },
   ], [overallStats]);
 
-  // Handler: Export complete fee invoice data to Excel (.xlsx) for reconciliation & tallying
-  const handleExportToExcel = () => {
+  const openFeeExportOptions = (className = 'All', scope: 'all' | 'filtered' = 'all') => {
+    setFeeExportClass(className || 'All');
+    setFeeExportScope(scope);
+    setIsFeeExportOptionsOpen(true);
+  };
+  const handleExportToExcel = () => openFeeExportOptions(selectedOverviewClass, 'all');
+  const handleExportTrackingClassToExcel = () => openFeeExportOptions(selectedTrackingClass || 'All', 'filtered');
+
+  const toggleFeeExportSheet = (sheet: string) => setFeeExportSheets((current) =>
+    current.includes(sheet) ? current.filter((item) => item !== sheet) : [...current, sheet]
+  );
+
+  const runFeeExcelExport = async () => {
+    if (isPreparingFeeExport) return;
+    setIsPreparingFeeExport(true);
     try {
+      const MAX_FEE_EXPORT_RECORDS = 10000;
+      const exportedStudents: Student[] = [];
+      let page = 1;
+      let expectedCount = Number.POSITIVE_INFINITY;
+      while (exportedStudents.length < expectedCount) {
+        const result = await store.dispatch(studentApi.endpoints.getStudentsPaginated.initiate(
+          {
+            page,
+            page_size: 500,
+            class_name: feeExportScope === 'filtered' && feeExportClass !== 'All' ? feeExportClass : undefined,
+          }, { forceRefetch: true, subscribe: false },
+        )).unwrap();
+        expectedCount = result.count;
+        if (expectedCount > MAX_FEE_EXPORT_RECORDS) {
+          throw new Error(`This export contains ${expectedCount.toLocaleString('en-IN')} students. Browser exports are limited to ${MAX_FEE_EXPORT_RECORDS.toLocaleString('en-IN')} rows. Filter by class or ask your administrator to arrange a background export.`);
+        }
+        exportedStudents.push(...result.results);
+        if (!result.next || result.results.length === 0) break;
+        page += 1;
+      }
+
+      const dbFeeRecords = await fetchStudentFeeRecordsFromDB(undefined, undefined, true);
+      const savedRecords = new Map(studentRecords.map((record) => [record.studentId, record]));
+      const databaseRecords = new Map(dbFeeRecords.map((record) => [record.student_id_str, record]));
+      let fullRecords: IndividualStudentFeeRecord[] = exportedStudents.map((student) => {
+        const saved = savedRecords.get(student.id);
+        const db = databaseRecords.get(student.id);
+        return {
+          id: String(db?.id || saved?.id || `FR-${student.id}`),
+          studentId: student.id,
+          studentName: student.name,
+          admissionNo: student.admissionNo || saved?.admissionNo || '',
+          class: student.class || saved?.class || '',
+          classId: student.classId || saved?.classId,
+          section: student.section || saved?.section || '',
+          sectionId: student.sectionId || saved?.sectionId,
+          academicYear: db?.academic_year || student.academicYear || saved?.academicYear || activeAcademicYear,
+          customItems: db?.custom_items || saved?.customItems,
+          customQuarters: db?.custom_quarters || saved?.customQuarters,
+          scholarship: Number(db?.scholarship ?? saved?.scholarship ?? 0),
+          discount: Number(db?.discount ?? saved?.discount ?? 0),
+          transportCharges: Number(db?.transport_charges ?? saved?.transportCharges ?? 0),
+          hostelCharges: Number(db?.hostel_charges ?? saved?.hostelCharges ?? 0),
+          fineAmount: Number(db?.fine_amount ?? saved?.fineAmount ?? 0),
+          installmentsPaid: Number(db?.installments_paid ?? saved?.installmentsPaid ?? 0),
+          paymentHistory: (db?.payment_history ?? saved?.paymentHistory ?? []) as StudentPayment[],
+        };
+      });
+      if (feeExportScope === 'filtered' && feeExportClass !== 'All') {
+        fullRecords = fullRecords.filter((record) => matchClass(record.class, feeExportClass));
+      }
+
+      const quarterStats = ['Q1', 'Q2', 'Q3', 'Q4'].map((quarter, index) => ({ quarter, name: `Quarter ${index + 1}`, dueDate: '', perStudentAmount: 0, expected: 0, collected: 0, pending: 0 }));
+      const componentTotals = new Map<string, { category: string; totalAmount: number; studentCount: number }>();
+      const classTotals = new Map<string, { className: string; expected: number; collected: number; pending: number }>();
+      fullRecords.forEach((record) => {
+        const summary = getStudentFeeSummary(record);
+        let remainingPaid = summary.amountPaid;
+        summary.quarters.slice(0, 4).forEach((quarter, index) => {
+          const amount = Number(quarter.amount) || 0;
+          const collected = Math.min(amount, remainingPaid);
+          remainingPaid = Math.max(0, remainingPaid - collected);
+          quarterStats[index].name = quarter.name || quarterStats[index].name;
+          quarterStats[index].dueDate = quarter.dueDate || quarterStats[index].dueDate;
+          quarterStats[index].expected += amount;
+          quarterStats[index].collected += collected;
+        });
+        const className = formatClassLabel(record.class);
+        const classRow = classTotals.get(className) || { className, expected: 0, collected: 0, pending: 0 };
+        classRow.expected += summary.totalFee;
+        classRow.collected += summary.amountPaid;
+        classRow.pending += summary.pendingBalance;
+        classTotals.set(className, classRow);
+        summary.items.forEach((item) => {
+          const component = componentTotals.get(item.category) || { category: item.category, totalAmount: 0, studentCount: 0 };
+          component.totalAmount += Number(item.amount) || 0;
+          component.studentCount += 1;
+          componentTotals.set(item.category, component);
+        });
+      });
+      quarterStats.forEach((quarter) => {
+        quarter.pending = Math.max(0, quarter.expected - quarter.collected);
+        quarter.perStudentAmount = fullRecords.length ? Math.round(quarter.expected / fullRecords.length) : 0;
+      });
+
       exportFeeInvoicesToExcel({
         schoolName,
         academicYear: activeAcademicYear,
-        selectedClass: selectedOverviewClass,
-        studentRecords,
+        selectedClass: feeExportScope === 'filtered' ? feeExportClass : 'All',
+        studentRecords: fullRecords,
         structures,
         getStudentFeeSummary,
-        quarterlyStats,
-        componentDistributionStats,
-        classReportData,
+        quarterlyStats: quarterStats,
+        componentDistributionStats: Array.from(componentTotals.values()),
+        classReportData: Array.from(classTotals.values()),
+        selectedSheets: feeExportSheets,
       });
-      emitNotification({
-        title: 'Fees Invoices Exported',
-        message: 'Complete fee invoice ledger, quarterly collections, and receipts tally exported to Excel (.xlsx).',
-        tone: 'success',
-        source: 'fees',
-      });
+      setIsFeeExportOptionsOpen(false);
+      emitNotification({ title: 'Fee Excel file downloaded', message: `${fullRecords.length.toLocaleString('en-IN')} student fee records were included.`, tone: 'success', source: 'fees' });
     } catch (error: any) {
       console.error('Failed to export fee invoices:', error);
-      emitNotification({
-        title: 'Export Failed',
-        message: 'Could not generate the Excel sheet. Please try again.',
-        tone: 'danger',
-        source: 'fees',
-      });
-    }
-  };
-
-  // Handler: Export specific class fee tracking ledger to Excel (.xlsx)
-  const handleExportTrackingClassToExcel = () => {
-    try {
-      exportFeeInvoicesToExcel({
-        schoolName,
-        academicYear: activeAcademicYear,
-        selectedClass: selectedTrackingClass || 'All',
-        studentRecords,
-        structures,
-        getStudentFeeSummary,
-        quarterlyStats,
-        componentDistributionStats,
-        classReportData,
-      });
-      emitNotification({
-        title: 'Class Ledger Exported',
-        message: `${formatClassLabel(selectedTrackingClass || '')} fee invoice ledger downloaded to Excel (.xlsx).`,
-        tone: 'success',
-        source: 'fees',
-      });
-    } catch (error: any) {
-      console.error('Failed to export class fee ledger:', error);
-      emitNotification({
-        title: 'Export Failed',
-        message: 'Could not generate the Excel sheet.',
-        tone: 'danger',
-        source: 'fees',
-      });
+      emitNotification({ title: 'Could not prepare the fee Excel file', message: error instanceof Error && error.message.startsWith('This export contains') ? error.message : 'Please try again. If it keeps failing, ask the school office for help.', tone: 'danger', source: 'fees' });
+    } finally {
+      setIsPreparingFeeExport(false);
     }
   };
 
@@ -4157,6 +4217,25 @@ export default function FeesModule({
         </div>,
         document.body
       )}
+      {isFeeExportOptionsOpen && <ExportOptionsModal
+        title="Export fee records"
+        description="Choose all students or the selected class, then choose the sheets for your Excel file."
+        choices={[
+          { key: 'Fee_Invoices_Ledger', label: 'Student fee balances' },
+          { key: 'Payment_Receipts_Log', label: 'Payment and receipt history' },
+          { key: 'Quarterly_Collection_Tally', label: 'Quarter totals' },
+          { key: 'Component_Distribution', label: 'Fee component totals' },
+          { key: 'Class_Financial_Summary', label: 'Class summaries' },
+        ]}
+        selectedKeys={feeExportSheets}
+        onToggle={toggleFeeExportSheet}
+        scope={feeExportScope}
+        onScopeChange={setFeeExportScope}
+        filteredDescription={feeExportClass === 'All' ? 'Use the current view (all classes).' : `Only include ${formatClassLabel(feeExportClass)}.`}
+        busy={isPreparingFeeExport}
+        onClose={() => setIsFeeExportOptionsOpen(false)}
+        onExport={() => void runFeeExcelExport()}
+      />}
     </div>
   );
 }

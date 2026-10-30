@@ -8,7 +8,6 @@ export interface VaultCredential {
   role: 'student' | 'teacher' | 'parent' | 'admin' | 'school_admin' | string;
   name: string;
   loginId: string;
-  password: string;
   identifier: string; // admission_no or emp id
   className: string;
   section: string;
@@ -27,6 +26,28 @@ export interface VaultQueryParams {
   section?: string;
   search?: string;
   schoolId?: number | string;
+  page?: number;
+  page_size?: number;
+  ordering?: string;
+}
+
+export interface VaultPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: VaultCredential[];
+}
+
+export interface VaultSummary {
+  total: number;
+  byRole: Record<string, { total: number; temporary: number }>;
+}
+
+export interface OneTimeCredential {
+  userId?: number;
+  loginId: string;
+  temporaryPassword: string;
+  mustChangePassword: true;
 }
 
 export interface VaultSyncResult {
@@ -39,19 +60,18 @@ export interface VaultSyncResult {
 
 export const vaultApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
-    getVaultCredentials: builder.query<VaultCredential[], VaultQueryParams | void>({
+    getVaultCredentials: builder.query<VaultPage, VaultQueryParams | void>({
       query: (params) => ({
         url: '/credential-vault/',
-        params: params || {},
+        params: { ...(params || {}), page: params?.page ?? 1, page_size: params?.page_size ?? 50 },
       }),
-      transformResponse: (response: any) => (Array.isArray(response) ? response : response?.results || []),
-      providesTags: (result) =>
-        result
-          ? [
-              ...result.map(({ id }) => ({ type: 'CredentialVault' as const, id })),
-              { type: 'CredentialVault', id: 'LIST' },
-            ]
-          : [{ type: 'CredentialVault', id: 'LIST' }],
+      providesTags: (result) => result
+        ? [...result.results.map(({ id }) => ({ type: 'CredentialVault' as const, id })), { type: 'CredentialVault', id: 'LIST' }]
+        : [{ type: 'CredentialVault', id: 'LIST' }],
+    }),
+    getVaultSummary: builder.query<VaultSummary, Omit<VaultQueryParams, 'page' | 'page_size' | 'ordering'> | void>({
+      query: (params) => ({ url: '/credential-vault/summary/', params: params || {} }),
+      providesTags: [{ type: 'CredentialVault', id: 'SUMMARY' }],
     }),
 
     syncVaultRoster: builder.mutation<VaultSyncResult, { schoolId?: number } | void>({
@@ -63,27 +83,12 @@ export const vaultApi = baseApi.injectEndpoints({
       invalidatesTags: [{ type: 'CredentialVault', id: 'LIST' }],
     }),
 
-    resetVaultCredentialPassword: builder.mutation<VaultCredential, number>({
+    resetVaultCredentialPassword: builder.mutation<OneTimeCredential, number>({
       query: (id) => ({
         url: `/credential-vault/${id}/reset/`,
         method: 'POST',
       }),
       invalidatesTags: (_res, _err, id) => [
-        { type: 'CredentialVault', id },
-        { type: 'CredentialVault', id: 'LIST' },
-      ],
-    }),
-
-    updateVaultCredential: builder.mutation<
-      VaultCredential,
-      { id: number; password?: string; name?: string; phone?: string }
-    >({
-      query: ({ id, ...patch }) => ({
-        url: `/credential-vault/${id}/`,
-        method: 'PATCH',
-        body: patch,
-      }),
-      invalidatesTags: (_res, _err, { id }) => [
         { type: 'CredentialVault', id },
         { type: 'CredentialVault', id: 'LIST' },
       ],
@@ -101,8 +106,8 @@ export const vaultApi = baseApi.injectEndpoints({
 
 export const {
   useGetVaultCredentialsQuery,
+  useGetVaultSummaryQuery,
   useSyncVaultRosterMutation,
   useResetVaultCredentialPasswordMutation,
-  useUpdateVaultCredentialMutation,
   useDeleteVaultCredentialMutation,
 } = vaultApi;

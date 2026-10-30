@@ -3,17 +3,13 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
+from apps.common.pagination import AdminListPagination
 from rest_framework.exceptions import PermissionDenied
 
 
-class StudentFeeRecordPagination(PageNumberPagination):
-    page_size = 50
-    page_size_query_param = 'page_size'
-    max_page_size = 500
 import re
 import datetime
-from django.db.models import Q, Sum, Count
+from django.db.models import Q, Sum, Count, F
 from django.core.cache import cache
 from apps.accounts.models import User
 from apps.academics.models import Class
@@ -481,7 +477,7 @@ class FeeStructureViewSet(TenantScopedViewSet):
     filterset_fields = ['level', 'academic_year', 'target_class', 'target_class_ref', 'target_section_ref']
     search_fields = ['name', 'target_class']
     ordering_fields = ['id', 'created_at', 'name']
-    pagination_class = None
+    pagination_class = AdminListPagination
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -764,8 +760,9 @@ class FeeStructureViewSet(TenantScopedViewSet):
         if user.role != User.Role.SUPER_ADMIN and not school_id:
             return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
         academic_year = request.query_params.get('academic_year')
+        class_name = request.query_params.get('class_name')
 
-        cache_key = f"school_revenue_{school_id}_{academic_year or 'all'}"
+        cache_key = f"school_revenue_{school_id}_{academic_year or 'all'}_{class_name or 'all'}"
         cached_data = cache.get(cache_key)
         if cached_data:
             return Response(cached_data, status=status.HTTP_200_OK)
@@ -776,6 +773,10 @@ class FeeStructureViewSet(TenantScopedViewSet):
         if school_id and (not user.is_authenticated or user.role != User.Role.SUPER_ADMIN):
             students_qs = students_qs.filter(school_id=school_id)
             payments_qs = payments_qs.filter(school_id=school_id)
+
+        if class_name:
+            students_qs = students_qs.filter(class_name=class_name)
+            payments_qs = payments_qs.filter(student__class_name=class_name)
 
         if academic_year:
             students_qs = students_qs.filter(Q(academic_year=academic_year) | Q(academic_year=''))
@@ -792,6 +793,11 @@ class FeeStructureViewSet(TenantScopedViewSet):
 
         # 2. Total Invoiced & Student Count
         students_count = students_qs.count()
+        status_counts = students_qs.aggregate(
+            paid=Count('id', filter=Q(fee_total__gt=0, fee_paid__gte=F('fee_total'))),
+            partial=Count('id', filter=Q(fee_paid__gt=0, fee_paid__lt=F('fee_total'))),
+            unpaid=Count('id', filter=Q(fee_paid__lte=0)),
+        )
         student_invoiced_sum = students_qs.aggregate(total=Sum('fee_total'))['total'] or 0.0
         total_invoiced = float(student_invoiced_sum)
 
@@ -897,6 +903,9 @@ class FeeStructureViewSet(TenantScopedViewSet):
             'monthlyDistribution': monthly_chart,
             'recentPayments': recent_payments,
             'studentsCount': students_count,
+            'paidCount': status_counts['paid'] or 0,
+            'partialCount': status_counts['partial'] or 0,
+            'unpaidCount': status_counts['unpaid'] or 0,
             'lastUpdated': datetime.datetime.now().isoformat(),
         }
 
@@ -1095,7 +1104,11 @@ class FeeQuarterViewSet(TenantScopedViewSet):
     queryset = FeeQuarter.objects.select_related('fee_structure').all().order_by('quarter_number')
     serializer_class = FeeQuarterSerializer
     permission_classes = [FeeStructurePermission]
-    pagination_class = None
+    pagination_class = AdminListPagination
+    ordering_fields = ['quarter_number', 'academic_year', 'due_date', 'assigned_amount']
+    ordering = ['academic_year', 'quarter_number', 'pk']
+    filterset_fields = ['academic_year', 'target_class', 'fee_structure']
+    search_fields = ['quarter_name', 'target_class', 'academic_year']
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -1143,10 +1156,11 @@ class FeeQuarterViewSet(TenantScopedViewSet):
 class StudentFeeRecordViewSet(TenantScopedViewSet):
     serializer_class = StudentFeeRecordSerializer
     permission_classes = [FeeRecordPermission]
-    # The established finance API contract returns an array. Keep the list
-    # endpoint unpaginated; callers that need bounded exports use the explicit
-    # class/section/student filters and the sync endpoint.
-    pagination_class = None
+    pagination_class = AdminListPagination
+    filterset_fields = ['academic_year', 'class_name', 'section_name', 'student']
+    search_fields = ['student_name', 'admission_no', 'student_id_str']
+    ordering_fields = ['student_name', 'admission_no', 'class_name', 'section_name', 'academic_year', 'updated_at']
+    ordering = ['student_name', 'pk']
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -1163,21 +1177,9 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
         school_id = getattr(user, 'school_id', None)
 
         qs = StudentFeeRecord.objects.select_related('student', 'school')
-        if user.role == User.Role.SCHOOL_ADMIN and user.school_id:
-            # Backfill records for legacy students created before fee
-            # structures were configured. This is idempotent and keeps the
-            # administrative fee ledger complete.
-            existing = set(qs.filter(school_id=user.school_id).values_list('student_id', flat=True))
-            missing_students = Student.objects.filter(school_id=user.school_id).exclude(pk__in=existing)
-            if missing_students.exists():
-                StudentFeeRecord.objects.bulk_create([
-                    StudentFeeRecord(
-                        school=st.school, student=st, student_id_str=str(st.id),
-                        student_name=st.name, admission_no=st.admission_no,
-                        class_name=st.class_name, section_name=st.section,
-                        academic_year=st.academic_year or '2026-2027',
-                    ) for st in missing_students
-                ], ignore_conflicts=True)
+        # Keep GET requests read-only and quick. Legacy missing fee records are
+        # created through the explicit sync-records action instead of during
+        # every fee ledger read.
         if user.role == User.Role.SUPER_ADMIN:
             pass
         elif user.role in [User.Role.SCHOOL_ADMIN, User.Role.TEACHER, User.Role.PARENT, User.Role.STUDENT] and school_id:
@@ -1484,6 +1486,7 @@ class FeePaymentViewSet(TenantScopedViewSet):
     filterset_fields = ['student', 'academic_year', 'payment_method', 'category']
     search_fields = ['receipt_no', 'transaction_id', 'student__name', 'student__admission_no']
     ordering_fields = ['payment_date', 'created_at', 'amount_paid']
+    pagination_class = AdminListPagination
 
     def perform_create(self, serializer):
         user = self.request.user

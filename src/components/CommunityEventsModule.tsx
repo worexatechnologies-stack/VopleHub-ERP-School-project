@@ -28,6 +28,7 @@ import {
 import type { AuthUser } from '../utils/auth';
 import CommunityBroadcastDesk from './community/CommunityBroadcastDesk';
 import CommunityNoticeBoard from './community/CommunityNoticeBoard';
+import { ListPagination } from './common/QueryStates';
 import { emitNotification } from '../services/notificationBus';
 import {
   useGetEventsQuery,
@@ -62,13 +63,22 @@ export default function CommunityEventsModule({
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
   const [eventKindFilter, setEventKindFilter] = useState('All');
   const [eventSearch, setEventSearch] = useState('');
+  const [eventsPage, setEventsPage] = useState(1);
+  const EVENTS_PAGE_SIZE = 25;
 
   // API Queries (fetches only published events by default)
-  const { data: rawEvents = [], isLoading: eventsLoading, error: eventsError } = useGetEventsQuery({
+  const { data: eventsResponse, isLoading: eventsLoading, error: eventsError } = useGetEventsQuery({
+    page: eventsPage,
+    page_size: EVENTS_PAGE_SIZE,
     search: eventSearch.trim() || undefined,
     kind: eventKindFilter !== 'All' ? eventKindFilter : undefined,
     activity_status: activityFilter !== 'all' ? activityFilter : undefined,
+    status: 'Published',
   });
+  const { data: activeEventsCountPage } = useGetEventsQuery({ page: 1, page_size: 1, status: 'Published', activity_status: 'active' });
+  const { data: inactiveEventsCountPage } = useGetEventsQuery({ page: 1, page_size: 1, status: 'Published', activity_status: 'inactive' });
+  const rawEvents = eventsResponse?.results || [];
+  const eventCount = eventsResponse?.count || 0;
 
   const { data: myRegistrations = [] } = useGetMyRegistrationsQuery();
 
@@ -131,56 +141,12 @@ export default function CommunityEventsModule({
     notes: '',
   });
 
-  // Client-side filtering & sorting
-  const events = useMemo(() => {
-    const now = new Date();
-    return rawEvents.filter(item => {
-      // Ensure only published events are shown
-      if (item.status && item.status !== 'Published') return false;
-
-      const isDeadlinePassed =
-        item.is_deadline_passed ||
-        (item.registration_deadline && now > new Date(item.registration_deadline));
-
-      if (activityFilter === 'active') {
-        if (isDeadlinePassed) return false;
-      } else if (activityFilter === 'inactive') {
-        if (!isDeadlinePassed) return false;
-      }
-
-      if (eventKindFilter !== 'All' && item.kind !== eventKindFilter) {
-        return false;
-      }
-
-      if (eventSearch.trim()) {
-        const q = eventSearch.toLowerCase();
-        const match =
-          item.title.toLowerCase().includes(q) ||
-          item.venue.toLowerCase().includes(q) ||
-          (item.description && item.description.toLowerCase().includes(q));
-        if (!match) return false;
-      }
-
-      return true;
-    });
-  }, [rawEvents, activityFilter, eventKindFilter, eventSearch]);
+  const visibleEvents = rawEvents;
+  React.useEffect(() => setEventsPage(1), [activityFilter, eventKindFilter, eventSearch]);
 
   // Counts for Metrics
-  const activeCount = useMemo(() => {
-    const now = new Date();
-    return rawEvents.filter(e => {
-      if (e.status && e.status !== 'Published') return false;
-      return !e.is_deadline_passed && (!e.registration_deadline || now <= new Date(e.registration_deadline));
-    }).length;
-  }, [rawEvents]);
-
-  const inactiveCount = useMemo(() => {
-    const now = new Date();
-    return rawEvents.filter(e => {
-      if (e.status && e.status !== 'Published') return false;
-      return e.is_deadline_passed || (e.registration_deadline && now > new Date(e.registration_deadline));
-    }).length;
-  }, [rawEvents]);
+  const activeCount = activeEventsCountPage?.count ?? 0;
+  const inactiveCount = inactiveEventsCountPage?.count ?? 0;
 
   // Filtered Attendees for the modal
   const filteredAttendees = useMemo(() => {
@@ -704,7 +670,7 @@ export default function CommunityEventsModule({
           icon={<AlertCircle className="h-10 w-10" />}
           text="Unable to load events right now. Please refresh and try again."
         />
-      ) : events.length === 0 ? (
+      ) : eventCount === 0 ? (
         <Empty
           icon={<CalendarDays className="h-10 w-10" />}
           text={
@@ -717,7 +683,7 @@ export default function CommunityEventsModule({
         />
       ) : (
         <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-          {events.map(item => {
+          {visibleEvents.map(item => {
             const isRegistered = item.is_registered || myRegistrations.some(r => r.event === item.id);
             const isDeadlinePassed =
               item.is_deadline_passed ||
@@ -962,6 +928,8 @@ export default function CommunityEventsModule({
           })}
         </div>
       )}
+
+      <ListPagination page={eventsPage} pageSize={EVENTS_PAGE_SIZE} total={eventCount} onPageChange={setEventsPage} />
 
       {/* --- MODALS --- */}
 

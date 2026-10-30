@@ -7,6 +7,8 @@ import SuperAdminDashboard from './super-admin/SuperAdminDashboard';
 import SuperAdminSchools from './super-admin/SuperAdminSchools';
 import SuperAdminAdmins from './super-admin/SuperAdminAdmins';
 import SuperAdminSystemSettings from './super-admin/SuperAdminSystemSettings';
+import SuperAdminReports from './super-admin/SuperAdminReports';
+import SuperAdminPublicLearners from './super-admin/SuperAdminPublicLearners';
 
 interface SuperAdminModuleProps {
   activeTab?: string;
@@ -53,7 +55,9 @@ export default function SuperAdminModule({ activeTab = 'super-admin-dashboard', 
         {activeTab === 'super-admin-dashboard' && <SuperAdminDashboard onNavigateToTab={onNavigateToTab} />}
         {activeTab === 'super-admin-schools' && <SuperAdminSchools />}
         {activeTab === 'super-admin-admins' && <SuperAdminAdmins />}
+        {activeTab === 'super-admin-audit' && <SuperAdminReports />}
         {activeTab === 'super-admin-sys-settings' && <SuperAdminSystemSettings />}
+        {activeTab === 'super-admin-public-learners' && <SuperAdminPublicLearners />}
       </div>
     </div>
   );

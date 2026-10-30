@@ -162,6 +162,25 @@ export const authApi = baseApi.injectEndpoints({
       query: () => ({ url: '/auth/users/' }),
       providesTags: ['User'],
     }),
+    getUsersPage: build.query<{
+      count: number;
+      next: string | null;
+      previous: string | null;
+      results: Array<{
+        id: number;
+        email: string;
+        name: string;
+        role: string;
+        schoolId?: string;
+        schoolName?: string;
+        isActive?: boolean;
+      }>;
+    }, { page: number; page_size?: number; search?: string; role?: string; is_active?: boolean; school_id?: number | string; ordering?: string }>(
+      {
+        query: (params) => ({ url: '/auth/users/', params }),
+        providesTags: ['User'],
+      }
+    ),
     presenceHeartbeat: build.mutation<void, void>({
       query: () => ({
         url: '/auth/presence/heartbeat/',
@@ -175,11 +194,15 @@ export const authApi = baseApi.injectEndpoints({
       }),
       invalidatesTags: ['User'],
     }),
-    setSchoolAdminPassword: build.mutation<void, { id: string | number; password: string }>({
-      query: ({ id, password }) => ({
+    setSchoolAdminPassword: build.mutation<{
+      userId: number;
+      loginId: string;
+      temporaryPassword: string;
+      mustChangePassword: true;
+    }, { id: string | number }>({
+      query: ({ id }) => ({
         url: `/auth/school-admins/${id}/set-password/`,
         method: 'POST',
-        body: { password },
       }),
       invalidatesTags: ['User'],
     }),
@@ -221,6 +244,7 @@ export const {
   useLogoutMutation,
   useResetCredentialsMutation,
   useGetUsersQuery,
+  useGetUsersPageQuery,
   usePresenceHeartbeatMutation,
   useSetSchoolAdminStatusMutation,
   useSetSchoolAdminPasswordMutation,

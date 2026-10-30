@@ -15,7 +15,7 @@ import {
   AlertCircle,
   FileCheck,
 } from 'lucide-react';
-import { useGetTeachersQuery } from '../store/api/teacherApi';
+import { useGetTeachersPageQuery } from '../store/api/teacherApi';
 import {
   useGetStaffSalariesQuery,
   type StaffSalaryPayment,
@@ -50,7 +50,11 @@ export default function TeacherSalaryDetails({ user, schoolName = 'School Manage
   const [viewingReceipt, setViewingReceipt] = useState<StaffSalaryPayment | null>(null);
 
   // Fetch teacher profile to get fixed salary
-  const { data: teachers = [] } = useGetTeachersQuery(undefined, { skip: !isServerBacked });
+  const { data: teachersPage } = useGetTeachersPageQuery(
+    { page: 1, page_size: 1, search: user?.email || undefined, status: 'Active' },
+    { skip: !isServerBacked || !user?.email },
+  );
+  const teachers = teachersPage?.results || [];
   const currentTeacher = useMemo(() => {
     if (isServerBacked && teachers.length) {
       return (
@@ -74,10 +78,11 @@ export default function TeacherSalaryDetails({ user, schoolName = 'School Manage
   }, [teachers, user, isServerBacked]);
 
   // Fetch salary payments for this teacher and selected year
-  const { data: serverSalaries = [] } = useGetStaffSalariesQuery(
-    { year: selectedYear },
+  const { data: serverSalariesPage } = useGetStaffSalariesQuery(
+    { year: selectedYear, page: 1, page_size: 200 },
     { skip: !isServerBacked }
   );
+  const serverSalaries = serverSalariesPage?.results || [];
 
   const localSalaries = loadLocalSalaries();
   const rawSalaries = isServerBacked ? serverSalaries : localSalaries;

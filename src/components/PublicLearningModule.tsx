@@ -3,11 +3,16 @@ import { createPortal } from 'react-dom';
 import {
   BookOpen, Trophy, PlayCircle, FileText, CheckCircle2,
   ArrowLeft, Brain, BookMarked, Award, Lock, LogIn,
-  X, CheckCircle, ShieldCheck, Star, User, CreditCard,
-  Smartphone, Coins, Phone, Compass, Check, AlertCircle, Zap, GraduationCap
+  X, CheckCircle, ShieldCheck, Star, User,
+  Compass, Check, AlertCircle, Zap, GraduationCap, Coins
 } from 'lucide-react';
 import { COMPETITIVE_EXAMS, PRACTICE_TESTS, ONLINE_COURSES } from '../data/mockData';
-import { PublicLearnerRecord } from '../types';
+import HumanVerification from './auth/HumanVerification';
+import { useLoginMutation, useVerifyOtpMutation, useLogoutMutation, useChangePasswordMutation } from '../store/api/authApi';
+import { persistAuthSession } from '../store/api/baseApi';
+import { clearAuthenticatedSession, getStoredAuthenticatedUser } from '../utils/auth';
+import { publicLearnerApi, useRegisterPublicLearnerMutation, type PublicLearnerMe } from '../store/api/publicLearnerApi';
+import { store } from '../store';
 
 interface PublicLearningModuleProps {
   onExit: () => void;
@@ -19,27 +24,6 @@ const PLAN_DETAILS = {
   Quarterly: { price: 799,  duration: '3 Months',  savings: 'Save ₹98' },
   Annual:    { price: 2499, duration: '12 Months', savings: 'Best Value' },
 };
-
-function loadLearners(): PublicLearnerRecord[] {
-  try {
-    const saved = localStorage.getItem('sa_public_learners');
-    return saved ? JSON.parse(saved) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveLearners(learners: PublicLearnerRecord[]) {
-  localStorage.setItem('sa_public_learners', JSON.stringify(learners));
-}
-
-function getExpiryDate(plan: 'Monthly' | 'Quarterly' | 'Annual'): string {
-  const d = new Date();
-  if (plan === 'Monthly') d.setMonth(d.getMonth() + 1);
-  else if (plan === 'Quarterly') d.setMonth(d.getMonth() + 3);
-  else d.setFullYear(d.getFullYear() + 1);
-  return d.toISOString().split('T')[0];
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Design tokens (matches glassmorphic main theme)
@@ -92,96 +76,116 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
   const [signupPhone, setSignupPhone] = useState('');
   const [signupPlan, setSignupPlan] = useState<'Monthly' | 'Quarterly' | 'Annual'>('Monthly');
 
-  // Payment sim
-  const [paymentMethod, setPaymentMethod] = useState<'upi' | 'card' | 'netbanking'>('upi');
-  const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success'>('idle');
-  const [paymentUpiId, setPaymentUpiId] = useState('');
-  const [paymentCardNum, setPaymentCardNum] = useState('');
+  const [registrationStatus, setRegistrationStatus] = useState<'idle' | 'submitting' | 'submitted'>('idle');
 
   // Subscriber
-  const [subscriber, setSubscriber] = useState<PublicLearnerRecord | null>(null);
+  const [subscriber, setSubscriber] = useState<PublicLearnerMe | null>(null);
+  const [loginOtp, setLoginOtp] = useState('');
+  const [mfaToken, setMfaToken] = useState('');
+  const [forcePasswordChange, setForcePasswordChange] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [humanToken, setHumanToken] = useState('');
+  const [humanResetKey, setHumanResetKey] = useState(0);
+  const [loginMutation] = useLoginMutation();
+  const [verifyOtpMutation] = useVerifyOtpMutation();
+  const [logoutMutation] = useLogoutMutation();
+  const [changePasswordMutation] = useChangePasswordMutation();
+  const [registerPublicLearner] = useRegisterPublicLearnerMutation();
 
   useEffect(() => {
-    const savedSession = sessionStorage.getItem('active_public_learner');
-    if (savedSession) {
-      try {
-        const parsed = JSON.parse(savedSession);
-        const today = new Date().toISOString().split('T')[0];
-        if (parsed.expiryDate >= today && parsed.status === 'Active') {
-          setSubscriber(parsed);
-        } else {
-          sessionStorage.removeItem('active_public_learner');
-        }
-      } catch { /* ignore */ }
-    }
+    const currentUser = getStoredAuthenticatedUser();
+    if (String(currentUser?.role || '').toLowerCase().replace(' ', '_') !== 'public_learner') return;
+    store.dispatch(publicLearnerApi.endpoints.getPublicLearnerMe.initiate(undefined, { forceRefetch: true, subscribe: false }))
+      .unwrap().then(setSubscriber).catch(() => setSubscriber(null));
   }, []);
 
   // ── Auth Handlers ──────────────────────────────────────────────────────────
-  const handleSubscriberLogin = (e: React.FormEvent) => {
+  const handleSubscriberLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    const learners = loadLearners();
-    const match = learners.find(
-      l => l.email.toLowerCase() === loginEmail.toLowerCase() && l.password === loginPassword
-    );
-    if (!match) { setLoginError('Invalid Email ID or Password. Please try again.'); return; }
-    const today = new Date().toISOString().split('T')[0];
-    if (match.expiryDate < today) {
-      setLoginError('Your subscription expired on ' + match.expiryDate + '. Please register a new subscription.');
+    if (!humanToken) { setLoginError('Complete the security check to sign in.'); return; }
+    try {
+      const result = await loginMutation({ email: loginEmail.trim().toLowerCase(), password: loginPassword, role: 'public_learner', human_verification_token: humanToken }).unwrap();
+      if (result.mfa_required && result.mfa_token) {
+        setMfaToken(result.mfa_token);
+        setLoginPassword('');
+      } else {
+        await completePublicLogin(result);
+      }
+    } catch (error: any) {
+      setLoginError(error?.data?.detail || 'Could not sign in. Check your credentials and subscription status.');
+    } finally {
+      setHumanToken('');
+      setHumanResetKey((key) => key + 1);
+    }
+  };
+
+  const completePublicLogin = async (session: any) => {
+    if (!session.user || (session.user.role !== 'public_learner' && session.user.role !== 'Public Learner')) {
+      throw new Error('Use a Public Learner account to sign in here.');
+    }
+    persistAuthSession(session.access || '', session.user, session.refresh, session.sessionId || session.session_id);
+    if (session.user.mustChangePassword) {
+      setForcePasswordChange(true);
+      setShowAuthModal(true);
       return;
     }
-    if (match.status === 'Suspended') {
-      setLoginError('Your access has been suspended by the administrator.');
-      return;
-    }
-    setSubscriber(match);
-    sessionStorage.setItem('active_public_learner', JSON.stringify(match));
+    const details = await store.dispatch(publicLearnerApi.endpoints.getPublicLearnerMe.initiate(undefined, { forceRefetch: true, subscribe: false })).unwrap();
+    setSubscriber(details);
     setShowAuthModal(false);
-    setLoginEmail(''); setLoginPassword('');
+    setLoginEmail(''); setLoginPassword(''); setLoginOtp(''); setMfaToken('');
+  };
+
+  const handleVerifyLoginOtp = async () => {
+    try {
+      const result = await verifyOtpMutation({ mfa_token: mfaToken, otp: loginOtp }).unwrap();
+      await completePublicLogin(result);
+    } catch (error: any) {
+      setLoginError(error?.data?.detail || 'The verification code is invalid or expired.');
+    }
+  };
+
+  const handleForcedPasswordChange = async () => {
+    setLoginError('');
+    if (newPassword !== confirmNewPassword) { setLoginError('The new passwords do not match.'); return; }
+    try {
+      await changePasswordMutation({ password: newPassword }).unwrap();
+      const details = await store.dispatch(publicLearnerApi.endpoints.getPublicLearnerMe.initiate(undefined, { forceRefetch: true, subscribe: false })).unwrap();
+      const cachedUser = getStoredAuthenticatedUser();
+      if (cachedUser) persistAuthSession('', { ...cachedUser, mustChangePassword: false });
+      setSubscriber(details);
+      setForcePasswordChange(false);
+      setNewPassword(''); setConfirmNewPassword(''); setShowAuthModal(false);
+    } catch (error: any) {
+      setLoginError(error?.data?.detail || 'Could not change the password. Choose a stronger password and retry.');
+    }
   };
 
   const handleRegisterClick = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    const learners = loadLearners();
-    const conflict = learners.some(l => l.email.toLowerCase() === signupEmail.toLowerCase() && l.status === 'Active');
-    if (conflict) {
-      setLoginError('This email is already registered and active. Please log in.');
-      setAuthMode('login');
-      return;
-    }
     setAuthMode('payment');
   };
 
-  const handleSimulatePayment = () => {
-    setPaymentStatus('processing');
-    setTimeout(() => {
-      setPaymentStatus('success');
-      setTimeout(() => {
-        const expiryDate = getExpiryDate(signupPlan);
-        const newLearner: PublicLearnerRecord = {
-          id: 'pl-' + Math.random().toString(36).substr(2, 9),
-          name: signupName, email: signupEmail, password: signupPassword,
-          plan: signupPlan, status: 'Active',
-          paymentDate: new Date().toISOString().split('T')[0],
-          expiryDate, phone: signupPhone,
-          notes: 'Self-Registered & Paid Online via Portal Gateway',
-        };
-        saveLearners([newLearner, ...loadLearners()]);
-        setSubscriber(newLearner);
-        sessionStorage.setItem('active_public_learner', JSON.stringify(newLearner));
-        setShowAuthModal(false);
-        setAuthMode('login');
-        setPaymentStatus('idle');
-        setSignupName(''); setSignupEmail(''); setSignupPassword(''); setSignupPhone('');
-        setSignupPlan('Monthly');
-      }, 1500);
-    }, 2000);
+  const handleSubmitSubscriptionRequest = async () => {
+    setRegistrationStatus('submitting');
+    setLoginError('');
+    try {
+      const result = await registerPublicLearner({ name: signupName, email: signupEmail, password: signupPassword, phone: signupPhone, plan: signupPlan }).unwrap();
+      setRegistrationStatus('submitted');
+      setSignupName(''); setSignupEmail(''); setSignupPassword(''); setSignupPhone('');
+    } catch (error: any) {
+      setRegistrationStatus('idle');
+      setLoginError(error?.data?.detail || 'Could not submit the subscription request.');
+      setAuthMode('signup');
+    }
   };
 
   const handleLogoutSubscriber = () => {
     setSubscriber(null);
-    sessionStorage.removeItem('active_public_learner');
+    void logoutMutation();
+    clearAuthenticatedSession();
   };
 
   const openSubscribe = (mode: 'login' | 'signup' = 'signup') => {
@@ -278,9 +282,9 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
           <div className="bg-slate-900/90 backdrop-blur-xl border border-white/10 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-scaleUp flex flex-col max-h-[85vh] my-auto">
 
             {/* Close */}
-            {paymentStatus !== 'processing' && (
+            {registrationStatus !== 'submitting' && (
               <button
-                onClick={() => { setShowAuthModal(false); setLoginError(''); setPaymentStatus('idle'); }}
+                onClick={() => { setShowAuthModal(false); setLoginError(''); setRegistrationStatus('idle'); }}
                 className="absolute top-4 right-4 p-1.5 rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition-all cursor-pointer z-10"
               >
                 <X className="w-5 h-5" />
@@ -309,7 +313,21 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
             <div className="p-6 sm:p-8 overflow-y-auto flex-1 space-y-6">
 
               {/* ── LOGIN ── */}
-              {authMode === 'login' && (
+              {forcePasswordChange && (
+                <div className="space-y-4">
+                  <div className="text-center">
+                    <div className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center bg-amber-500/10 border border-amber-500/20"><ShieldCheck className="w-7 h-7 text-amber-400" /></div>
+                    <h3 className="text-lg font-black text-white">Choose a new password</h3>
+                    <p className="text-xs text-slate-400 mt-1">This imported account needs a new password before access.</p>
+                  </div>
+                  <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="New password" className={g.input} />
+                  <input type="password" autoComplete="new-password" value={confirmNewPassword} onChange={event => setConfirmNewPassword(event.target.value)} placeholder="Confirm new password" className={g.input} />
+                  {loginError && <p role="alert" className="text-xs font-bold text-red-400">{loginError}</p>}
+                  <button type="button" onClick={() => void handleForcedPasswordChange()} className={g.btnPrimary}>Change password and continue</button>
+                </div>
+              )}
+
+              {!forcePasswordChange && authMode === 'login' && (
                 <>
                   <div className="text-center">
                     <div className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center bg-indigo-500/10 border border-indigo-500/20">
@@ -331,6 +349,14 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
                         placeholder="••••••••" required className={g.input} />
                     </div>
 
+                    {mfaToken ? (
+                      <div className="space-y-3">
+                        <label className={g.label}>Verification code</label>
+                        <input inputMode="numeric" autoComplete="one-time-code" value={loginOtp} onChange={e => setLoginOtp(e.target.value)} placeholder="Enter the code sent to your account" required className={g.input} />
+                        <button type="button" onClick={() => void handleVerifyLoginOtp()} className={g.btnPrimary}>Verify and sign in</button>
+                      </div>
+                    ) : <HumanVerification onVerify={setHumanToken} onReset={() => setHumanToken('')} resetKey={humanResetKey} />}
+
                     {loginError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-bold rounded-xl flex items-center gap-2">
                         <AlertCircle className="w-4 h-4 shrink-0" />
@@ -338,7 +364,7 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
                       </div>
                     )}
 
-                    <button type="submit" className={g.btnPrimary}>Unlock Premium Access</button>
+                    {!mfaToken && <button type="submit" className={g.btnPrimary}>Unlock Premium Access</button>}
                   </form>
                 </>
               )}
@@ -351,7 +377,7 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
                       <Zap className="w-7 h-7 text-amber-400" />
                     </div>
                     <h3 className="text-lg font-black text-white">Create Premium Account</h3>
-                    <p className="text-xs text-slate-400 mt-1">Self-register and pay to activate instantly</p>
+                    <p className="text-xs text-slate-400 mt-1">Request an account. Access starts after the administrator verifies payment.</p>
                   </div>
 
                   <form onSubmit={handleRegisterClick} className="space-y-4">
@@ -414,120 +440,50 @@ export default function PublicLearningModule({ onExit }: PublicLearningModulePro
 
                     <button type="submit" className={g.btnPrimary + ' flex items-center justify-center gap-2'}>
                       <Coins className="w-4 h-4" />
-                      Proceed to Payment (₹{PLAN_DETAILS[signupPlan].price})
+                      Continue to subscription request
                     </button>
                   </form>
                 </>
               )}
 
-              {/* ── PAYMENT GATEWAY ── */}
+              {/* ── SUBSCRIPTION REQUEST ── */}
               {authMode === 'payment' && (
                 <div className="space-y-5">
-                  {paymentStatus === 'idle' && (
+                  {registrationStatus === 'idle' && (
                     <>
-                      {/* Order Summary */}
                       <div className="bg-white/5 border border-white/10 p-4 rounded-2xl flex items-center justify-between">
                         <div>
-                          <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest">Order Summary</p>
-                          <h4 className="text-sm font-black text-white mt-1">{signupPlan} Premium Plan</h4>
-                          <p className="text-[10px] text-slate-400">Auto-activation on payment verification</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-[10px] text-slate-500 line-through">₹{Math.round(PLAN_DETAILS[signupPlan].price * 1.3)}</p>
-                          <p className="text-lg font-black text-emerald-400">₹{PLAN_DETAILS[signupPlan].price}</p>
+                          <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest">Subscription request</p>
+                          <h4 className="text-sm font-black text-white mt-1">{signupPlan} plan · ₹{PLAN_DETAILS[signupPlan].price}</h4>
+                          <p className="mt-1 text-[10px] text-slate-400">This app has no live payment gateway. Your account stays pending until payment is verified by an administrator.</p>
                         </div>
                       </div>
-
-                      {/* Payment Methods */}
-                      <div>
-                        <label className={g.label}>Payment Method</label>
-                        <div className="grid grid-cols-3 gap-3">
-                          {[
-                            { id: 'upi', label: 'UPI / QR', icon: Smartphone },
-                            { id: 'card', label: 'Card', icon: CreditCard },
-                            { id: 'netbanking', label: 'Net Banking', icon: Coins },
-                          ].map(method => {
-                            const Icon = method.icon;
-                            const active = paymentMethod === method.id as any;
-                            return (
-                              <button
-                                key={method.id}
-                                onClick={() => setPaymentMethod(method.id as any)}
-                                className={`p-3.5 rounded-xl border flex flex-col items-center gap-2 text-[10px] font-bold transition-all cursor-pointer ${
-                                  active
-                                    ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
-                                    : 'bg-white/5 border-white/10 text-slate-400 hover:border-white/20'
-                                }`}
-                              >
-                                <Icon className="w-5 h-5" />
-                                {method.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Payment Input */}
-                      <div className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-3">
-                        {paymentMethod === 'upi' && (
-                          <>
-                            <label className={g.label}>UPI ID</label>
-                            <input value={paymentUpiId} onChange={e => setPaymentUpiId(e.target.value)}
-                              placeholder="e.g. mobile@ybl, name@upi" className={g.input} />
-                            <p className="text-[9px] text-slate-500">Supports PhonePe, GPay, Paytm, BHIM UPI.</p>
-                          </>
-                        )}
-                        {paymentMethod === 'card' && (
-                          <>
-                            <label className={g.label}>Card Number</label>
-                            <input value={paymentCardNum} onChange={e => setPaymentCardNum(e.target.value)}
-                              placeholder="4111 2222 3333 4444" maxLength={19} className={g.input} />
-                            <div className="grid grid-cols-2 gap-3">
-                              <input placeholder="MM/YY" className={g.input} />
-                              <input placeholder="CVV" type="password" maxLength={3} className={g.input} />
-                            </div>
-                          </>
-                        )}
-                        {paymentMethod === 'netbanking' && (
-                          <>
-                            <label className={g.label}>Select Bank</label>
-                            <select className={g.input + ' bg-slate-900'}>
-                              <option>State Bank of India (SBI)</option>
-                              <option>HDFC Bank</option>
-                              <option>ICICI Bank</option>
-                              <option>Axis Bank</option>
-                              <option>Kotak Mahindra Bank</option>
-                            </select>
-                          </>
-                        )}
-                      </div>
-
-                      <button onClick={handleSimulatePayment} className={g.btnSuccess + ' flex items-center justify-center gap-2'}>
-                        <ShieldCheck className="w-4 h-4" />
-                        Simulate Secure Payment (₹{PLAN_DETAILS[signupPlan].price})
+                      <button onClick={() => void handleSubmitSubscriptionRequest()} className={g.btnPrimary + ' flex items-center justify-center gap-2'}>
+                        Submit request
                       </button>
                     </>
                   )}
 
-                  {paymentStatus === 'processing' && (
+                  {registrationStatus === 'submitting' && (
                     <div className="py-14 flex flex-col items-center gap-5">
                       <div className="w-14 h-14 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
                       <div className="text-center">
-                        <h4 className="text-sm font-bold text-slate-200">Processing Secure Payment</h4>
-                        <p className="text-xs text-slate-400 mt-1">Authorizing with payment servers...</p>
+                        <h4 className="text-sm font-bold text-slate-200">Submitting request</h4>
+                        <p className="text-xs text-slate-400 mt-1">Saving your pending subscription request…</p>
                       </div>
                     </div>
                   )}
 
-                  {paymentStatus === 'success' && (
+                  {registrationStatus === 'submitted' && (
                     <div className="py-14 flex flex-col items-center gap-5 animate-scaleUp">
                       <div className="w-16 h-16 bg-emerald-500/20 border border-emerald-500/30 rounded-2xl flex items-center justify-center">
                         <Check className="w-8 h-8 text-emerald-400" />
                       </div>
                       <div className="text-center">
-                        <h4 className="text-base font-black text-emerald-400">Payment Verified!</h4>
-                        <p className="text-xs text-slate-400 mt-1">Setting up your premium profile...</p>
+                        <h4 className="text-base font-black text-emerald-400">Request received</h4>
+                        <p className="text-xs text-slate-400 mt-1">Your account will remain pending until the administrator confirms your subscription.</p>
                       </div>
+                      <button onClick={() => { setShowAuthModal(false); setAuthMode('login'); setRegistrationStatus('idle'); }} className={g.btnGhost}>Done</button>
                     </div>
                   )}
                 </div>

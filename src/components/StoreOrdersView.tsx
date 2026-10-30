@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertCircle,
@@ -34,14 +34,17 @@ import type { AuthUser } from '../utils/auth';
 import { copyToClipboard } from '../utils/clipboard';
 import { printElement } from '../utils/printElement';
 import { emitNotification } from '../services/notificationBus';
+import { ListPagination } from './common/QueryStates';
 import {
   type StoreOrder,
+  type StoreOrderSummary,
   useFulfillStoreOrderMutation,
+  useGetStoreOrdersPageQuery,
   useUnfulfillStoreOrderMutation,
 } from '../store/api/storeApi';
 
 interface StoreOrdersViewProps {
-  orders: StoreOrder[];
+  summary?: StoreOrderSummary;
   isAdmin: boolean;
   schoolName?: string;
   user: AuthUser;
@@ -131,7 +134,7 @@ function getRoleBadge(role?: string) {
 }
 
 export default function StoreOrdersView({
-  orders,
+  summary,
   isAdmin,
   schoolName = 'School Store',
   user,
@@ -143,7 +146,17 @@ export default function StoreOrdersView({
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [receiptOrder, setReceiptOrder] = useState<StoreOrder | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 25;
 
+  const { data: orderPage, isLoading: ordersLoading, isError: ordersError } = useGetStoreOrdersPageQuery({
+    page,
+    page_size: PAGE_SIZE,
+    search: searchQuery.trim() || undefined,
+    status: statusFilter === 'all' ? undefined : statusFilter,
+    ordering: sortBy,
+  });
+  const orders = orderPage?.results || [];
   const [fulfillOrder, { isLoading: isFulfilling }] = useFulfillStoreOrderMutation();
   const [unfulfillOrder, { isLoading: isUnfulfilling }] = useUnfulfillStoreOrderMutation();
 
@@ -194,69 +207,19 @@ export default function StoreOrdersView({
   };
 
   // Metrics calculation
-  const metrics = useMemo(() => {
-    const totalCount = orders.length;
-    const paidOrders = orders.filter((o) => o.status === 'Paid');
-    const fulfilledOrders = orders.filter((o) => o.status === 'Fulfilled');
-    const pendingOrders = orders.filter((o) => o.status === 'Pending');
-    const problemOrders = orders.filter((o) => ['Failed', 'Cancelled', 'Expired'].includes(o.status));
-
-    const totalRevenue = orders
-      .filter((o) => o.status === 'Paid' || o.status === 'Fulfilled')
-      .reduce((sum, o) => sum + (parseFloat(o.subtotal) || 0), 0);
-
-    return {
-      totalCount,
-      paidCount: paidOrders.length,
-      fulfilledCount: fulfilledOrders.length,
-      pendingCount: pendingOrders.length,
-      problemCount: problemOrders.length,
-      totalRevenue,
-    };
-  }, [orders]);
+  const metrics = {
+    totalCount: summary?.totalCount || 0,
+    paidCount: summary?.paidCount || 0,
+    fulfilledCount: summary?.fulfilledCount || 0,
+    pendingCount: summary?.pendingCount || 0,
+    problemCount: summary?.problemCount || 0,
+    totalRevenue: Number(summary?.totalRevenue || 0),
+  };
 
   // Filtering & Sorting
-  const filteredOrders = useMemo(() => {
-    return orders
-      .filter((order) => {
-        // Status filter
-        if (statusFilter === 'Paid' && order.status !== 'Paid') return false;
-        if (statusFilter === 'Fulfilled' && order.status !== 'Fulfilled') return false;
-        if (statusFilter === 'Pending' && order.status !== 'Pending') return false;
-        if (statusFilter === 'Problem' && !['Failed', 'Cancelled', 'Expired'].includes(order.status)) {
-          return false;
-        }
-
-        // Search query
-        if (!searchQuery.trim()) return true;
-        const q = searchQuery.toLowerCase().trim();
-        const matchesId = String(order.id).includes(q) || `order #${order.id}`.toLowerCase().includes(q);
-        const matchesName = (order.buyerName || '').toLowerCase().includes(q);
-        const matchesEmail = (order.buyerEmail || '').toLowerCase().includes(q);
-        const matchesPhone = (order.buyerPhone || '').toLowerCase().includes(q);
-        const matchesNote = (order.deliveryAddress || '').toLowerCase().includes(q);
-        const matchesItem = order.items.some((item) =>
-          item.productName.toLowerCase().includes(q) || (item.category || '').toLowerCase().includes(q)
-        );
-
-        return matchesId || matchesName || matchesEmail || matchesPhone || matchesNote || matchesItem;
-      })
-      .sort((a, b) => {
-        if (sortBy === 'newest') {
-          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        }
-        if (sortBy === 'oldest') {
-          return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-        }
-        if (sortBy === 'amount_high') {
-          return (parseFloat(b.subtotal) || 0) - (parseFloat(a.subtotal) || 0);
-        }
-        if (sortBy === 'amount_low') {
-          return (parseFloat(a.subtotal) || 0) - (parseFloat(b.subtotal) || 0);
-        }
-        return 0;
-      });
-  }, [orders, statusFilter, searchQuery, sortBy]);
+  const filteredOrders = orders;
+  const pagedOrders = orders;
+  useEffect(() => setPage(1), [statusFilter, searchQuery, sortBy]);
 
   return (
     <div className="space-y-6">
@@ -273,7 +236,7 @@ export default function StoreOrdersView({
               </span>
               <span className="text-xs font-semibold text-slate-400">·</span>
               <span className="text-xs font-bold text-slate-500">
-                {orders.length} Total {orders.length === 1 ? 'Order' : 'Orders'}
+                {metrics.totalCount} Total {metrics.totalCount === 1 ? 'Order' : 'Orders'}
               </span>
             </div>
             <h2 className="text-2xl font-black tracking-tight text-slate-900 sm:text-3xl">
@@ -309,7 +272,7 @@ export default function StoreOrdersView({
               <RotateCcw className="h-3.5 w-3.5 text-slate-400" />
               Reset filters
             </button>
-            {isAdmin && orders.length > 0 && (
+            {isAdmin && metrics.totalCount > 0 && (
               <button
                 type="button"
                 onClick={() => {
@@ -509,19 +472,23 @@ export default function StoreOrdersView({
       </div>
 
       {/* ─── Orders List (Empty State or Items) ─────────────────────────── */}
-      {filteredOrders.length === 0 ? (
+      {ordersLoading ? (
+        <div role="status" className="portal-card p-12 text-center text-sm text-slate-500">Loading orders…</div>
+      ) : ordersError ? (
+        <div role="alert" className="portal-card p-12 text-center text-sm text-rose-700">Could not load orders. Retry or refresh the page.</div>
+      ) : filteredOrders.length === 0 ? (
         <div className="portal-card p-12 text-center space-y-3">
           <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-indigo-50 text-indigo-500">
             <Receipt className="h-7 w-7" />
           </div>
           <div className="space-y-1">
             <h3 className="text-base font-black text-slate-800">
-              {orders.length === 0
+              {metrics.totalCount === 0
                 ? 'No store orders found'
                 : 'No orders match your filter criteria'}
             </h3>
             <p className="text-xs text-slate-400 max-w-sm mx-auto">
-              {orders.length === 0
+              {metrics.totalCount === 0
                 ? 'When parents or students place orders in the school store, they will appear here automatically.'
                 : `Try adjusting your search query or reset the filter status to view all orders.`}
             </p>
@@ -545,7 +512,7 @@ export default function StoreOrdersView({
            GRID / CARDS VIEW (Modern visual cards)
            ══════════════════════════════════════════════════════════════════ */
         <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-2">
-          {filteredOrders.map((order) => {
+          {pagedOrders.map((order) => {
             const isPaid = order.status === 'Paid';
             const isFulfilled = order.status === 'Fulfilled';
             const isPending = order.status === 'Pending';
@@ -866,7 +833,7 @@ export default function StoreOrdersView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
-                {filteredOrders.map((order) => {
+                {pagedOrders.map((order) => {
                   const isPaid = order.status === 'Paid';
                   const isFulfilled = order.status === 'Fulfilled';
                   const isPending = order.status === 'Pending';
@@ -1042,13 +1009,15 @@ export default function StoreOrdersView({
         </div>
       )}
 
+      <ListPagination page={page} pageSize={PAGE_SIZE} total={orderPage?.count || 0} onPageChange={setPage} />
+
       {/* Dedicated compact print layout: keeps the order report readable and together. */}
       <section id="store-order-print-sheet" className="store-order-print-sheet hidden" aria-hidden="true">
         <div className="store-print-report-heading">
           <div>
             <p className="store-print-eyebrow">School Store · Orders &amp; Distribution</p>
             <h1>{schoolName || user.schoolName || 'School'} — Order Sheet</h1>
-            <p>{filteredOrders.length} orders · Printed {new Date().toLocaleString('en-IN')}</p>
+            <p>{filteredOrders.length} orders on this page · Printed {new Date().toLocaleString('en-IN')}</p>
           </div>
           <strong>Collected: {formatCurrency(metrics.totalRevenue)}</strong>
         </div>

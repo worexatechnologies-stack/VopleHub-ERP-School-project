@@ -55,7 +55,8 @@ export default function MarksEntry({
   const isTeacher = user.role === 'Teacher';
 
   // 1. Fetch all Exam Schedules
-  const { data: schedules = [], isLoading: schedulesLoading, refetch: refetchSchedules } = useGetExamSchedulesQuery();
+  const { data: schedulesPage, isLoading: schedulesLoading, refetch: refetchSchedules } = useGetExamSchedulesQuery({ page: 1, page_size: 200 });
+  const schedules = schedulesPage?.results || [];
 
   // Admin Navigation Levels: 'exams' (blocks) -> 'sections' -> 'sheet'
   const [adminViewLevel, setAdminViewLevel] = useState<'exams' | 'sections' | 'sheet'>('exams');

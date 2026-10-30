@@ -47,7 +47,8 @@ export default function ParentExamResults({
   const isStudent = user?.role === 'Student';
   const isAdmin = user?.role === 'School Admin' || user?.role === 'Super Admin';
 
-  const { data: schedules = [], isLoading: schedulesLoading, refetch: refetchSchedules } = useGetExamSchedulesQuery();
+  const { data: schedulesPage, isLoading: schedulesLoading, refetch: refetchSchedules } = useGetExamSchedulesQuery({ page: 1, page_size: 200 });
+  const schedules = schedulesPage?.results || [];
 
   const [selectedScheduleId, setSelectedScheduleId] = useState<number | null>(null);
   const [selectedWardId, setSelectedWardId] = useState<string>(() => {

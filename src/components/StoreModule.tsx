@@ -10,7 +10,8 @@ import {
   useCompleteDemoStorePaymentMutation,
   useCreateStoreOrderMutation,
   useCreateStoreProductMutation,
-  useGetStoreOrdersQuery,
+  useGetStoreOrdersSummaryQuery,
+  useLazyGetStoreOrdersForExportQuery,
   useGetStorePaymentSettingsQuery,
   useGetStoreProductsQuery,
   useUpdateStorePaymentSettingsMutation,
@@ -70,9 +71,9 @@ function StoreProductImage({ src, alt, className, iconClassName = 'h-8 w-8' }: {
   const markFailed = useCallback(() => setFailed(true), []);
 
   return (
-    <div className={`grid shrink-0 place-items-center overflow-hidden bg-indigo-50 text-indigo-300 ${className}`}>
+    <div className={`grid shrink-0 place-items-center overflow-hidden bg-slate-50 text-indigo-300 ${className}`}>
       {src && !failed ? (
-        <AuthenticatedImage src={src} alt={alt} className="h-full w-full object-contain p-2" onError={markFailed} />
+        <AuthenticatedImage src={src} alt={alt} className="max-h-full max-w-full object-contain" onError={markFailed} />
       ) : (
         <Package className={iconClassName} />
       )}
@@ -82,12 +83,14 @@ function StoreProductImage({ src, alt, className, iconClassName = 'h-8 w-8' }: {
 
 export default function StoreModule({ user, schoolName }: { user: AuthUser; schoolName?: string }) {
   const isAdmin = user.role === 'School Admin';
+  const canPurchase = user.role === 'Parent' || user.role === 'Student';
   const [activeView, setActiveView] = useState<'store' | 'inventory' | 'orders'>('store');
   const { data: products = [], isLoading } = useGetStoreProductsQuery(
     isAdmin ? undefined : { activeOnly: true },
     { pollingInterval: 10000, skipPollingIfUnfocused: true },
   );
-  const { data: orders = [] } = useGetStoreOrdersQuery(undefined, { pollingInterval: 10000, skipPollingIfUnfocused: true });
+  const { data: orderSummary } = useGetStoreOrdersSummaryQuery(undefined, { pollingInterval: 10000, skipPollingIfUnfocused: true });
+  const [fetchOrdersForExport] = useLazyGetStoreOrdersForExportQuery();
   const { data: paymentSettings } = useGetStorePaymentSettingsQuery(undefined, { skip: !isAdmin });
   const [createProduct, { isLoading: creatingProduct }] = useCreateStoreProductMutation();
   const [updateProduct] = useUpdateStoreProductMutation();
@@ -199,8 +202,9 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleExportToExcel = () => {
+  const handleExportToExcel = async () => {
     try {
+      const orders = await fetchOrdersForExport({}).unwrap();
       exportStoreDataToExcel({
         schoolName,
         orders,
@@ -324,7 +328,7 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
               <span>Razorpay settings</span>
             </button>
           )}
-          <button
+          {canPurchase && <button
             type="button"
             onClick={() => setCheckoutOpen(true)}
             disabled={!cartItems.length}
@@ -332,14 +336,14 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
           >
             <ShoppingCart className="h-4 w-4 shrink-0" />
             <span>Cart ({cartItems.reduce((n, item) => n + item.quantity, 0)}) · ₹{cartTotal.toLocaleString('en-IN')}</span>
-          </button>
+          </button>}
         </div>
       </header>
 
       <nav aria-label="Store sections" className="portal-card flex gap-2 p-2">
         <button type="button" aria-pressed={activeView === 'store'} onClick={() => setActiveView('store')} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black transition ${activeView === 'store' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'}`}><ShoppingBag className="h-4 w-4" /> Store items</button>
         {isAdmin && <button type="button" aria-pressed={activeView === 'inventory'} onClick={() => { setActiveView('inventory'); resetProductForm(); }} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black transition ${activeView === 'inventory' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'}`}><Package className="h-4 w-4" /> Stock inventory <span className={`rounded-full px-2 py-0.5 text-[10px] ${activeView === 'inventory' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}`}>{products.length}</span></button>}
-        <button type="button" aria-pressed={activeView === 'orders'} onClick={() => setActiveView('orders')} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black transition ${activeView === 'orders' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'}`}><ClipboardList className="h-4 w-4" /> Orders <span className={`rounded-full px-2 py-0.5 text-[10px] ${activeView === 'orders' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}`}>{orders.length}</span></button>
+        <button type="button" aria-pressed={activeView === 'orders'} onClick={() => setActiveView('orders')} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black transition ${activeView === 'orders' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'}`}><ClipboardList className="h-4 w-4" /> Orders <span className={`rounded-full px-2 py-0.5 text-[10px] ${activeView === 'orders' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}`}>{orderSummary?.totalCount || 0}</span></button>
       </nav>
 
       {activeView === 'inventory' && isAdmin && (
@@ -419,12 +423,12 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
             const quantity = quantities[key] || 1;
             const soldOut = selected.availableStock < 1 || remaining < 1;
             return <article key={key} className={`portal-card overflow-hidden border-l-4 ${tone.border} ${!product.isActive ? 'opacity-60' : ''}`}>
-              <StoreProductImage src={product.imageUrl} alt={`${product.name} photo`} className="h-36 w-full" iconClassName="h-10 w-10" />
+              <StoreProductImage src={product.imageUrl} alt={`${product.name} photo`} className="aspect-[4/3] w-full" iconClassName="h-10 w-10" />
               <div className="space-y-3 p-4"><div className="flex items-start justify-between gap-2"><div><h3 className={`text-lg font-black ${tone.label}`}>{product.name}</h3><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{product.sku}{variants.length > 1 ? ` · ${variants.length} sizes` : ''}</p></div><span className="shrink-0 pt-1 text-xs font-semibold text-slate-400">₹{Number(product.price).toLocaleString('en-IN')}</span></div>
                 <div className="flex flex-wrap gap-1.5"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${tone.badge}`}>{product.category || 'Other'}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600">{product.targetClasses?.length ? `Class ${product.targetClasses.join(', ')}` : 'All grades'}</span>{product.uniformType && <span className="rounded-full bg-violet-50 px-2 py-1 text-[10px] font-bold text-violet-700">{product.uniformType} · Size {selected.sizeLabel || 'Standard'}</span>}</div>
                 <p className="min-h-9 text-xs text-slate-500">{product.description || 'School-approved store item.'}</p>
                 {variants.length > 1 && <label className="block space-y-1 text-xs font-bold text-slate-600">Select size<select value={selected.id} onChange={(event) => setSelectedVariants({ ...selectedVariants, [key]: Number(event.target.value) })} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold">{variants.map((variant) => <option key={variant.id} value={variant.id} disabled={!isAdmin && variant.availableStock < 1}>Size {variant.sizeLabel || 'Standard'} — {variant.availableStock > 0 ? `${variant.availableStock} available` : 'Out of stock'}</option>)}</select></label>}
-                <div className="flex items-center justify-between gap-2 text-xs font-bold"><span className={soldOut ? 'text-rose-600' : 'text-emerald-600'}>{soldOut ? `Size ${selected.sizeLabel || 'item'} out of stock` : `${remaining} available`}</span>{isAdmin ? <button type="button" onClick={() => setActiveView('inventory')} className="text-indigo-600 hover:text-indigo-800">Manage stock inventory</button> : <div className="flex items-center gap-2"><label className="sr-only" htmlFor={`qty-${key}`}>Quantity</label><input id={`qty-${key}`} type="number" min="1" max={remaining || 1} value={quantity} disabled={soldOut || !product.isActive} onChange={(event) => setQuantities({ ...quantities, [key]: Math.min(remaining || 1, Math.max(1, Number(event.target.value) || 1)) })} className="w-16 rounded-lg border border-slate-200 px-2 py-1.5 text-center" /><button type="button" disabled={!product.isActive || soldOut || quantity > remaining} onClick={() => setCart({ ...cart, [selected.id]: inCart + quantity })} className="rounded-xl bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400">{selected.availableStock < 1 ? 'Unavailable' : 'Add to cart'}</button></div>}</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold"><span className={soldOut ? 'text-rose-600' : 'text-emerald-600'}>{soldOut ? `Size ${selected.sizeLabel || 'item'} out of stock` : `${remaining} available`}</span>{isAdmin ? <button type="button" onClick={() => setActiveView('inventory')} className="text-indigo-600 hover:text-indigo-800">Manage stock inventory</button> : canPurchase ? <div className="flex items-center gap-2"><label className="sr-only" htmlFor={`qty-${key}`}>Quantity</label><input id={`qty-${key}`} type="number" min="1" max={remaining || 1} value={quantity} disabled={soldOut || !product.isActive} onChange={(event) => setQuantities({ ...quantities, [key]: Math.min(remaining || 1, Math.max(1, Number(event.target.value) || 1)) })} className="w-16 rounded-lg border border-slate-200 px-2 py-1.5 text-center" /><button type="button" disabled={!product.isActive || soldOut || quantity > remaining} onClick={() => setCart({ ...cart, [selected.id]: inCart + quantity })} className="rounded-xl bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400">{selected.availableStock < 1 ? 'Unavailable' : 'Add to cart'}</button></div> : null}</div>
               </div>
             </article>;
           })}</div>}
@@ -432,7 +436,7 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
 
       {activeView === 'orders' && (
         <StoreOrdersView
-          orders={orders}
+          summary={orderSummary}
           isAdmin={isAdmin}
           schoolName={schoolName}
           user={user}
@@ -440,7 +444,7 @@ export default function StoreModule({ user, schoolName }: { user: AuthUser; scho
         />
       )}
 
-      {!isAdmin && cartItems.length > 0 && !checkoutOpen && createPortal(<button type="button" onClick={() => setCheckoutOpen(true)} aria-label={`Open cart with ${cartItems.reduce((n, item) => n + item.quantity, 0)} items, total ₹${cartTotal.toLocaleString('en-IN')}`} className="fixed bottom-5 right-5 z-[90] inline-flex items-center gap-3 rounded-2xl bg-indigo-600 px-4 py-3 text-left text-white shadow-xl ring-1 ring-white/30 transition hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200">
+      {canPurchase && cartItems.length > 0 && !checkoutOpen && createPortal(<button type="button" onClick={() => setCheckoutOpen(true)} aria-label={`Open cart with ${cartItems.reduce((n, item) => n + item.quantity, 0)} items, total ₹${cartTotal.toLocaleString('en-IN')}`} className="fixed bottom-5 right-5 z-[90] inline-flex items-center gap-3 rounded-2xl bg-indigo-600 px-4 py-3 text-left text-white shadow-xl ring-1 ring-white/30 transition hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200">
         <span className="relative grid h-9 w-9 place-items-center rounded-xl bg-white/15"><ShoppingCart className="h-5 w-5" /><span className="absolute -right-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-white px-1 text-[10px] font-black text-indigo-700">{cartItems.reduce((n, item) => n + item.quantity, 0)}</span></span>
         <span><span className="block text-xs font-bold text-indigo-100">View cart</span><span className="block text-sm font-black">₹{cartTotal.toLocaleString('en-IN')}</span></span>
       </button>, document.body)}

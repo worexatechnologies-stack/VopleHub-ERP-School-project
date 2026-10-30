@@ -484,7 +484,7 @@ class CredentialVaultSyncSafetyTests(TestCase):
             self.assertTrue(user.check_password(password))
             self.assertFalse(user.must_change_password)
             vault_record = CredentialVaultRecord.objects.get(user=user)
-            self.assertEqual(vault_record.plaintext_password, '[User Managed]')
+            self.assertFalse(hasattr(vault_record, 'plaintext_password'))
             self.assertFalse(vault_record.must_change_password)
 
         second_result = sync_school_credential_vault(self.school)
@@ -505,7 +505,7 @@ class CredentialVaultSyncSafetyTests(TestCase):
         CredentialVaultRecord.objects.create(
             school=self.school, user=admin_with_legacy_record,
             role=CredentialVaultRecord.Role.ADMIN, name='Legacy Admin',
-            login_id=admin_with_legacy_record.email, plaintext_password='Admin@123',
+            login_id=admin_with_legacy_record.email,
             source='admin_roster', must_change_password=False,
         )
         admin_without_record = User.objects.create_user(
@@ -524,13 +524,50 @@ class CredentialVaultSyncSafetyTests(TestCase):
         self.assertEqual(response.status_code, 200)
         for admin in (admin_with_legacy_record, admin_without_record):
             record = CredentialVaultRecord.objects.get(user=admin)
-            self.assertEqual(record.plaintext_password, '[User Managed]')
-            self.assertNotEqual(record.plaintext_password, 'Admin@123')
+            self.assertFalse(hasattr(record, 'plaintext_password'))
             admin.refresh_from_db()
             self.assertTrue(admin.check_password(
                 'AdminPermanent123!' if admin.pk == admin_with_legacy_record.pk else 'OtherAdminPermanent123!'
             ))
-        self.assertTrue(all(item['password'] == '[User Managed]' for item in response.data))
+        rows = response.data['results']
+        self.assertTrue(all('password' not in item for item in rows))
+
+    def test_vault_list_never_returns_passwords_and_reset_returns_one_time_password(self):
+        school = self.school
+        user = User.objects.create_user(
+            username='one-time-student@example.com', email='one-time-student@example.com',
+            password='OldTemporary123!', role=User.Role.STUDENT, school=school,
+            must_change_password=False,
+        )
+        record = CredentialVaultRecord.objects.create(
+            school=school, user=user, role=CredentialVaultRecord.Role.STUDENT,
+            name='One Time Student', login_id=user.email, source='admin_creation',
+            must_change_password=False,
+        )
+        admin = User.objects.create_user(
+            username='one-time-admin', email='one-time-admin@example.com', password='StrongPass123!',
+            role=User.Role.SCHOOL_ADMIN, school=school,
+        )
+        client = APIClient()
+        client.force_authenticate(admin)
+
+        list_response = client.get('/api/v1/credential-vault/')
+        self.assertEqual(list_response.status_code, 200)
+        self.assertNotIn('password', list_response.data['results'][0])
+
+        reset_response = client.post(f'/api/v1/credential-vault/{record.pk}/reset/')
+        self.assertEqual(reset_response.status_code, 200)
+        self.assertTrue(reset_response.data['temporaryPassword'])
+        self.assertTrue(reset_response.data['mustChangePassword'])
+        user.refresh_from_db()
+        record.refresh_from_db()
+        self.assertTrue(user.check_password(reset_response.data['temporaryPassword']))
+        self.assertTrue(user.must_change_password)
+        self.assertFalse(hasattr(record, 'plaintext_password'))
+
+        list_after_reset = client.get('/api/v1/credential-vault/')
+        self.assertNotIn('password', list_after_reset.data['results'][0])
+        self.assertNotIn('temporaryPassword', list_after_reset.data['results'][0])
 
 class TemporaryPasswordMiddlewareTests(TestCase):
     @override_settings(SECURE_SSL_REDIRECT=False)
@@ -544,7 +581,7 @@ class TemporaryPasswordMiddlewareTests(TestCase):
         record = CredentialVaultRecord.objects.create(
             school=school, user=user, role=CredentialVaultRecord.Role.ADMIN,
             name='Password Change Admin', login_id=user.email,
-            plaintext_password='TemporaryPass123!', source='admin_creation',
+            source='admin_creation',
             must_change_password=True,
         )
         client = APIClient()
@@ -558,19 +595,18 @@ class TemporaryPasswordMiddlewareTests(TestCase):
         self.assertEqual(response.status_code, 200)
         user.refresh_from_db()
         record.refresh_from_db()
-        self.assertFalse(user.must_change_password)
+        self.assertFalse(user.must_change_password, response.data)
         self.assertFalse(record.must_change_password)
-        self.assertEqual(record.plaintext_password, '[User Managed]')
         self.assertEqual(record.source, 'user_password_change')
 
-        from apps.accounts.views import _enforce_vault_temp_password
-        _enforce_vault_temp_password(user)
+        from apps.accounts.views import _enforce_first_login_password_change
+        _enforce_first_login_password_change(user)
         user.refresh_from_db()
         self.assertFalse(user.must_change_password)
 
     def test_users_without_vault_are_not_reprompted_after_first_login(self):
         from django.utils import timezone
-        from apps.accounts.views import _enforce_vault_temp_password
+        from apps.accounts.views import _enforce_first_login_password_change
 
         for role in [User.Role.TEACHER, User.Role.STUDENT, User.Role.PARENT]:
             user = User.objects.create_user(
@@ -578,7 +614,7 @@ class TemporaryPasswordMiddlewareTests(TestCase):
                 password='PermanentPassword123!', role=role,
                 must_change_password=False, last_login=timezone.now(),
             )
-            _enforce_vault_temp_password(user)
+            _enforce_first_login_password_change(user)
             user.refresh_from_db()
             self.assertFalse(user.must_change_password, role)
 
@@ -814,12 +850,11 @@ class SchoolAdminLifecycleTests(TestCase):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.post('/api/v1/auth/login/', {'email': self.admin.email, 'password': 'StrongPass123!'}, format='json').status_code, 200)
 
-    def test_super_admin_password_override_is_persisted_and_forces_a_change(self):
+    def test_super_admin_password_reset_generates_a_one_time_credential(self):
         self.client.force_authenticate(self.teacher)
         self.assertEqual(
             self.client.post(
                 f'/api/v1/auth/school-admins/{self.admin.id}/set-password/',
-                {'password': 'ValidOverridePass9!'}, format='json',
             ).status_code,
             403,
         )
@@ -828,24 +863,32 @@ class SchoolAdminLifecycleTests(TestCase):
         self.assertEqual(
             self.client.post(
                 f'/api/v1/auth/school-admins/{self.teacher.id}/set-password/',
-                {'password': 'ValidOverridePass9!'}, format='json',
             ).status_code,
             404,
         )
         response = self.client.post(
             f'/api/v1/auth/school-admins/{self.admin.id}/set-password/',
-            {'password': 'ValidOverridePass9!'}, format='json',
         )
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['loginId'], self.admin.email)
+        self.assertTrue(response.data['temporaryPassword'])
+        self.assertTrue(response.data['mustChangePassword'])
         self.admin.refresh_from_db()
-        self.assertTrue(self.admin.check_password('ValidOverridePass9!'))
+        self.assertTrue(self.admin.check_password(response.data['temporaryPassword']))
         self.assertTrue(self.admin.must_change_password)
 
         self.client.force_authenticate(user=None)
         self.assertEqual(
             self.client.post(
                 '/api/v1/auth/login/',
-                {'email': self.admin.email, 'password': 'ValidOverridePass9!'}, format='json',
+                {'email': self.admin.email, 'password': 'StrongPass123!'}, format='json',
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.post(
+                '/api/v1/auth/login/',
+                {'email': self.admin.email, 'password': response.data['temporaryPassword']}, format='json',
             ).status_code,
             200,
         )
