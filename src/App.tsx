@@ -39,6 +39,7 @@ import {
 
 // Custom Modules Components
 import Dashboard from './components/Dashboard';
+import { PrivacyPolicyPage, TermsAndConditionsPage } from './components/marketing/LegalPages';
 import RoleDashboard from './components/RoleDashboard';
 import PasswordManager from './components/PasswordManager';
 import StudentModule from './components/StudentModule';
@@ -1847,6 +1848,8 @@ export default function App() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/contact" element={<ContactPage />} />
         <Route path="/demo" element={<ContactPage />} />
+        <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
+        <Route path="/terms-and-conditions" element={<TermsAndConditionsPage />} />
         <Route path="/platform" element={<Navigate to="/" replace />} />
         <Route path="/solutions" element={<Navigate to="/" replace />} />
         <Route path="/how-it-works" element={<Navigate to="/" replace />} />

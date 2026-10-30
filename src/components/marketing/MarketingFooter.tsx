@@ -123,6 +123,8 @@ export default function MarketingFooter() {
           <div className="lp-footer-bottom-links">
             <Link to="/" onClick={scrollToTop}>Home</Link>
             <Link to="/contact" onClick={scrollToTop}>Contact Us</Link>
+            <Link to="/privacy-policy" onClick={scrollToTop}>Privacy Policy</Link>
+            <Link to="/terms-and-conditions" onClick={scrollToTop}>Terms &amp; Conditions</Link>
             <Link to="/login">Sign In</Link>
           </div>
         </div>
