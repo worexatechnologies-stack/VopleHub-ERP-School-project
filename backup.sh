@@ -1,5 +1,6 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 cd "$(dirname "$0")"
@@ -24,20 +25,23 @@ POSTGRES_DB="${POSTGRES_DB:-volpehub_education}"
 backup_dir="${BACKUP_DIR:-./backups}"
 mkdir -p "$backup_dir"
 stamp="$(date +%Y%m%d-%H%M%S)"
-target_dump="$backup_dir/volpehub-$stamp.dump"
+target_dump="$backup_dir/volpehub-$stamp.dump.enc"
 temporary_dump="$target_dump.tmp"
 
 echo "[VolpeHub Backup] Backing up database '$POSTGRES_DB' to '$target_dump'..."
 
 if ! docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
-    pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc < /dev/null > "$temporary_dump"; then
+    pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc < /dev/null |
+    docker compose -f docker-compose.prod.yml -p volpehub run --rm -T --no-deps \
+      --entrypoint python3 backup_scheduler /usr/local/bin/backup_encrypt.py encrypt > "$temporary_dump"; then
     echo "Error: Database dump command failed" >&2
     rm -f "$temporary_dump"
     exit 1
 fi
 
-if [ ! -s "$temporary_dump" ] || ! docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
-    pg_restore --list < "$temporary_dump" > /dev/null; then
+if [ ! -s "$temporary_dump" ] || ! docker compose -f docker-compose.prod.yml -p volpehub run --rm -T --no-deps \
+    --entrypoint python3 backup_scheduler /usr/local/bin/backup_encrypt.py decrypt < "$temporary_dump" |
+    docker compose -f docker-compose.prod.yml -p volpehub exec -T db pg_restore --list - > /dev/null; then
     echo "Error: Backup verification failed: $temporary_dump" >&2
     rm -f "$temporary_dump"
     exit 1
@@ -57,7 +61,7 @@ if [ "$retention_seconds" -lt 60 ]; then
     exit 1
 fi
 now_epoch="$(date -u +%s)"
-for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/postgres-*.dump; do
+for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/volpehub-*.dump.enc "$backup_dir"/postgres-*.dump "$backup_dir"/postgres-*.dump.enc; do
     [ -f "$old_backup" ] || continue
     modified_epoch="$(stat -c %Y "$old_backup")"
     if [ "$((now_epoch - modified_epoch))" -ge "$retention_seconds" ]; then
@@ -65,5 +69,5 @@ for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/postgres-*.dump; d
     fi
 done
 
-echo "[VolpeHub Backup] Current backups in '$backup_dir':"
-ls -lh "$backup_dir"/*.dump 2>/dev/null || echo "  (none)"
+echo "[VolpeHub Backup] Current encrypted backups in '$backup_dir':"
+ls -lh "$backup_dir"/*.dump.enc 2>/dev/null || echo "  (none)"

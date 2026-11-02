@@ -3,14 +3,16 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from .fields import EncryptedChatBinaryField, EncryptedChatJSONField, EncryptedChatTextField
+
 
 class ChatbotInteraction(models.Model):
     """Access-controlled audit record; deliberately not written to application logs."""
     school = models.ForeignKey('schools.School', on_delete=models.CASCADE, related_name='chatbot_interactions')
     parent = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='chatbot_interactions')
     student = models.ForeignKey('sis.Student', on_delete=models.CASCADE, related_name='chatbot_interactions')
-    question = models.TextField()
-    response = models.TextField()
+    question = EncryptedChatTextField()
+    response = EncryptedChatTextField()
     token_usage = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -127,7 +129,7 @@ class DirectMessage(models.Model):
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='messages')
     sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='sent_direct_messages')
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='received_direct_messages')
-    body = models.TextField(blank=True, default='')
+    body = EncryptedChatTextField(blank=True, default='')
     message_type = models.CharField(max_length=24, choices=MessageType.choices, default=MessageType.TEXT)
     client_idempotency_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     reply_to = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='replies')
@@ -151,7 +153,7 @@ class MessageAttachment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     message = models.ForeignKey(DirectMessage, on_delete=models.CASCADE, related_name='attachments')
     file_key = models.CharField(max_length=512, blank=True, default='')
-    file_data = models.BinaryField(blank=True, null=True, editable=False)
+    file_data = EncryptedChatBinaryField(blank=True, null=True, editable=False)
     original_name = models.CharField(max_length=255)
     content_type = models.CharField(max_length=128)
     file_size = models.PositiveIntegerField(default=0)
@@ -174,7 +176,7 @@ class OutboxEvent(models.Model):
     event_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     event_type = models.CharField(max_length=64, db_index=True)
     channel_name = models.CharField(max_length=128, db_index=True)
-    payload = models.JSONField()
+    payload = EncryptedChatJSONField()
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     published_at = models.DateTimeField(null=True, blank=True, db_index=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)

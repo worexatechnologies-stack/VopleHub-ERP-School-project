@@ -9,6 +9,7 @@ from channels.layers import get_channel_layer
 from django.db import transaction
 from django.utils import timezone
 from .models import OutboxEvent
+from .crypto import EVENT_PREFIX, encrypt_json
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,13 @@ def publish_outbox_event(event_id: int) -> bool:
                             'type': event.event_type,
                             'eventId': str(event.event_id),
                             'createdAt': event.created_at.isoformat(),
-                            'data': event.payload,
+                            # Redis may persist channel-layer keys to AOF. Keep
+                            # chat and notification contents encrypted there too.
+                            'data': encrypt_json(
+                                event.payload,
+                                context=b'chat-realtime-v1',
+                                prefix=EVENT_PREFIX,
+                            ),
                         },
                     },
                 )

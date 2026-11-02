@@ -1,5 +1,6 @@
-#!/bin/sh
-set -u
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
 
 backup_dir="${BACKUP_DIR:-/backups}"
 retention_seconds="${BACKUP_RETENTION_SECONDS:-86400}"
@@ -26,7 +27,7 @@ mkdir -p "$backup_dir"
 
 cleanup_old_backups() {
     now_epoch="$(date -u +%s)"
-    for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/postgres-*.dump; do
+    for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/volpehub-*.dump.enc "$backup_dir"/postgres-*.dump "$backup_dir"/postgres-*.dump.enc; do
         [ -f "$old_backup" ] || continue
         modified_epoch="$(stat -c %Y "$old_backup")"
         if [ "$((now_epoch - modified_epoch))" -ge "$retention_seconds" ]; then
@@ -37,17 +38,17 @@ cleanup_old_backups() {
 
 create_backup() {
     stamp="$(date -u +%Y%m%d-%H%M%S)"
-    target="$backup_dir/volpehub-$stamp.dump"
+    target="$backup_dir/volpehub-$stamp.dump.enc"
     temporary="$target.tmp"
 
     echo "[VolpeHub Backup Scheduler] Creating database snapshot: $target"
-    if ! pg_dump --format=custom --file="$temporary"; then
+    if ! pg_dump --format=custom | python3 /usr/local/bin/backup_encrypt.py encrypt > "$temporary"; then
         echo "[VolpeHub Backup Scheduler] pg_dump failed; keeping existing backups" >&2
         rm -f "$temporary"
         return 1
     fi
 
-    if [ ! -s "$temporary" ] || ! pg_restore --list "$temporary" > /dev/null 2>&1; then
+    if [ ! -s "$temporary" ] || ! python3 /usr/local/bin/backup_encrypt.py decrypt < "$temporary" | pg_restore --list - > /dev/null 2>&1; then
         echo "[VolpeHub Backup Scheduler] Archive verification failed; keeping existing backups" >&2
         rm -f "$temporary"
         return 1
@@ -55,7 +56,24 @@ create_backup() {
 
     mv "$temporary" "$target"
     cleanup_old_backups
-    echo "[VolpeHub Backup Scheduler] Backup verified; retained files: $(find "$backup_dir" -maxdepth 1 -type f -name 'volpehub-*.dump' | wc -l | tr -d ' ')"
+    echo "[VolpeHub Backup Scheduler] Encrypted backup verified; retained files: $(find "$backup_dir" -maxdepth 1 -type f -name '*.dump.enc' | wc -l | tr -d ' ')"
+}
+
+migrate_legacy_plaintext_backups() {
+    for old_backup in "$backup_dir"/volpehub-*.dump "$backup_dir"/postgres-*.dump; do
+        [ -f "$old_backup" ] || continue
+        encrypted_backup="$old_backup.enc"
+        temporary="$encrypted_backup.tmp"
+        echo "[VolpeHub Backup Scheduler] Encrypting legacy backup: $old_backup"
+        if ! python3 /usr/local/bin/backup_encrypt.py encrypt < "$old_backup" > "$temporary" ||
+            ! python3 /usr/local/bin/backup_encrypt.py decrypt < "$temporary" | pg_restore --list - > /dev/null 2>&1; then
+            echo "[VolpeHub Backup Scheduler] Could not validate encrypted legacy backup; preserving the original." >&2
+            rm -f "$temporary"
+            continue
+        fi
+        mv "$temporary" "$encrypted_backup"
+        rm -f "$old_backup"
+    done
 }
 
 wait_for_next_run() {
@@ -78,6 +96,8 @@ wait_for_next_run() {
     echo "[VolpeHub Backup Scheduler] Next database backup at $next_run"
     sleep "$wait_seconds"
 }
+
+migrate_legacy_plaintext_backups
 
 while :; do
     wait_for_next_run || { echo "Could not calculate the next backup time" >&2; sleep 60; continue; }

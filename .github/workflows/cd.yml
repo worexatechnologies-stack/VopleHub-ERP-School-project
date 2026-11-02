@@ -85,7 +85,7 @@ jobs:
             apps.accounts.tests_session_auth \
             apps.accounts.tests.TemporaryPasswordMiddlewareTests.test_school_admin_password_change_clears_vault_temporary_marker \
             apps.accounts.tests.TemporaryPasswordMiddlewareTests.test_users_without_vault_are_not_reprompted_after_first_login \
-            apps.community apps.notifications apps.timetable apps.staff apps.exams apps.store
+            apps.chat apps.community apps.notifications apps.timetable apps.staff apps.exams apps.store
 
   publish-images:
     name: Build & Publish GHCR Images
@@ -159,6 +159,16 @@ jobs:
             ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-forwardproxy:${{ github.sha }}
             ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-forwardproxy:latest
 
+      - name: Build and push encrypted backup image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: ./docker/backup
+          file: ./docker/backup/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-backup:${{ github.sha }}
+            ghcr.io/${{ steps.repo_owner.outputs.lowercase }}/volpehub-backup:latest
+
   deploy-production:
     name: Safe Production Deployment
     needs: publish-images
@@ -195,11 +205,16 @@ jobs:
             deploy.sh \
             "${SSH_USER}@${SSH_HOST}:/opt/volpehub/"
 
-          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" "mkdir -p /opt/volpehub/docker/postgres /opt/volpehub/backups"
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" "mkdir -p /opt/volpehub/docker/postgres /opt/volpehub/docker/backup /opt/volpehub/backups"
 
           scp -i ~/.ssh/deploy_key \
             docker/postgres/init-app-role.sh \
             "${SSH_USER}@${SSH_HOST}:/opt/volpehub/docker/postgres/"
+
+          scp -i ~/.ssh/deploy_key \
+            docker/backup/Dockerfile \
+            docker/backup/backup_encrypt.py \
+            "${SSH_USER}@${SSH_HOST}:/opt/volpehub/docker/backup/"
 
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
             "chmod +x /opt/volpehub/backup.sh /opt/volpehub/backup-scheduler.sh /opt/volpehub/restore.sh /opt/volpehub/rollback.sh /opt/volpehub/deploy.sh /opt/volpehub/docker/postgres/init-app-role.sh"

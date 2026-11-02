@@ -97,7 +97,10 @@ services:
       - 1.1.1.1
 
   backup_scheduler:
-    image: postgres:16-alpine
+    image: ${VOLPEHUB_BACKUP_IMAGE:-ghcr.io/${GHCR_NAMESPACE:-worexatechnologies-stack}/volpehub-backup:${IMAGE_TAG:-latest}}
+    build:
+      context: ./docker/backup
+      dockerfile: Dockerfile
     user: "0:0"
     restart: unless-stopped
     logging: *default-logging
@@ -120,7 +123,7 @@ services:
     volumes:
       - ./backup-scheduler.sh:/usr/local/bin/backup-scheduler.sh:ro
       - ./backups:/backups
-    entrypoint: ["/bin/sh", "/usr/local/bin/backup-scheduler.sh"]
+    entrypoint: ["/bin/bash", "/usr/local/bin/backup-scheduler.sh"]
     depends_on:
       db:
         condition: service_healthy

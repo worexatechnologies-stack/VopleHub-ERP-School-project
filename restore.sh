@@ -2,9 +2,10 @@
 # ==============================================================================
 # VolpeHub Database Restore Script (Disaster Recovery & Migration)
 # Usage: ./restore.sh <path-to-dump-file>
-# Example: ./restore.sh backups/volpehub-20261019-120000.dump
+# Example: ./restore.sh backups/volpehub-20261019-120000.dump.enc
 # ==============================================================================
 set -eu
+umask 077
 
 if [ $# -eq 0 ]; then
   echo "Error: No dump file specified." >&2
@@ -51,9 +52,24 @@ docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
   "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$POSTGRES_DB' AND pid <> pg_backend_pid();" || true
 
 # 2. Restore PostgreSQL schema and data
-echo "Restoring database from custom-format archive..."
+echo "Decrypting backup into a private temporary file..."
+plaintext_dump="$(mktemp "${TMPDIR:-/tmp}/volpehub-restore.XXXXXX")"
+trap 'rm -f "$plaintext_dump"' EXIT HUP INT TERM
+if ! docker compose -f docker-compose.prod.yml -p volpehub run --rm -T --no-deps \
+  --entrypoint python3 backup_scheduler /usr/local/bin/backup_encrypt.py decrypt \
+  < "$dump_file" > "$plaintext_dump"; then
+  echo "Error: Backup decryption/authentication failed." >&2
+  exit 1
+fi
+if ! docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
+  pg_restore --list < "$plaintext_dump" > /dev/null; then
+  echo "Error: Decrypted file is not a valid PostgreSQL archive." >&2
+  exit 1
+fi
+
+echo "Restoring PostgreSQL schema and data..."
 docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
-  pg_restore --clean --if-exists --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v < "$dump_file" || true
+  pg_restore --clean --if-exists --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v < "$plaintext_dump"
 
 # 3. Analyze tables for optimal planner statistics
 echo "Running ANALYZE on VolpeHub database..."

@@ -37,7 +37,7 @@ fi
 
 # 2. Pull exact container image tags
 echo "Pulling container images for release ${IMAGE_TAG:-latest}..."
-docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker forwardproxy
+docker compose -f docker-compose.prod.yml -p volpehub pull api web celery_worker forwardproxy backup_scheduler
 
 # 3. Validate Compose configuration
 echo "Validating Compose configuration..."
@@ -108,6 +108,10 @@ for SERVICE in api web forwardproxy; do
         exit 1
     fi
 done
+
+echo "Encrypting legacy chat records and removing plaintext message previews..."
+docker compose -f docker-compose.prod.yml -p volpehub exec -T api \
+    python manage.py encrypt_legacy_chat_content < /dev/null
 
 echo "=== VolpeHub Deployment Succeeded ==="
 docker compose -f docker-compose.prod.yml -p volpehub ps

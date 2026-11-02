@@ -290,7 +290,16 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
 
     async def chat_event(self, event):
         """Handler for events broadcasted through channel layer."""
-        await self.send_json(event.get('event', {}))
+        payload = event.get('event', {})
+        data = payload.get('data')
+        if isinstance(data, str) and data.startswith('vhchat-event:v1:'):
+            from .crypto import EVENT_PREFIX, decrypt_json
+            payload['data'] = decrypt_json(
+                data,
+                context=b'chat-realtime-v1',
+                prefix=EVENT_PREFIX,
+            )
+        await self.send_json(payload)
 
     WS_CONN_TTL = 300  # 5 minutes sliding heartbeat TTL to prevent leaked counts on crash
 

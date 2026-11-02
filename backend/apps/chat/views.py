@@ -741,7 +741,7 @@ class ConversationMessagesView(APIView):
                     dm.save(update_fields=['message_type'])
 
             # Update conversation metadata
-            conv.last_message_preview = body[:120] if body else ('[Photo]' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else '[Attachment]')
+            conv.last_message_preview = 'New message' if body else ('Photo attachment' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else 'Attachment')
             conv.last_message_at = timezone.now()
             conv.updated_at = timezone.now()
             conv.save(update_fields=['last_message_preview', 'last_message_at', 'updated_at'])
@@ -791,12 +791,11 @@ class ConversationMessagesView(APIView):
             ).exists()
             if not is_muted:
                 sender_name = request.user.get_full_name() or request.user.email
-                notif_preview = body[:140] if body else ('Sent an image' if any(f.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) for f in uploaded_files) else 'Sent an attachment')
                 create_notification(
                     school=request.user.school,
                     recipient=recipient,
                     title=f"New Message from {sender_name}",
-                    body=notif_preview,
+                    body='You have a new message.',
                     category='Message',
                     channel='chat',
                     sender=request.user,
