@@ -470,7 +470,13 @@ class LoginView(APIView):
         )
         if is_super_admin and not is_mfa_delivery_configured():
             return Response(
-                {'detail': 'Super Admin sign-in requires configured MFA delivery. Contact the system administrator.'},
+                {
+                    'detail': (
+                        'Super Admin sign-in is blocked because MFA email delivery is not configured. '
+                        'Configure EMAIL_HOST and DEFAULT_FROM_EMAIL (plus SMTP credentials when required) '
+                        'in the production environment, then retry.'
+                    )
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         if is_super_admin or is_mfa_configured():
@@ -479,7 +485,14 @@ class LoginView(APIView):
                 challenge = create_mfa_challenge(user, request=request, requested_role=requested_role)
             except MfaDeliveryError:
                 return Response(
-                    {'detail': 'We could not send your verification code. Please try again later or contact your school administrator.'},
+                    {
+                        'detail': (
+                            'Super Admin credentials were accepted, but the MFA email could not be sent. '
+                            'Check the production SMTP host, credentials, sender address, and outbound mail access, then retry.'
+                            if is_super_admin else
+                            'We could not send your verification code. Please try again later or contact your school administrator.'
+                        )
+                    },
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             return Response({

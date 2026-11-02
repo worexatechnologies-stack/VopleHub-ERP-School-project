@@ -69,7 +69,13 @@ const baseQueryWithAuth: BaseQueryFn<
     const isNetworkFailure = typeof errorStatus === 'string';
     const isHtmlErrorPage = typeof rawBody === 'string' && /<!doctype\s+html|<html\b|<title>\s*server error/i.test(rawBody);
     const isTechnicalMessage = /traceback|stack trace|integrityerror|operationalerror|programmingerror|attributeerror|nonetype|<!doctype\s+html|<html\b/i.test(errorText);
-    if (isServerFailure || isNetworkFailure || isHtmlErrorPage || isTechnicalMessage) {
+    const isSafeLoginUnavailable = requestUrl.startsWith('/auth/login/') &&
+      errorStatus === 503 &&
+      typeof rawBody === 'object' &&
+      rawBody !== null &&
+      typeof (rawBody as { detail?: unknown }).detail === 'string' &&
+      !isTechnicalMessage;
+    if ((isServerFailure && !isSafeLoginUnavailable) || isNetworkFailure || isHtmlErrorPage || isTechnicalMessage) {
       const detail = errorStatus === 'TIMEOUT_ERROR'
         ? 'This is taking longer than usual. Please try again.'
         : errorStatus === 'PARSING_ERROR'
