@@ -44,14 +44,10 @@ class BackendManagedSessionAuthTests(TestCase):
             '/api/v1/auth/csrf/'
         ).data['csrfToken']
 
-    def complete_super_admin_mfa(self, client, response, *, mobile=False):
-        self.assertTrue(response.data.get('mfa_required'))
-        return client.post(
-            '/api/v1/auth/verify-otp/',
-            {'mfa_token': response.data['mfa_token'], 'otp': response.data['dev_otp']},
-            format='json',
-            **({'HTTP_X_CLIENT_TYPE': 'mobile'} if mobile else {}),
-        )
+    def assert_super_admin_password_login(self, response):
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('mfa_required', response.data)
+        return response
 
     def test_web_login_creates_server_session_and_sets_cookie(self):
         """Web login creates a server-side session and returns sessionid cookie, with NO access/refresh tokens in body."""
@@ -60,7 +56,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        response = self.complete_super_admin_mfa(self.client, response)
+        response = self.assert_super_admin_password_login(response)
 
         self.assertEqual(response.status_code, 200)
         # Verify NO JWT tokens in web response body
@@ -95,7 +91,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        response = self.complete_super_admin_mfa(self.client, response)
+        response = self.assert_super_admin_password_login(response)
 
         self.assertEqual(response.status_code, 200)
         post_login_session_key = response.cookies[settings.SESSION_COOKIE_NAME].value
@@ -128,8 +124,8 @@ class BackendManagedSessionAuthTests(TestCase):
             'role': 'super_admin',
         }, format='json', HTTP_X_CSRFTOKEN=csrf_token)
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data['mfa_required'])
-        response = self.complete_super_admin_mfa(self.client, response)
+        self.assertNotIn('mfa_required', response.data)
+        response = self.assert_super_admin_password_login(response)
 
         # Preserve the legacy native-client alias behavior; mobile does not
         # select a browser portal and consumes the same token API contract.
@@ -140,7 +136,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'role': 'school_admin',
             'client_type': 'mobile',
         }, format='json', HTTP_X_CLIENT_TYPE='mobile')
-        mobile_response = self.complete_super_admin_mfa(mobile_client, mobile_response, mobile=True)
+        mobile_response = self.assert_super_admin_password_login(mobile_response)
         self.assertEqual(mobile_response.status_code, 200)
         self.assertIn('access', mobile_response.data)
         self.assertIn('refresh', mobile_response.data)
@@ -174,7 +170,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        login_res = self.complete_super_admin_mfa(self.client, login_res)
+        login_res = self.assert_super_admin_password_login(login_res)
         self.assertEqual(login_res.status_code, 200)
 
         # 1. Unsafe POST without CSRF token must fail with 403 Forbidden
@@ -216,7 +212,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        login_res = self.complete_super_admin_mfa(self.client, login_res)
+        login_res = self.assert_super_admin_password_login(login_res)
         self.assertEqual(login_res.status_code, 200)
 
         # GET /auth/me/ with session cookie
@@ -235,7 +231,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        login_res = self.complete_super_admin_mfa(self.client, login_res)
+        login_res = self.assert_super_admin_password_login(login_res)
         session_key = login_res.cookies[settings.SESSION_COOKIE_NAME].value
 
         # Verify session exists in store
@@ -260,7 +256,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'role': 'Super Admin',
             'client_type': 'mobile',
         }, format='json', HTTP_X_CLIENT_TYPE='mobile')
-        mobile_login = self.complete_super_admin_mfa(self.client, mobile_login, mobile=True)
+        mobile_login = self.assert_super_admin_password_login(mobile_login)
 
         self.assertEqual(mobile_login.status_code, 200)
         self.assertIn('access', mobile_login.data)
@@ -321,7 +317,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        login_res = self.complete_super_admin_mfa(self.client, login_res)
+        login_res = self.assert_super_admin_password_login(login_res)
         self.assertEqual(login_res.status_code, 200)
 
         # Deactivate user
@@ -338,7 +334,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        login_res = self.complete_super_admin_mfa(self.client, login_res)
+        login_res = self.assert_super_admin_password_login(login_res)
         self.assertEqual(login_res.status_code, 200)
         session_key = login_res.cookies[settings.SESSION_COOKIE_NAME].value
         session = self.client.session
@@ -356,7 +352,7 @@ class BackendManagedSessionAuthTests(TestCase):
             'password': 'ComplexPassword123!',
             'role': 'Super Admin',
         }, format='json')
-        login_res = self.complete_super_admin_mfa(self.client, login_res)
+        login_res = self.assert_super_admin_password_login(login_res)
         self.assertEqual(login_res.status_code, 200)
         session_key = login_res.cookies[settings.SESSION_COOKIE_NAME].value
         session = self.client.session
@@ -368,6 +364,23 @@ class BackendManagedSessionAuthTests(TestCase):
 
         self.assertIn(response.status_code, [401, 403])
         self.assertFalse(SessionStore(session_key=session_key).exists(session_key))
+
+    @override_settings(
+        MFA_ENABLED=True,
+        MFA_DEVELOPMENT_MODE=False,
+        EMAIL_HOST='',
+        DEFAULT_FROM_EMAIL='',
+    )
+    def test_super_admin_password_login_does_not_depend_on_email_mfa(self):
+        response = self.client.post('/api/v1/auth/login/', {
+            'email': 'superadmin@test.com',
+            'password': 'ComplexPassword123!',
+            'role': 'Super Admin',
+        }, format='json')
+
+        self.assert_super_admin_password_login(response)
+        self.assertIn(settings.SESSION_COOKIE_NAME, response.cookies)
+        self.assertNotIn('mfa_required', response.data)
 
     def test_invalid_credentials_rejected_without_creating_session(self):
         """Invalid credentials return 401 and do not create a session."""

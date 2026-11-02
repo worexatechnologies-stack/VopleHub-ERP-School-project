@@ -455,7 +455,8 @@ class LoginView(APIView):
         # Enforce password reset on login if account is using an admin-generated/temporary password
         _enforce_first_login_password_change(user)
 
-        # Super Admin accounts always require a second factor.
+        # Super Admin sign-in uses the password and the existing human-verification
+        # check. Email MFA remains available for other roles when enabled.
         is_super_admin = (
             user.role == User.Role.SUPER_ADMIN
             or getattr(user, 'is_superuser', False)
@@ -466,20 +467,8 @@ class LoginView(APIView):
             MfaDeliveryError,
             create_mfa_challenge,
             is_mfa_configured,
-            is_mfa_delivery_configured,
         )
-        if is_super_admin and not is_mfa_delivery_configured():
-            return Response(
-                {
-                    'detail': (
-                        'Super Admin sign-in is blocked because MFA email delivery is not configured. '
-                        'Configure EMAIL_HOST and DEFAULT_FROM_EMAIL (plus SMTP credentials when required) '
-                        'in the production environment, then retry.'
-                    )
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        if is_super_admin or is_mfa_configured():
+        if not is_super_admin and is_mfa_configured():
             AccountLoginRateThrottle.record_success(raw_email, request=request)
             try:
                 challenge = create_mfa_challenge(user, request=request, requested_role=requested_role)
