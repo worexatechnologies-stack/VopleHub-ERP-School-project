@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from rest_framework import serializers
 from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema, inline_serializer
 
-from apps.accounts.models import ParentProfile, User
+from apps.accounts.models import ParentProfile, StudentProfile, User
 from apps.common.storage import sanitize_filename
 from apps.common.validators import (
     MAX_CHAT_ATTACHMENT_COUNT,
@@ -81,8 +81,9 @@ def get_teacher_permitted_students(teacher, school_id):
 class ChatContactsListView(APIView):
     """Returns role-scoped chat contacts with rich differentiation:
     - School Admin: Teachers with assigned classes, sections, and subjects.
-    - Teacher: School Admin (Office Desk) + Parents of assigned students.
+    - Teacher: School Admin (Office Desk), assigned students, and their parents.
     - Parent: Teachers of all linked active children.
+    - Student: Teachers assigned to the student's class.
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -95,23 +96,9 @@ class ChatContactsListView(APIView):
 
         search_q = request.GET.get('search', '').strip()
 
-        # 1. ADMIN
+        # 1. ADMIN: teachers only
         if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             contacts = []
-            other_admin = User.objects.filter(school=school, role=User.Role.SCHOOL_ADMIN, is_active=True).exclude(pk=user.id).first()
-            if other_admin:
-                contacts.append({
-                    'id': f'admin-{other_admin.id}',
-                    'userId': other_admin.id,
-                    'name': other_admin.get_full_name() or other_admin.username or 'Administrative Office',
-                    'role': 'School Admin',
-                    'email': other_admin.email,
-                    'phone': '',
-                    'isOnline': other_admin.is_online_computed,
-                    'lastSeenAt': other_admin.last_seen_at.isoformat() if other_admin.last_seen_at else None,
-                    'isOfficeDesk': True,
-                })
-
             teachers_qs = Teacher.objects.filter(school=school, status='Active').select_related('user').prefetch_related(
                 'sections__class_room', 'subject_records', 'teaching_assignments__section__class_room', 'teaching_assignments__subject'
             )
@@ -211,6 +198,23 @@ class ChatContactsListView(APIView):
                 permitted_students_qs = permitted_students_qs[:25]
 
             permitted_students = permitted_students_qs.prefetch_related('parent_profiles__user')
+            student_profiles = StudentProfile.objects.filter(
+                student__in=permitted_students,
+                user__is_active=True,
+                user__school=school,
+            ).select_related('user', 'student')
+            for profile in student_profiles:
+                contacts.append({
+                    'id': profile.student_id,
+                    'userId': profile.user_id,
+                    'name': profile.user.get_full_name() or profile.student.name or profile.user.username,
+                    'role': 'Student',
+                    'email': profile.user.email,
+                    'isOnline': profile.user.is_online_computed,
+                    'lastSeenAt': profile.user.last_seen_at.isoformat() if profile.user.last_seen_at else None,
+                    'assignedSections': [f"{profile.student.class_name} - Sec {profile.student.section}"],
+                })
+
             parent_map = {}
             for student in permitted_students:
                 for pp in student.parent_profiles.all():
@@ -262,20 +266,6 @@ class ChatContactsListView(APIView):
                 return Response([])
 
             contacts = []
-            admin_user = User.objects.filter(school=school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN], is_active=True).first()
-            if admin_user:
-                contacts.append({
-                    'id': 'admin-office',
-                    'userId': admin_user.id,
-                    'name': 'School Admin / Office Desk',
-                    'role': 'School Admin',
-                    'email': admin_user.email,
-                    'phone': '',
-                    'isOnline': admin_user.is_online_computed,
-                    'lastSeenAt': admin_user.last_seen_at.isoformat() if admin_user.last_seen_at else None,
-                    'isOfficeDesk': True,
-                })
-
             linked_students = list(parent_profile.students.filter(school=school, status='Active'))
             if not linked_students:
                 return Response(contacts)
@@ -346,20 +336,6 @@ class ChatContactsListView(APIView):
         # 4. STUDENT
         if user.role == User.Role.STUDENT:
             contacts = []
-            admin_user = User.objects.filter(school=school, role=User.Role.SCHOOL_ADMIN, is_active=True).first()
-            if admin_user:
-                contacts.append({
-                    'id': 'admin-office',
-                    'userId': admin_user.id,
-                    'name': 'School Admin / Office Desk',
-                    'role': 'School Admin',
-                    'email': admin_user.email,
-                    'phone': '',
-                    'isOnline': admin_user.is_online_computed,
-                    'lastSeenAt': admin_user.last_seen_at.isoformat() if admin_user.last_seen_at else None,
-                    'isOfficeDesk': True,
-                })
-
             student_profile = getattr(user, 'student_profile', None)
             student = getattr(student_profile, 'student', None) if student_profile else None
             if not student:
@@ -428,11 +404,12 @@ class ConversationListView(APIView):
             ),
         )
 
-        # Apply strict role filters
+        # Apply the same role boundary used for new conversations. This also
+        # hides legacy parent/student-to-admin threads after the policy change.
         if request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
             conversations = [
                 c for c in conversations
-                if c.get_other_participant(request.user).role in [User.Role.TEACHER, User.Role.PARENT, User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+                if c.get_other_participant(request.user).role == User.Role.TEACHER
             ]
         elif request.user.role == User.Role.TEACHER:
             teacher_profile = getattr(request.user, 'teacher_profile', None)
@@ -444,10 +421,20 @@ class ConversationListView(APIView):
                     students__in=permitted_students, user__school=request.user.school
                 ).values_list('user_id', flat=True)
             )
-            admin_user_ids = set(
-                User.objects.filter(school=request.user.school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]).values_list('id', flat=True)
+            student_user_ids = set(
+                StudentProfile.objects.filter(
+                    student__in=permitted_students,
+                    user__school=request.user.school,
+                    user__is_active=True,
+                ).values_list('user_id', flat=True)
             )
-            allowed_partner_ids = parent_user_ids | admin_user_ids
+            admin_user_ids = set(
+                User.objects.filter(
+                    school=request.user.school,
+                    role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN],
+                ).values_list('id', flat=True)
+            )
+            allowed_partner_ids = parent_user_ids | student_user_ids | admin_user_ids
             conversations = [
                 c for c in conversations
                 if c.get_other_participant(request.user).id in allowed_partner_ids
@@ -461,13 +448,9 @@ class ConversationListView(APIView):
             allowed_teacher_user_ids = {
                 t.user_id for t in teachers if any(check_teacher_matches_student(t, st) for st in linked_students)
             }
-            admin_user_ids = set(
-                User.objects.filter(school=request.user.school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]).values_list('id', flat=True)
-            )
-            allowed_partner_ids = allowed_teacher_user_ids | admin_user_ids
             conversations = [
                 c for c in conversations
-                if c.get_other_participant(request.user).id in allowed_partner_ids
+                if c.get_other_participant(request.user).id in allowed_teacher_user_ids
             ]
         elif request.user.role == User.Role.STUDENT:
             student_profile = getattr(request.user, 'student_profile', None)
@@ -476,13 +459,9 @@ class ConversationListView(APIView):
             allowed_teacher_user_ids = {
                 t.user_id for t in teachers if student and check_teacher_matches_student(t, student)
             }
-            admin_user_ids = set(
-                User.objects.filter(school=request.user.school, role__in=[User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]).values_list('id', flat=True)
-            )
-            allowed_partner_ids = allowed_teacher_user_ids | admin_user_ids
             conversations = [
                 c for c in conversations
-                if c.get_other_participant(request.user).id in allowed_partner_ids
+                if c.get_other_participant(request.user).id in allowed_teacher_user_ids
             ]
 
         if conversations:

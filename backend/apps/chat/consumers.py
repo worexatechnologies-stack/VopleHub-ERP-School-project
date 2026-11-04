@@ -431,13 +431,13 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not self.user or not self.user.is_authenticated:
             return []
         from .models import Conversation
+        from .permissions import is_user_in_conversation
         from django.db.models import Q
-        return list(
-            Conversation.objects.filter(
+        conversations = Conversation.objects.filter(
                 Q(participant1=self.user) | Q(participant2=self.user),
                 school=self.user.school,
-            ).values_list('id', flat=True)
-        )
+            ).select_related('participant1', 'participant2', 'student').prefetch_related('participants')
+        return [conversation.id for conversation in conversations if is_user_in_conversation(self.user, conversation)]
 
     @database_sync_to_async
     def get_conversation_other_user_id(self, conversation_id: int) -> int | None:

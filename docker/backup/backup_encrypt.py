@@ -75,6 +75,13 @@ def main() -> int:
         operation = encrypt if sys.argv[1] == 'encrypt' else decrypt
         operation(sys.stdin.buffer, sys.stdout.buffer)
         sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # Standard Unix behavior: downstream consumer (e.g., pg_restore --list) exited early.
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        return 0
     except Exception as exc:
         print(f'Backup cryptographic operation failed: {exc}', file=sys.stderr)
         return 1

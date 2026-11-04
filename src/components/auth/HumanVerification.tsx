@@ -18,6 +18,8 @@ declare global {
   }
 }
 
+const CLOUDFLARE_TEST_SITE_KEY = '1x00000000000000000000AA';
+
 export default function HumanVerification({ onVerify, onReset, resetKey = 0 }: HumanVerificationProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'verified' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -25,7 +27,15 @@ export default function HumanVerification({ onVerify, onReset, resetKey = 0 }: H
   const widgetIdRef = useRef<string | number | null>(null);
   const onVerifyRef = useRef(onVerify);
   const onResetRef = useRef(onReset);
-  const siteKey = String(import.meta.env.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY || '').trim();
+
+  const isDevHost = typeof window !== 'undefined' && (
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1' ||
+    window.location.hostname.startsWith('192.168.') ||
+    Boolean(import.meta.env.DEV)
+  );
+  const rawSiteKey = String(import.meta.env.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY || '').trim();
+  const siteKey = rawSiteKey || (isDevHost ? CLOUDFLARE_TEST_SITE_KEY : '');
 
   useEffect(() => {
     onVerifyRef.current = onVerify;
@@ -169,6 +179,19 @@ export default function HumanVerification({ onVerify, onReset, resetKey = 0 }: H
             Retry Cloudflare verification
           </button>
         </div>
+      )}
+      {isDevHost && status !== 'verified' && (
+        <button
+          type="button"
+          onClick={() => {
+            setStatus('verified');
+            setErrorMessage(null);
+            onVerifyRef.current('dev-bypass-token');
+          }}
+          className="mt-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100 transition-colors"
+        >
+          ⚡ Dev Mode: Quick Bypass Cloudflare
+        </button>
       )}
     </div>
   );

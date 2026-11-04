@@ -122,6 +122,7 @@ services:
       TZ: ${BACKUP_TIMEZONE:-Asia/Kolkata}
     volumes:
       - ./backup-scheduler.sh:/usr/local/bin/backup-scheduler.sh:ro
+      - ./docker/backup/backup_encrypt.py:/usr/local/bin/backup_encrypt.py:ro
       - ./backups:/backups
     entrypoint: ["/bin/bash", "/usr/local/bin/backup-scheduler.sh"]
     depends_on:

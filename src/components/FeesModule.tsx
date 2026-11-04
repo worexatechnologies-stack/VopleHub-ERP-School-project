@@ -382,6 +382,33 @@ export default function FeesModule({
     return Array.from(classMap.keys()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   }, [academicClasses, studentRecords, students, structures]);
 
+  // Unique sections available across academic setup and student records
+  const availableSections = useMemo(() => {
+    const set = new Set<string>();
+    academicSections.forEach((s) => {
+      if (s.name) set.add(s.name.toUpperCase());
+    });
+    studentRecords.forEach((r) => {
+      if (r.section) set.add(r.section.toUpperCase());
+    });
+    students.forEach((st) => {
+      if (st.section) set.add(st.section.toUpperCase());
+    });
+    const list = Array.from(set).filter(Boolean).sort();
+    return list.length > 0 ? list : ['A', 'B', 'C'];
+  }, [academicSections, studentRecords, students]);
+
+  // Batches / Academic years available across setup and student records
+  const availableBatches = useMemo(() => {
+    const set = new Set<string>();
+    academicYearOptions.forEach((y) => { if (y) set.add(y); });
+    academicYears.forEach((y) => { if (y.name) set.add(y.name); });
+    studentRecords.forEach((r) => { if (r.academicYear) set.add(r.academicYear); });
+    students.forEach((st) => { if (st.academicYear) set.add(st.academicYear); });
+    if (currentAcademicYear) set.add(currentAcademicYear);
+    return Array.from(set).filter(Boolean).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  }, [academicYearOptions, academicYears, studentRecords, students, currentAcademicYear]);
+
   // Synchronize student list when props update
   useEffect(() => {
     setStudentRecords((current) => {
@@ -1095,16 +1122,19 @@ export default function FeesModule({
     setViewingReceiptRecord(record);
   };
 
-  // Search and Filters for Tracking Table
+  // Search and Filters for Tracking Table & Financial Overview
   const [searchTerm, setSearchTerm] = useState('');
   const [classFilter, setClassFilter] = useState('All');
   const [sectionFilter, setSectionFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [quarterFilter, setQuarterFilter] = useState('All');
-  const [yearFilter, setYearFilter] = useState(activeAcademicYear);
+  const [yearFilter, setYearFilter] = useState('All');
   const [selectedOverviewClass, setSelectedOverviewClass] = useState<string>('All');
+  const [overviewSectionFilter, setOverviewSectionFilter] = useState<string>('All');
+  const [overviewBatchFilter, setOverviewBatchFilter] = useState<string>('All');
+  const [overviewNameSearch, setOverviewNameSearch] = useState<string>('');
   const { data: aggregatedRevenue } = useGetSchoolRevenueQuery({
-    academicYear: activeAcademicYear,
+    academicYear: overviewBatchFilter !== 'All' ? overviewBatchFilter : (activeAcademicYear || undefined),
     className: selectedOverviewClass === 'All' ? undefined : selectedOverviewClass,
   });
   const [selectedTrackingClass, setSelectedTrackingClass] = useState<string | null>(null);
@@ -1364,16 +1394,18 @@ export default function FeesModule({
         }
 
         // Class filter
-        if (classFilter !== 'All' && record.class !== classFilter) return false;
+        const targetClass = selectedTrackingClass && selectedTrackingClass !== 'All' ? selectedTrackingClass : (classFilter !== 'All' ? classFilter : null);
+        if (targetClass && !matchClass(record.class, targetClass)) return false;
         // Section filter
-        if (sectionFilter !== 'All' && record.section !== sectionFilter) return false;
+        const targetSection = selectedTrackingSection !== 'All' ? selectedTrackingSection : (sectionFilter !== 'All' ? sectionFilter : null);
+        if (targetSection && (record.section ? record.section.toUpperCase() : 'A') !== targetSection.toUpperCase()) return false;
         // Academic Year filter
-        if (yearFilter && record.academicYear !== yearFilter) return false;
+        if (yearFilter && yearFilter !== 'All' && !matchAcademicYear(record.academicYear, yearFilter)) return false;
 
         // Combined Status & Quarter Filter
         return matchQuarterAndStatusFilter(statusFilter, quarterFilter, summary.status, quartersWithStatus);
       });
-  }, [studentRecords, searchTerm, classFilter, sectionFilter, yearFilter, statusFilter, quarterFilter, structures]);
+  }, [studentRecords, searchTerm, classFilter, selectedTrackingClass, sectionFilter, selectedTrackingSection, yearFilter, statusFilter, quarterFilter, structures]);
 
   // Class Overview Summary Data for Tracking Screen
   const trackingClassOverviewData = useMemo(() => {
@@ -1416,27 +1448,31 @@ export default function FeesModule({
 
   // Unique sections for currently selected tracking class detail view
   const selectedClassSections = useMemo(() => {
-    if (!selectedTrackingClass) return [];
+    if (!selectedTrackingClass || selectedTrackingClass === 'All') return availableSections;
     const classStudents = studentRecords.filter((r) => matchClass(r.class, selectedTrackingClass));
     const secSet = new Set<string>();
     classStudents.forEach((r) => {
       if (r.section) secSet.add(r.section.toUpperCase());
     });
-    return Array.from(secSet).sort();
-  }, [studentRecords, selectedTrackingClass]);
+    const list = Array.from(secSet).sort();
+    return list.length > 0 ? list : availableSections;
+  }, [studentRecords, selectedTrackingClass, availableSections]);
 
   // Section Groups for Selected Tracking Class Detail View
   const classDetailSectionGroups = useMemo(() => {
-    if (!selectedTrackingClass) return [];
+    if (selectedTrackingClass === null) return [];
 
-    const classStudents = studentRecords.filter((r) => matchClass(r.class, selectedTrackingClass));
+    const classStudents = selectedTrackingClass === 'All'
+      ? studentRecords
+      : studentRecords.filter((r) => matchClass(r.class, selectedTrackingClass));
 
     const map = new Map<string, typeof filteredStudentSummaries>();
     classStudents.forEach((r) => {
       const sec = r.section ? r.section.toUpperCase() : 'A';
-      if (selectedTrackingSection !== 'All' && sec !== selectedTrackingSection) return;
+      if (selectedTrackingSection !== 'All' && sec !== selectedTrackingSection.toUpperCase()) return;
 
-      const summary = getStudentFeeSummary(r);
+      // Batch / Academic Year filter
+      if (yearFilter && yearFilter !== 'All' && !matchAcademicYear(r.academicYear, yearFilter)) return;
 
       // Search term filter
       const search = searchTerm.toLowerCase().trim();
@@ -1448,6 +1484,7 @@ export default function FeesModule({
       }
 
       // Quarter & status filter
+      const summary = getStudentFeeSummary(r);
       const { quartersWithStatus, paidQuartersCount } = getStudentQuartersWithStatus(summary, r.paymentHistory);
       if (!matchQuarterAndStatusFilter(statusFilter, quarterFilter, summary.status, quartersWithStatus)) {
         return;
@@ -1478,7 +1515,7 @@ export default function FeesModule({
         totalPending,
       };
     }).sort((a, b) => a.sectionTitle.localeCompare(b.sectionTitle, undefined, { numeric: true }));
-  }, [studentRecords, structures, selectedTrackingClass, selectedTrackingSection, searchTerm, statusFilter, quarterFilter]);
+  }, [studentRecords, structures, selectedTrackingClass, selectedTrackingSection, yearFilter, searchTerm, statusFilter, quarterFilter]);
 
   const allClassDetailRows = useMemo(
     () => classDetailSectionGroups.flatMap((group) => group.students.map((row) => ({ ...row, sectionTitle: group.sectionTitle }))),
@@ -1500,19 +1537,76 @@ export default function FeesModule({
       .filter((group) => rowsBySection.has(group.sectionTitle))
       .map((group) => ({ ...group, students: rowsBySection.get(group.sectionTitle) || [] }));
   }, [classDetailSectionGroups, pageClassDetailRows]);
-  useEffect(() => setTrackingLedgerPage(1), [selectedTrackingClass, selectedTrackingSection, searchTerm, statusFilter, quarterFilter]);
+  useEffect(() => setTrackingLedgerPage(1), [selectedTrackingClass, selectedTrackingSection, yearFilter, searchTerm, statusFilter, quarterFilter]);
 
+
+  // Filtered student records based on Financial Overview filters (Class, Section, Batch, Name)
+  const overviewFilteredRecords = useMemo(() => {
+    return studentRecords.filter((r) => {
+      // 1. Class filter
+      if (selectedOverviewClass !== 'All' && !matchClass(r.class, selectedOverviewClass)) return false;
+      // 2. Section filter
+      if (overviewSectionFilter !== 'All') {
+        const sec = r.section ? r.section.toUpperCase() : 'A';
+        if (sec !== overviewSectionFilter.toUpperCase()) return false;
+      }
+      // 3. Batch / Academic Year filter
+      if (overviewBatchFilter !== 'All') {
+        if (!matchAcademicYear(r.academicYear, overviewBatchFilter)) return false;
+      }
+      // 4. Name / ID search filter
+      if (overviewNameSearch.trim()) {
+        const q = overviewNameSearch.toLowerCase().trim();
+        const matchName = r.studentName.toLowerCase().includes(q);
+        const matchAdm = r.admissionNo.toLowerCase().includes(q);
+        const matchId = r.studentId.toLowerCase().includes(q);
+        if (!matchName && !matchAdm && !matchId) return false;
+      }
+      return true;
+    });
+  }, [studentRecords, selectedOverviewClass, overviewSectionFilter, overviewBatchFilter, overviewNameSearch]);
+
+  // Aggregated cohort statistics for Financial Overview
+  const overviewCohortStats = useMemo(() => {
+    let totalExpected = 0;
+    let totalCollected = 0;
+    let totalPending = 0;
+    let paidCount = 0;
+    let partialCount = 0;
+    let unpaidCount = 0;
+
+    overviewFilteredRecords.forEach((r) => {
+      const summary = getStudentFeeSummary(r);
+      totalExpected += summary.totalFee;
+      totalCollected += summary.amountPaid;
+      totalPending += summary.pendingBalance;
+      if (summary.status === 'Paid') paidCount++;
+      else if (summary.status === 'Partially Paid') partialCount++;
+      else unpaidCount++;
+    });
+
+    return {
+      totalExpected,
+      totalCollected,
+      totalPending,
+      totalStudents: overviewFilteredRecords.length,
+      paidCount,
+      partialCount,
+      unpaidCount,
+    };
+  }, [overviewFilteredRecords, structures]);
+
+  const hasOverviewFiltersActive = selectedOverviewClass !== 'All' || overviewSectionFilter !== 'All' || overviewBatchFilter !== 'All' || Boolean(overviewNameSearch.trim());
 
   // Aggregated Overall School / Class Statistics
-
   const overallStats = {
-    totalExpected: aggregatedRevenue?.totalInvoiced || 0,
-    totalCollected: aggregatedRevenue?.totalRevenue || 0,
-    totalPending: aggregatedRevenue?.pendingReceivables || 0,
-    totalStudents: aggregatedRevenue?.studentsCount || 0,
-    paidCount: aggregatedRevenue?.paidCount || 0,
-    partialCount: aggregatedRevenue?.partialCount || 0,
-    unpaidCount: aggregatedRevenue?.unpaidCount || 0,
+    totalExpected: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.totalExpected : (aggregatedRevenue?.totalInvoiced || overviewCohortStats.totalExpected),
+    totalCollected: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.totalCollected : (aggregatedRevenue?.totalRevenue || overviewCohortStats.totalCollected),
+    totalPending: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.totalPending : (aggregatedRevenue?.pendingReceivables || overviewCohortStats.totalPending),
+    totalStudents: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.totalStudents : (aggregatedRevenue?.studentsCount || overviewCohortStats.totalStudents),
+    paidCount: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.paidCount : (aggregatedRevenue?.paidCount ?? overviewCohortStats.paidCount),
+    partialCount: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.partialCount : (aggregatedRevenue?.partialCount ?? overviewCohortStats.partialCount),
+    unpaidCount: hasOverviewFiltersActive || !aggregatedRevenue ? overviewCohortStats.unpaidCount : (aggregatedRevenue?.unpaidCount ?? overviewCohortStats.unpaidCount),
   };
 
   // Aggregated Quarterly Fee Set & Collection Distribution Stats
@@ -1651,6 +1745,28 @@ export default function FeesModule({
     { name: 'Partially Paid', value: overallStats.partialCount, color: '#f59e0b' },
     { name: 'Unpaid', value: overallStats.unpaidCount, color: '#ef4444' },
   ], [overallStats]);
+
+  // Navigate directly to student fee tracking tab with pre-applied status filter & cohort context
+  const navigateToTrackingWithStatus = (targetStatus: 'All' | 'Paid' | 'Partially Paid' | 'Unpaid') => {
+    setStatusFilter(targetStatus);
+    setQuarterFilter('All');
+    setSearchTerm(overviewNameSearch);
+    setSectionFilter(overviewSectionFilter);
+    setSelectedTrackingSection(overviewSectionFilter);
+    setYearFilter(overviewBatchFilter);
+
+    if (selectedOverviewClass && selectedOverviewClass !== 'All') {
+      setClassFilter(selectedOverviewClass);
+      setSelectedTrackingClass(selectedOverviewClass);
+    } else if (trackingClassOverviewData.length === 1) {
+      setClassFilter(trackingClassOverviewData[0].cleanClass);
+      setSelectedTrackingClass(trackingClassOverviewData[0].cleanClass);
+    } else {
+      setClassFilter('All');
+      setSelectedTrackingClass('All');
+    }
+    setActiveAdminTab('tracking');
+  };
 
   const openFeeExportOptions = (className = 'All', scope: 'all' | 'filtered' = 'all') => {
     setFeeExportClass(className || 'All');
@@ -2189,6 +2305,30 @@ export default function FeesModule({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-center">
+          {/* Top-Level Particular Class Filter */}
+          <div className="h-9 inline-flex items-center gap-1.5 bg-slate-100 pl-2.5 pr-1.5 rounded-xl border border-slate-200/80 shadow-2xs">
+            <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">Class:</span>
+            <select
+              value={selectedOverviewClass}
+              onChange={(e) => {
+                const newCls = e.target.value;
+                setSelectedOverviewClass(newCls);
+                if (newCls !== 'All') {
+                  setSelectedTrackingClass(newCls);
+                } else {
+                  setSelectedTrackingClass('All');
+                }
+              }}
+              className="h-7 text-xs font-black px-2 rounded-lg border border-slate-200 bg-white text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+              title="Filter Fees Invoicing by particular class"
+            >
+              <option value="All">All Classes (School-Wide)</option>
+              {availableClasses.map((c) => (
+                <option key={c} value={c}>{formatClassLabel(c)}</option>
+              ))}
+            </select>
+          </div>
+
           <button
             type="button"
             onClick={handleExportToExcel}
@@ -2279,12 +2419,58 @@ export default function FeesModule({
                 </h3>
                 <p className="text-xs text-slate-500">Click on any class block below to view its complete financial overview</p>
               </div>
-              <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-100 self-start sm:self-auto">
-                Selected: {selectedOverviewClass === 'All' ? 'All Classes (School-Wide)' : formatClassLabel(selectedOverviewClass)}
-              </span>
+              <div className="flex items-center gap-2 self-start sm:self-auto">
+                <div className="h-8 inline-flex items-center gap-1.5 bg-slate-100 pl-2.5 pr-1.5 rounded-xl border border-slate-200/80">
+                  <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">Filter Class:</span>
+                  <select
+                    value={selectedOverviewClass}
+                    onChange={(e) => setSelectedOverviewClass(e.target.value)}
+                    className="h-6 text-xs font-black px-2 rounded-lg border border-slate-200 bg-white text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                  >
+                    <option value="All">All Classes (School-Wide)</option>
+                    {availableClasses.map((c) => (
+                      <option key={c} value={c}>{formatClassLabel(c)}</option>
+                    ))}
+                  </select>
+                </div>
+                {selectedOverviewClass !== 'All' && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOverviewClass('All')}
+                    className="px-2.5 py-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors cursor-pointer"
+                  >
+                    All Classes
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 pt-1">
+              {/* All Classes (School-Wide) Block */}
+              <button
+                type="button"
+                onClick={() => setSelectedOverviewClass('All')}
+                className={`p-3.5 rounded-2xl border text-left transition-all relative overflow-hidden cursor-pointer ${
+                  selectedOverviewClass === 'All'
+                    ? 'bg-gradient-to-br from-indigo-50 to-violet-50 border-indigo-600 ring-2 ring-indigo-500/20 shadow-md'
+                    : 'bg-slate-50/70 border-slate-200 hover:border-slate-300 hover:bg-slate-100/80'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                    selectedOverviewClass === 'All' ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-700'
+                  }`}>
+                    School-Wide
+                  </span>
+                  {selectedOverviewClass === 'All' && (
+                    <CheckCircle className="w-4 h-4 text-indigo-600 shrink-0" />
+                  )}
+                </div>
+                <h4 className="font-extrabold text-slate-900 text-sm mt-2">All Classes</h4>
+                <p className="text-[11px] font-semibold text-slate-500 mt-0.5">
+                  {studentRecords.length} {studentRecords.length === 1 ? 'Student' : 'Students'}
+                </p>
+              </button>
               {/* Individual Class Blocks */}
               {availableClasses.length === 0 ? (
                 <div className="col-span-full py-8 px-4 text-center bg-slate-50/70 rounded-2xl border border-dashed border-slate-200">
@@ -2333,64 +2519,314 @@ export default function FeesModule({
             </div>
           </div>
 
+          {/* QUICK COHORT FILTER BAR (CLASS, SECTION, NAME, BATCH) */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+                  <Filter className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-black text-slate-900 uppercase tracking-wider">
+                    Financial Cohort Filters
+                  </h4>
+                  <p className="text-[11px] font-semibold text-slate-500">
+                    Filter fee metrics, expected totals, and student breakdowns by class, section, name, and batch
+                  </p>
+                </div>
+              </div>
+
+              {/* Status pill & clear button */}
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg">
+                  Matching: <strong className="text-indigo-700">{overviewFilteredRecords.length}</strong> {overviewFilteredRecords.length === 1 ? 'student' : 'students'}
+                </span>
+                {hasOverviewFiltersActive && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedOverviewClass('All');
+                      setOverviewSectionFilter('All');
+                      setOverviewBatchFilter('All');
+                      setOverviewNameSearch('');
+                    }}
+                    className="px-2.5 py-1 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset Filters</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Filter Controls Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {/* 1. Class Filter */}
+              <div>
+                <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
+                  Class
+                </label>
+                <div className="relative">
+                  <select
+                    value={selectedOverviewClass}
+                    onChange={(e) => setSelectedOverviewClass(e.target.value)}
+                    className="w-full text-xs font-bold py-2 px-3 rounded-xl border border-slate-200 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                  >
+                    <option value="All">All Classes (School-Wide)</option>
+                    {availableClasses.map((cls) => (
+                      <option key={cls} value={cls}>
+                        {formatClassLabel(cls)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* 2. Section Filter */}
+              <div>
+                <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
+                  Section
+                </label>
+                <div className="relative">
+                  <select
+                    value={overviewSectionFilter}
+                    onChange={(e) => setOverviewSectionFilter(e.target.value)}
+                    className="w-full text-xs font-bold py-2 px-3 rounded-xl border border-slate-200 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                  >
+                    <option value="All">All Sections</option>
+                    {availableSections.map((sec) => (
+                      <option key={sec} value={sec}>
+                        Section {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* 3. Batch / Academic Year Filter */}
+              <div>
+                <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
+                  Batch / Year
+                </label>
+                <div className="relative">
+                  <select
+                    value={overviewBatchFilter}
+                    onChange={(e) => setOverviewBatchFilter(e.target.value)}
+                    className="w-full text-xs font-bold py-2 px-3 rounded-xl border border-slate-200 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                  >
+                    <option value="All">All Batches</option>
+                    {availableBatches.map((batch) => (
+                      <option key={batch} value={batch}>
+                        Batch {batch} {batch === activeAcademicYear ? '(Active)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* 4. Student Name / ID Search */}
+              <div>
+                <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
+                  Student Name / ID
+                </label>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={overviewNameSearch}
+                    onChange={(e) => setOverviewNameSearch(e.target.value)}
+                    placeholder="Search student name..."
+                    className="w-full text-xs font-semibold pl-8 pr-7 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs"
+                  />
+                  {overviewNameSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setOverviewNameSearch('')}
+                      className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 font-black text-xs cursor-pointer"
+                      title="Clear search"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* KPI CARDS GRID */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Total Expected Fees</span>
-                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
-                  <Wallet className="w-5 h-5" />
+            {/* 1. Total Expected Fees Card */}
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => navigateToTrackingWithStatus('All')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigateToTrackingWithStatus('All');
+                }
+              }}
+              className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:border-indigo-400 hover:shadow-md hover:-translate-y-0.5 transition-all text-left cursor-pointer group flex flex-col justify-between focus:outline-none focus:ring-2 focus:ring-indigo-500/40 select-none"
+              title="Click to view all student fee tracking records"
+            >
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-indigo-600 transition-colors">
+                    Total Expected Fees
+                  </span>
+                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg group-hover:bg-indigo-600 group-hover:text-white transition-all shadow-2xs">
+                    <Wallet className="w-5 h-5" />
+                  </div>
                 </div>
+                <p className="text-2xl font-black text-slate-900 mt-2">₹{overallStats.totalExpected.toLocaleString('en-IN')}</p>
+                <p className="text-xs text-slate-500 mt-1">Across all {overallStats.totalStudents} enrolled students</p>
               </div>
-              <p className="text-2xl font-black text-slate-900 mt-2">₹{overallStats.totalExpected.toLocaleString('en-IN')}</p>
-              <p className="text-xs text-slate-500 mt-1">Across all {overallStats.totalStudents} enrolled students</p>
+              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-indigo-600 group-hover:text-indigo-700">
+                <span>View all student ledgers</span>
+                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+              </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Total Collected</span>
-                <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
-                  <CheckCircle className="w-5 h-5" />
+            {/* 2. Total Collected Card */}
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => navigateToTrackingWithStatus('Paid')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigateToTrackingWithStatus('Paid');
+                }
+              }}
+              className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:border-emerald-400 hover:shadow-md hover:-translate-y-0.5 transition-all text-left cursor-pointer group flex flex-col justify-between focus:outline-none focus:ring-2 focus:ring-emerald-500/40 select-none"
+              title="Click to view all Paid student records"
+            >
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-emerald-600 transition-colors">
+                    Total Collected
+                  </span>
+                  <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg group-hover:bg-emerald-600 group-hover:text-white transition-all shadow-2xs">
+                    <CheckCircle className="w-5 h-5" />
+                  </div>
                 </div>
+                <p className="text-2xl font-black text-emerald-600 mt-2">₹{overallStats.totalCollected.toLocaleString('en-IN')}</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {overallStats.totalExpected > 0
+                    ? Math.round((overallStats.totalCollected / overallStats.totalExpected) * 100)
+                    : 0}% of expected total
+                </p>
               </div>
-              <p className="text-2xl font-black text-emerald-600 mt-2">₹{overallStats.totalCollected.toLocaleString('en-IN')}</p>
-              <p className="text-xs text-slate-500 mt-1">
-                {overallStats.totalExpected > 0
-                  ? Math.round((overallStats.totalCollected / overallStats.totalExpected) * 100)
-                  : 0}% of expected total
-              </p>
+              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-emerald-600 group-hover:text-emerald-700">
+                <span>View paid student records</span>
+                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+              </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Total Pending Balance</span>
-                <div className="p-2 bg-rose-50 text-rose-600 rounded-lg">
-                  <AlertTriangle className="w-5 h-5" />
+            {/* 3. Total Pending Balance Card */}
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => navigateToTrackingWithStatus('Unpaid')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigateToTrackingWithStatus('Unpaid');
+                }
+              }}
+              className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:border-rose-400 hover:shadow-md hover:-translate-y-0.5 transition-all text-left cursor-pointer group flex flex-col justify-between focus:outline-none focus:ring-2 focus:ring-rose-500/40 select-none"
+              title="Click to view all students with pending dues"
+            >
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-rose-600 transition-colors">
+                    Total Pending Balance
+                  </span>
+                  <div className="p-2 bg-rose-50 text-rose-600 rounded-lg group-hover:bg-rose-600 group-hover:text-white transition-all shadow-2xs">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
                 </div>
+                <p className="text-2xl font-black text-rose-600 mt-2">₹{overallStats.totalPending.toLocaleString('en-IN')}</p>
+                <p className="text-xs text-slate-500 mt-1">Outstanding dues remaining</p>
               </div>
-              <p className="text-2xl font-black text-rose-600 mt-2">₹{overallStats.totalPending.toLocaleString('en-IN')}</p>
-              <p className="text-xs text-slate-500 mt-1">Outstanding dues remaining</p>
+              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-rose-600 group-hover:text-rose-700">
+                <span>View pending dues records</span>
+                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+              </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Student Breakdown</span>
-                <div className="p-2 bg-purple-50 text-purple-600 rounded-lg">
-                  <Users className="w-5 h-5" />
+            {/* 4. Student Breakdown Card */}
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => navigateToTrackingWithStatus('All')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigateToTrackingWithStatus('All');
+                }
+              }}
+              className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:border-purple-300 hover:shadow-md hover:-translate-y-0.5 transition-all text-left cursor-pointer group flex flex-col justify-between focus:outline-none focus:ring-2 focus:ring-purple-500/40 select-none"
+              title="Click status badge to filter records, or click card to view all"
+            >
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-purple-600 transition-colors">
+                    Student Breakdown
+                  </span>
+                  <div className="p-2 bg-purple-50 text-purple-600 rounded-lg group-hover:bg-purple-600 group-hover:text-white transition-all shadow-2xs">
+                    <Users className="w-5 h-5" />
+                  </div>
                 </div>
+
+                <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigateToTrackingWithStatus('Paid');
+                    }}
+                    className="px-2.5 py-1 bg-emerald-100 hover:bg-emerald-200 active:scale-95 text-emerald-800 rounded-lg font-black text-xs transition-all cursor-pointer ring-1 ring-emerald-300/70 hover:ring-emerald-400 shadow-2xs flex items-center gap-1 group/chip"
+                    title="Click to view all Paid students"
+                  >
+                    <span>{overallStats.paidCount} Paid</span>
+                    <ArrowRight className="w-3 h-3 text-emerald-700 opacity-60 group-hover/chip:opacity-100 group-hover/chip:translate-x-0.5 transition-all" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigateToTrackingWithStatus('Partially Paid');
+                    }}
+                    className="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 active:scale-95 text-amber-800 rounded-lg font-black text-xs transition-all cursor-pointer ring-1 ring-amber-300/70 hover:ring-amber-400 shadow-2xs flex items-center gap-1 group/chip"
+                    title="Click to view all Partially Paid students"
+                  >
+                    <span>{overallStats.partialCount} Partial</span>
+                    <ArrowRight className="w-3 h-3 text-amber-700 opacity-60 group-hover/chip:opacity-100 group-hover/chip:translate-x-0.5 transition-all" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigateToTrackingWithStatus('Unpaid');
+                    }}
+                    className="px-2.5 py-1 bg-rose-100 hover:bg-rose-200 active:scale-95 text-rose-800 rounded-lg font-black text-xs transition-all cursor-pointer ring-1 ring-rose-300/70 hover:ring-rose-400 shadow-2xs flex items-center gap-1 group/chip"
+                    title="Click to view all Unpaid students"
+                  >
+                    <span>{overallStats.unpaidCount} Unpaid</span>
+                    <ArrowRight className="w-3 h-3 text-rose-700 opacity-60 group-hover/chip:opacity-100 group-hover/chip:translate-x-0.5 transition-all" />
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-500 mt-2">{overallStats.totalStudents} total students</p>
               </div>
-              <div className="flex items-center gap-2 mt-2">
-                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-black text-xs">
-                  {overallStats.paidCount} Paid
-                </span>
-                <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-black text-xs">
-                  {overallStats.partialCount} Partial
-                </span>
-                <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-black text-xs">
-                  {overallStats.unpaidCount} Unpaid
-                </span>
+
+              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-purple-600 group-hover:text-purple-700">
+                <span>Filter by status above or view all</span>
+                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
               </div>
-              <p className="text-xs text-slate-500 mt-1.5">{overallStats.totalStudents} total students</p>
             </div>
           </div>
 
@@ -2560,9 +2996,38 @@ export default function FeesModule({
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">Select a class below to view its section ledgers, fee statuses, and student records</p>
                 </div>
-                <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-3 py-1 rounded-xl border border-indigo-100 self-start sm:self-auto">
-                  {trackingClassOverviewData.length} Classes Enrolled
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedTrackingClass('All');
+                      setSelectedTrackingSection('All');
+                    }}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>View All Classes Ledgers</span>
+                  </button>
+                  {statusFilter !== 'All' && (
+                    <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-xl border border-indigo-200 flex items-center gap-1.5 shadow-2xs">
+                      <Filter className="w-3 h-3 text-indigo-600" /> Filter: <strong>{statusFilter}</strong>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStatusFilter('All');
+                        }}
+                        className="ml-1 text-indigo-500 hover:text-indigo-800 font-black cursor-pointer text-xs"
+                        title="Reset status filter to All"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  )}
+                  <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-3 py-1 rounded-xl border border-indigo-100 self-start sm:self-auto">
+                    {trackingClassOverviewData.length} Classes Enrolled
+                  </span>
+                </div>
               </div>
 
               {trackingClassOverviewData.length === 0 ? (
@@ -2641,9 +3106,13 @@ export default function FeesModule({
                     </button>
                     <div>
                       <h3 className="text-base font-extrabold text-slate-900">
-                        {formatClassLabel(selectedTrackingClass)} Fee Tracking & Section Ledgers
+                        {selectedTrackingClass === 'All' ? 'All Classes' : formatClassLabel(selectedTrackingClass)} Fee Tracking & Section Ledgers
                       </h3>
-                      <p className="text-xs text-slate-500 mt-0.5">Managing student fee ledgers and offline cash collections for {formatClassLabel(selectedTrackingClass)}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {selectedTrackingClass === 'All'
+                          ? 'Managing student fee ledgers across all enrolled classes and sections'
+                          : `Managing student fee ledgers and offline cash collections for ${formatClassLabel(selectedTrackingClass)}`}
+                      </p>
                     </div>
                   </div>
 
@@ -2680,25 +3149,85 @@ export default function FeesModule({
                 </div>
 
                 {/* SEARCH & FILTERS BAR */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                  {/* Search Input */}
-                  <div className="relative flex-1">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+                  {/* Search Input (Name, Admission, ID) */}
+                  <div className="relative flex-1 min-w-[240px]">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
                     <input
                       type="text"
                       placeholder="Search by student name, admission no, or ID..."
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full text-xs pl-9 pr-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      className="w-full text-xs pl-9 pr-8 py-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none shadow-2xs font-medium"
                     />
+                    {searchTerm && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchTerm('')}
+                        className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 font-black text-xs cursor-pointer"
+                        title="Clear search"
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
 
-                  {/* Dropdown Filters */}
+                  {/* Dropdown Filters (Class, Section, Batch, Status, Quarter) */}
                   <div className="flex flex-wrap items-center gap-2">
+                    {/* Class Filter */}
+                    <select
+                      value={selectedTrackingClass || 'All'}
+                      onChange={(e) => {
+                        setSelectedTrackingClass(e.target.value);
+                        setSelectedTrackingSection('All');
+                      }}
+                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-bold text-slate-700 bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer shadow-2xs"
+                      title="Filter by Class"
+                    >
+                      <option value="All">All Classes</option>
+                      {availableClasses.map((cls) => (
+                        <option key={cls} value={cls}>
+                          {formatClassLabel(cls)}
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* Section Filter */}
+                    <select
+                      value={selectedTrackingSection}
+                      onChange={(e) => setSelectedTrackingSection(e.target.value)}
+                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-bold text-slate-700 bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer shadow-2xs"
+                      title="Filter by Section"
+                    >
+                      <option value="All">All Sections</option>
+                      {selectedClassSections.map((sec) => (
+                        <option key={sec} value={sec}>
+                          Section {sec}
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* Batch / Academic Year Filter */}
+                    <select
+                      value={yearFilter}
+                      onChange={(e) => setYearFilter(e.target.value)}
+                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-bold text-slate-700 bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer shadow-2xs"
+                      title="Filter by Batch / Academic Year"
+                    >
+                      <option value="All">All Batches</option>
+                      {availableBatches.map((batch) => (
+                        <option key={batch} value={batch}>
+                          Batch {batch} {batch === activeAcademicYear ? '(Active)' : ''}
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* Status Filter */}
                     <select
                       value={statusFilter}
                       onChange={(e) => setStatusFilter(e.target.value)}
-                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-medium text-slate-700 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-bold text-slate-700 bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer shadow-2xs"
+                      title="Filter by Payment Status"
                     >
                       <option value="All">All Statuses</option>
                       <option value="Paid">Paid</option>
@@ -2706,10 +3235,12 @@ export default function FeesModule({
                       <option value="Unpaid">Unpaid</option>
                     </select>
 
+                    {/* Quarter Filter */}
                     <select
                       value={quarterFilter}
                       onChange={(e) => setQuarterFilter(e.target.value)}
-                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-bold text-indigo-700 bg-indigo-50/50 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      className="text-xs p-2.5 rounded-xl border border-slate-200 font-bold text-indigo-700 bg-indigo-50/60 focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer shadow-2xs"
+                      title="Filter by Quarter"
                     >
                       <option value="All">All Quarters</option>
                       <option value="Q1">Quarter 1</option>
@@ -2718,16 +3249,23 @@ export default function FeesModule({
                       <option value="Q4">Quarter 4</option>
                     </select>
 
-                    {(searchTerm || statusFilter !== 'All' || quarterFilter !== 'All') && (
+                    {/* Reset Button */}
+                    {(searchTerm || (selectedTrackingClass && selectedTrackingClass !== 'All') || selectedTrackingSection !== 'All' || yearFilter !== 'All' || statusFilter !== 'All' || quarterFilter !== 'All') && (
                       <button
+                        type="button"
                         onClick={() => {
                           setSearchTerm('');
+                          setSelectedTrackingClass('All');
+                          setSelectedTrackingSection('All');
+                          setYearFilter('All');
                           setStatusFilter('All');
                           setQuarterFilter('All');
                         }}
-                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-xl transition-all"
+                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                        title="Reset all filters to default"
                       >
-                        Reset Filters
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Reset Filters</span>
                       </button>
                     )}
 
@@ -2735,7 +3273,7 @@ export default function FeesModule({
                       type="button"
                       onClick={handleExportTrackingClassToExcel}
                       className="h-9 px-3.5 inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all shadow-2xs cursor-pointer whitespace-nowrap"
-                      title={`Export ${formatClassLabel(selectedTrackingClass)} fee invoices & ledger to Excel (.xlsx)`}
+                      title={`Export ${selectedTrackingClass === 'All' ? 'School-Wide' : formatClassLabel(selectedTrackingClass)} fee invoices & ledger to Excel (.xlsx)`}
                     >
                       <FileSpreadsheet className="w-3.5 h-3.5" />
                       <span>Export Class Ledger</span>
@@ -3044,7 +3582,21 @@ export default function FeesModule({
                 <h3 className="text-base font-extrabold text-slate-900">Class-Level Financial Summary</h3>
                 <p className="text-xs text-slate-500">Aggregated collection progress by class</p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="h-9 inline-flex items-center gap-1.5 bg-slate-100 pl-2.5 pr-1.5 rounded-xl border border-slate-200/80 shadow-2xs">
+                  <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">Filter Class:</span>
+                  <select
+                    value={selectedOverviewClass}
+                    onChange={(e) => setSelectedOverviewClass(e.target.value)}
+                    className="h-7 text-xs font-black px-2 rounded-lg border border-slate-200 bg-white text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                    title="Filter class reports by particular class"
+                  >
+                    <option value="All">All Classes</option>
+                    {availableClasses.map((c) => (
+                      <option key={c} value={c}>{formatClassLabel(c)}</option>
+                    ))}
+                  </select>
+                </div>
                 <button
                   type="button"
                   onClick={handleExportToExcel}
@@ -3077,7 +3629,9 @@ export default function FeesModule({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-medium">
-                  {classReportData.map((row) => {
+                  {classReportData
+                    .filter((row) => selectedOverviewClass === 'All' || matchClass(row.className, selectedOverviewClass))
+                    .map((row) => {
                     const percent = row.expected > 0 ? Math.round((row.collected / row.expected) * 100) : 0;
                     return (
                       <tr key={row.className} className="hover:bg-slate-50">

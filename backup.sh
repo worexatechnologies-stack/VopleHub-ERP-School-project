@@ -40,8 +40,7 @@ if ! docker compose -f docker-compose.prod.yml -p volpehub exec -T db \
 fi
 
 if [ ! -s "$temporary_dump" ] || ! docker compose -f docker-compose.prod.yml -p volpehub run --rm -T --no-deps \
-    --entrypoint python3 backup_scheduler /usr/local/bin/backup_encrypt.py decrypt < "$temporary_dump" |
-    docker compose -f docker-compose.prod.yml -p volpehub exec -T db pg_restore --list - > /dev/null; then
+    --entrypoint sh backup_scheduler -c "python3 /usr/local/bin/backup_encrypt.py decrypt | pg_restore --list > /dev/null" < "$temporary_dump"; then
     echo "Error: Backup verification failed: $temporary_dump" >&2
     rm -f "$temporary_dump"
     exit 1

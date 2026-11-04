@@ -48,7 +48,7 @@ create_backup() {
         return 1
     fi
 
-    if [ ! -s "$temporary" ] || ! python3 /usr/local/bin/backup_encrypt.py decrypt < "$temporary" | pg_restore --list - > /dev/null 2>&1; then
+    if [ ! -s "$temporary" ] || ! python3 /usr/local/bin/backup_encrypt.py decrypt < "$temporary" | pg_restore --list > /dev/null 2>&1; then
         echo "[VolpeHub Backup Scheduler] Archive verification failed; keeping existing backups" >&2
         rm -f "$temporary"
         return 1
@@ -66,7 +66,7 @@ migrate_legacy_plaintext_backups() {
         temporary="$encrypted_backup.tmp"
         echo "[VolpeHub Backup Scheduler] Encrypting legacy backup: $old_backup"
         if ! python3 /usr/local/bin/backup_encrypt.py encrypt < "$old_backup" > "$temporary" ||
-            ! python3 /usr/local/bin/backup_encrypt.py decrypt < "$temporary" | pg_restore --list - > /dev/null 2>&1; then
+            ! python3 /usr/local/bin/backup_encrypt.py decrypt < "$temporary" | pg_restore --list > /dev/null 2>&1; then
             echo "[VolpeHub Backup Scheduler] Could not validate encrypted legacy backup; preserving the original." >&2
             rm -f "$temporary"
             continue

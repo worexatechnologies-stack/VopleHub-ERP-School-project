@@ -639,6 +639,30 @@ class TurnstileLoginResponseTests(TestCase):
         self.assertFalse(is_valid)
         self.assertIn('Cloudflare', error)
 
+    def test_turnstile_accepts_dummy_hostname_for_local_hosts(self):
+        for local_host in ['localhost:8000', '127.0.0.1:8000', 'localhost', '127.0.0.1']:
+            request = RequestFactory().post('/api/v1/auth/login/', HTTP_HOST=local_host)
+            dummy_result = {'success': True, 'action': 'login', 'hostname': 'example.com'}
+            self.assertTrue(_valid_turnstile_login_response(dummy_result, request))
+
+    @override_settings(TESTING=False, DEBUG=True)
+    @patch('apps.accounts.human_verification.sys.argv', ['manage.py'])
+    def test_turnstile_accepts_dev_bypass_token_in_debug_mode(self):
+        request = RequestFactory().post('/api/v1/auth/login/', HTTP_HOST='localhost:8000')
+        is_valid, error = verify_human_token('dev-bypass-token', request)
+        self.assertTrue(is_valid)
+        self.assertIsNone(error)
+
+    @override_settings(TESTING=False, DEBUG=False, CLOUDFLARE_TURNSTILE_SECRET_KEY='dummy-secret')
+    @patch('apps.accounts.human_verification.sys.argv', ['manage.py'])
+    def test_turnstile_rejects_dev_bypass_token_in_production(self):
+        request = RequestFactory().post('/api/v1/auth/login/', HTTP_HOST='volpehub.in')
+        with patch('urllib.request.urlopen') as mock_urlopen:
+            mock_urlopen.side_effect = Exception('Network error')
+            is_valid, error = verify_human_token('dev-bypass-token', request)
+            self.assertFalse(is_valid)
+            self.assertIn('Cloudflare', error)
+
 
 class StudentCredentialRecoveryTests(TestCase):
     def setUp(self):

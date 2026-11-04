@@ -9,6 +9,7 @@ environ.Env.read_env(_DEV_BASE_DIR / '.env')
 # Development only: production settings never receive this fallback.
 os.environ.setdefault('DJANGO_SECRET_KEY', 'development-only-insecure-key-at-least-32-bytes')
 os.environ.setdefault('DATABASE_URL', 'postgres://volpehub_education:worexa@123@localhost:5432/volpehub_education')
+os.environ.setdefault('CLOUDFLARE_TURNSTILE_SECRET_KEY', '1x0000000000000000000000000000000AA')
 
 from .base import *
 
@@ -21,11 +22,26 @@ CORS_ALLOWED_ORIGINS = [
     'http://192.168.1.4:3000',
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'https://localhost:3443',
+    'https://127.0.0.1:3443',
+    'http://localhost:3443',
+    'http://127.0.0.1:3443',
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     *CORS_ALLOWED_ORIGIN_REGEXES,
-    r"^http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$",
+    r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$",
 ]
+CSRF_TRUSTED_ORIGINS = [
+    *CSRF_TRUSTED_ORIGINS,
+    'https://localhost:3443',
+    'https://127.0.0.1:3443',
+    'http://localhost:3443',
+    'http://127.0.0.1:3443',
+]
+
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 
 DEBUG = True
 # Keep the development OTP path available while Django's test runner temporarily
