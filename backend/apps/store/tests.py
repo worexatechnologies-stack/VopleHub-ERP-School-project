@@ -217,3 +217,30 @@ class StoreTests(TestCase):
         variants[0].refresh_from_db()
         self.assertEqual(variants[0].stock_quantity, 7)
         self.assertEqual(variants[0].reserved_quantity, 0)
+
+    def test_admin_can_record_cash_payment(self):
+        product = StoreProduct.objects.create(
+            school=self.school, name='Notebook Pack', sku='nb-pack-1', price='150.00', stock_quantity=10,
+        )
+        self.client.force_authenticate(self.admin)
+        order_res = self.client.post('/api/v1/store/orders/', {
+            'items': [{'productId': product.id, 'quantity': 2}],
+            'buyerName': 'Walk-in Parent',
+            'buyerPhone': '9876543210',
+            'deliveryAddress': '[Campus Counter Pickup] Counter collection',
+        }, format='json')
+        self.assertEqual(order_res.status_code, 201)
+        order_id = order_res.data['id']
+
+        cash_res = self.client.post(f'/api/v1/store/orders/{order_id}/record-cash/')
+        self.assertEqual(cash_res.status_code, 200)
+        self.assertEqual(cash_res.data['status'], 'Paid')
+        self.assertTrue(cash_res.data['paymentId'].startswith('CASH-'))
+        product.refresh_from_db()
+        self.assertEqual(product.stock_quantity, 8)
+        self.assertEqual(product.reserved_quantity, 0)
+
+        # Parent cannot call record-cash
+        self.client.force_authenticate(self.parent)
+        forbidden_res = self.client.post(f'/api/v1/store/orders/{order_id}/record-cash/')
+        self.assertEqual(forbidden_res.status_code, 403)

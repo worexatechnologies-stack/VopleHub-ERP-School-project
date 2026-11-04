@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertCircle,
   ArrowUpDown,
   BookOpen,
+  Building,
   Calendar,
   Check,
   CheckCircle2,
@@ -12,6 +13,7 @@ import {
   ExternalLink,
   FileSpreadsheet,
   Filter,
+  GraduationCap,
   LayoutGrid,
   LayoutList,
   Mail,
@@ -26,6 +28,7 @@ import {
   Search,
   Shirt,
   Sparkles,
+  Truck,
   UserRound,
   X,
   XCircle,
@@ -133,6 +136,44 @@ function getRoleBadge(role?: string) {
   };
 }
 
+export function parsePickupMode(address = ''): {
+  mode: 'Campus Pickup' | 'Classroom Handover' | 'Home Delivery' | 'Store Counter';
+  badgeLabel: string;
+  detail: string;
+  color: string;
+} {
+  if (address.includes('[Campus Counter Pickup]') || address.toLowerCase().includes('campus counter') || address.toLowerCase().includes('store counter')) {
+    return {
+      mode: 'Campus Pickup',
+      badgeLabel: 'Campus Counter',
+      detail: address.replace(/\[Campus Counter Pickup\]/gi, '').trim(),
+      color: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+    };
+  }
+  if (address.includes('[Classroom Handover]') || address.toLowerCase().includes('classroom handover') || address.toLowerCase().includes('classroom')) {
+    return {
+      mode: 'Classroom Handover',
+      badgeLabel: 'Classroom Handover',
+      detail: address.replace(/\[Classroom Handover\]/gi, '').trim(),
+      color: 'bg-sky-50 text-sky-800 border-sky-200',
+    };
+  }
+  if (address.includes('[Home Courier Delivery]') || address.toLowerCase().includes('home courier') || address.toLowerCase().includes('home delivery')) {
+    return {
+      mode: 'Home Delivery',
+      badgeLabel: 'Home Courier',
+      detail: address.replace(/\[Home Courier Delivery\]/gi, '').trim(),
+      color: 'bg-purple-50 text-purple-800 border-purple-200',
+    };
+  }
+  return {
+    mode: 'Store Counter',
+    badgeLabel: 'Store Counter',
+    detail: address || 'Standard school store counter collection',
+    color: 'bg-slate-100 text-slate-700 border-slate-200',
+  };
+}
+
 export default function StoreOrdersView({
   summary,
   isAdmin,
@@ -142,6 +183,7 @@ export default function StoreOrdersView({
 }: StoreOrdersViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [pickupFilter, setPickupFilter] = useState<'all' | 'Campus Pickup' | 'Classroom Handover' | 'Home Delivery'>('all');
   const [sortBy, setSortBy] = useState<SortOption>('newest');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [receiptOrder, setReceiptOrder] = useState<StoreOrder | null>(null);
@@ -157,6 +199,13 @@ export default function StoreOrdersView({
     ordering: sortBy,
   });
   const orders = orderPage?.results || [];
+  const displayOrders = useMemo(() => {
+    if (pickupFilter === 'all') return orders;
+    return orders.filter((o) => {
+      const info = parsePickupMode(o.deliveryAddress);
+      return info.mode === pickupFilter;
+    });
+  }, [orders, pickupFilter]);
   const [fulfillOrder, { isLoading: isFulfilling }] = useFulfillStoreOrderMutation();
   const [unfulfillOrder, { isLoading: isUnfulfilling }] = useUnfulfillStoreOrderMutation();
 
@@ -217,9 +266,9 @@ export default function StoreOrdersView({
   };
 
   // Filtering & Sorting
-  const filteredOrders = orders;
-  const pagedOrders = orders;
-  useEffect(() => setPage(1), [statusFilter, searchQuery, sortBy]);
+  const filteredOrders = displayOrders;
+  const pagedOrders = displayOrders;
+  useEffect(() => setPage(1), [statusFilter, searchQuery, sortBy, pickupFilter]);
 
   return (
     <div className="space-y-6">
@@ -383,8 +432,24 @@ export default function StoreOrdersView({
             )}
           </div>
 
-          {/* Right utilities: Sort + View Mode Switcher */}
-          <div className="flex items-center gap-2">
+          {/* Right utilities: Pickup Filter + Sort + View Mode Switcher */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Pickup Mode Selector */}
+            <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 shadow-2xs">
+              <Building className="h-3.5 w-3.5 text-slate-400" />
+              <span className="text-slate-400 text-[11px]">Pickup:</span>
+              <select
+                value={pickupFilter}
+                onChange={(e) => setPickupFilter(e.target.value as any)}
+                className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer"
+              >
+                <option value="all">All Modes</option>
+                <option value="Campus Pickup">🏫 Campus Counter</option>
+                <option value="Classroom Handover">🎒 Classroom Handover</option>
+                <option value="Home Delivery">🚚 Home Courier</option>
+              </select>
+            </div>
+
             {/* Sort Selector */}
             <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600">
               <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" />
@@ -648,22 +713,38 @@ export default function StoreOrdersView({
                   </div>
 
                   {/* Collection / Pickup Details Banner */}
-                  {order.deliveryAddress ? (
-                    <div className="rounded-xl border border-amber-200/90 bg-gradient-to-r from-amber-50/80 via-orange-50/50 to-amber-50/80 p-3 text-xs text-amber-900 shadow-2xs">
-                      <div className="flex items-center gap-1.5 font-black text-[11px] uppercase tracking-wider text-amber-800">
-                        <MapPin className="h-3.5 w-3.5 text-amber-600" />
-                        Pickup / Collection Note
+                  {(() => {
+                    const pickupInfo = parsePickupMode(order.deliveryAddress);
+                    return (
+                      <div className={`rounded-xl border p-3 text-xs shadow-2xs ${
+                        pickupInfo.mode === 'Campus Pickup'
+                          ? 'border-emerald-200 bg-gradient-to-r from-emerald-50/90 via-teal-50/50 to-emerald-50/90 text-emerald-950'
+                          : pickupInfo.mode === 'Classroom Handover'
+                          ? 'border-sky-200 bg-gradient-to-r from-sky-50/90 via-indigo-50/50 to-sky-50/90 text-sky-950'
+                          : pickupInfo.mode === 'Home Delivery'
+                          ? 'border-purple-200 bg-gradient-to-r from-purple-50/90 via-fuchsia-50/50 to-purple-50/90 text-purple-950'
+                          : 'border-amber-200/90 bg-gradient-to-r from-amber-50/80 via-orange-50/50 to-amber-50/80 text-amber-950'
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 font-black text-[11px] uppercase tracking-wider">
+                            {pickupInfo.mode === 'Campus Pickup' ? (
+                              <Building className="h-3.5 w-3.5 text-emerald-600" />
+                            ) : pickupInfo.mode === 'Classroom Handover' ? (
+                              <GraduationCap className="h-3.5 w-3.5 text-sky-600" />
+                            ) : pickupInfo.mode === 'Home Delivery' ? (
+                              <Truck className="h-3.5 w-3.5 text-purple-600" />
+                            ) : (
+                              <MapPin className="h-3.5 w-3.5 text-amber-600" />
+                            )}
+                            <span>{pickupInfo.badgeLabel}</span>
+                          </div>
+                        </div>
+                        <p className="mt-1 font-semibold italic pl-5">
+                          "{pickupInfo.detail}"
+                        </p>
                       </div>
-                      <p className="mt-1 font-semibold italic text-amber-950 pl-5">
-                        "{order.deliveryAddress}"
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-2.5 text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
-                      <MapPin className="h-3.5 w-3.5 text-slate-400" />
-                      Standard school store counter collection
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Ordered Items Breakdown */}
                   <div className="space-y-2">
@@ -914,16 +995,30 @@ export default function StoreOrdersView({
 
                       {/* Pickup Note */}
                       <td className="px-4 py-4">
-                        {order.deliveryAddress ? (
-                          <p
-                            className="max-w-[160px] truncate text-xs font-medium italic text-amber-800 bg-amber-50 rounded-lg px-2 py-1 border border-amber-200"
-                            title={order.deliveryAddress}
-                          >
-                            {order.deliveryAddress}
-                          </p>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">Standard counter</span>
-                        )}
+                        {(() => {
+                          const pickupInfo = parsePickupMode(order.deliveryAddress);
+                          return (
+                            <div className="flex flex-col gap-1 max-w-[170px]">
+                              <span
+                                className={`inline-flex items-center gap-1 w-fit rounded-md px-1.5 py-0.5 text-[10px] font-black border ${pickupInfo.color}`}
+                              >
+                                {pickupInfo.mode === 'Campus Pickup' ? (
+                                  <Building className="h-3 w-3 shrink-0" />
+                                ) : pickupInfo.mode === 'Classroom Handover' ? (
+                                  <GraduationCap className="h-3 w-3 shrink-0" />
+                                ) : pickupInfo.mode === 'Home Delivery' ? (
+                                  <Truck className="h-3 w-3 shrink-0" />
+                                ) : (
+                                  <MapPin className="h-3 w-3 shrink-0" />
+                                )}
+                                <span>{pickupInfo.badgeLabel}</span>
+                              </span>
+                              <p className="truncate text-[11px] font-medium text-slate-500 italic" title={order.deliveryAddress}>
+                                {pickupInfo.detail}
+                              </p>
+                            </div>
+                          );
+                        })()}
                       </td>
 
                       {/* Date */}

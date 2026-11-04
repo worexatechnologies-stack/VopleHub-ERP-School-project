@@ -33,8 +33,15 @@ class StoreProductSerializer(serializers.ModelSerializer):
         if self.instance and 'stock_quantity' in attrs and attrs['stock_quantity'] < self.instance.reserved_quantity:
             raise serializers.ValidationError({'stockQuantity': f'Stock cannot be lower than the {self.instance.reserved_quantity} units currently reserved.'})
         target_classes = attrs.get('target_classes', getattr(self.instance, 'target_classes', []))
-        if not isinstance(target_classes, list) or any(str(value) not in {str(grade) for grade in range(1, 11)} for value in target_classes):
-            raise serializers.ValidationError({'targetClasses': 'Choose grades from 1 to 10.'})
+        if not isinstance(target_classes, list) or any(
+            not isinstance(value, str)
+            or not (
+                (value.strip().isdigit() and 1 <= int(value.strip()) <= 12)
+                or value.strip().upper() in {'NUR', 'LKG', 'UKG', 'PRE-KG', 'KG', 'ALL'}
+            )
+            for value in target_classes
+        ):
+            raise serializers.ValidationError({'targetClasses': 'Choose grades from 1 to 12 or preschool.'})
         category = attrs.get('category', getattr(self.instance, 'category', 'Other'))
         uniform_type = attrs.get('uniform_type', getattr(self.instance, 'uniform_type', ''))
         size_label = attrs.get('size_label', getattr(self.instance, 'size_label', ''))

@@ -315,6 +315,15 @@ class StoreOrderViewSet(TenantScopedViewSet):
             _mark_order_paid(order, payment_id=f'dummy_payment_{uuid.uuid4().hex}')
         return Response(StoreOrderSerializer(order, context={'request': request}).data)
 
+    @action(detail=True, methods=['post'], url_path='record-cash')
+    def record_cash(self, request, pk=None):
+        if not _is_school_admin(request.user):
+            return Response({'detail': 'Only school admins can record cash payments.'}, status=status.HTTP_403_FORBIDDEN)
+        with transaction.atomic():
+            order = StoreOrder.objects.select_for_update().get(pk=self.get_object().pk)
+            _mark_order_paid(order, payment_id=f'CASH-{uuid.uuid4().hex[:8].upper()}')
+        return Response(StoreOrderSerializer(order, context={'request': request}).data)
+
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         with transaction.atomic():

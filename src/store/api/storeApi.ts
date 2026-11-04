@@ -147,6 +147,10 @@ export const storeApi = baseApi.injectEndpoints({
       query: (id) => ({ url: `/store/orders/${id}/demo-complete/`, method: 'POST' }),
       invalidatesTags: ['StoreProduct', 'StoreOrder'],
     }),
+    recordCashStorePayment: build.mutation<StoreOrder, number>({
+      query: (id) => ({ url: `/store/orders/${id}/record-cash/`, method: 'POST' }),
+      invalidatesTags: ['StoreProduct', 'StoreOrder'],
+    }),
     fulfillStoreOrder: build.mutation<StoreOrder, number>({
       query: (id) => ({ url: `/store/orders/${id}/fulfill/`, method: 'POST' }),
       invalidatesTags: ['StoreOrder'],
@@ -176,6 +180,7 @@ export const {
   useCreateStoreOrderMutation,
   useVerifyStorePaymentMutation,
   useCompleteDemoStorePaymentMutation,
+  useRecordCashStorePaymentMutation,
   useFulfillStoreOrderMutation,
   useUnfulfillStoreOrderMutation,
   useGetStorePaymentSettingsQuery,
