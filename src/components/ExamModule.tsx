@@ -105,6 +105,7 @@ const DEFAULT_HALL_TICKET_SETTINGS: HallTicketSettings = {
     'Electronic gadgets including mobile phones, smartwatches, and programmable calculators are strictly prohibited.',
     'Follow all instructions given by the invigilator and maintain absolute silence in the examination room.',
   ],
+  showStudentPhoto: true,
   showAdmissionNo: true,
   showClassSection: true,
   showRollNumber: true,
@@ -169,6 +170,100 @@ interface SubjectFormRow {
   startTime: string;
   endTime: string;
   maxMarks: number;
+}
+
+function CandidatePhoto({
+  photoUrl,
+  studentName,
+  rollNo,
+  admissionNo,
+  accentColor,
+  layout = 'classic',
+}: {
+  photoUrl?: string;
+  studentName: string;
+  rollNo?: number | string;
+  admissionNo?: string;
+  accentColor?: string;
+  layout?: 'classic' | 'compact';
+}) {
+  const [imageError, setImageError] = useState(false);
+  const initials = useMemo(() => {
+    return (studentName || 'ST')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((n) => n[0])
+      .slice(0, 2)
+      .join('')
+      .toUpperCase();
+  }, [studentName]);
+
+  const hue = useMemo(() => {
+    let hash = 0;
+    const str = studentName || 'Student';
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return Math.abs(hash) % 360;
+  }, [studentName]);
+
+  const hasPhoto = Boolean(photoUrl && !imageError);
+
+  return (
+    <div className="hall-ticket-photo-box shrink-0 flex flex-col items-center select-none">
+      <div
+        className={`relative overflow-hidden rounded-2xl border-2 border-slate-300 bg-white shadow-2xs print:shadow-none print:border-slate-400 ${
+          layout === 'compact' ? 'w-20 h-24 sm:w-24 sm:h-28' : 'w-24 h-28 sm:w-28 sm:h-32'
+        }`}
+        style={{ borderColor: accentColor ? `${accentColor}55` : undefined }}
+      >
+        {hasPhoto ? (
+          <AuthenticatedImage
+            src={photoUrl!}
+            alt={`Passport photo of ${studentName}`}
+            className="h-full w-full object-cover"
+            onError={() => setImageError(true)}
+          />
+        ) : (
+          <div
+            className="h-full w-full flex flex-col items-center justify-between p-2 text-center"
+            style={{
+              background: `linear-gradient(145deg, hsl(${hue}, 80%, 96%) 0%, hsl(${(hue + 35) % 360}, 75%, 90%) 100%)`,
+            }}
+          >
+            <div className="w-full flex items-center justify-between text-[8px] font-black text-slate-500">
+              <span className="font-mono">{rollNo ? `#${rollNo}` : ''}</span>
+              <span className="uppercase tracking-widest text-[7px] text-slate-400">PHOTO</span>
+            </div>
+
+            <div
+              className="w-11 h-11 sm:w-12 sm:h-12 rounded-full flex items-center justify-center font-black text-sm text-white shadow-xs"
+              style={{
+                background: `linear-gradient(135deg, hsl(${hue}, 70%, 48%) 0%, hsl(${(hue + 40) % 360}, 65%, 40%) 100%)`,
+              }}
+            >
+              {initials}
+            </div>
+
+            <div className="w-full border-t border-slate-300/60 pt-0.5">
+              <p className="text-[8px] font-black text-slate-700 truncate uppercase tracking-tight">
+                {studentName.split(' ')[0]}
+              </p>
+              {admissionNo && (
+                <p className="text-[7px] font-mono text-slate-400 truncate">
+                  {admissionNo}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+      <span className="mt-1 text-[8px] sm:text-[9px] font-black uppercase tracking-wider text-slate-400 print:text-slate-600">
+        Candidate Photo
+      </span>
+    </div>
+  );
 }
 
 export default function ExamModule({
@@ -1569,6 +1664,7 @@ export default function ExamModule({
                   </section>
                   <div className="grid gap-2 sm:grid-cols-2 md:col-span-2 lg:grid-cols-4">
                     {([
+                      ['showStudentPhoto', 'Show student photo'],
                       ['showAdmissionNo', 'Show admission number'], ['showClassSection', 'Show class & section'], ['showRollNumber', 'Show roll number'],
                       ['showExamDate', 'Show exam date'], ['showExamTimings', 'Show exam timings'], ['showMaxMarks', 'Show maximum marks'], ['showVenue', 'Show venue'], ['showSignatures', 'Show signature block'],
                     ] as const).map(([key, title]) => <label key={key} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-[11px] font-semibold text-slate-700"><input type="checkbox" checked={ticketStyleDraft[key]} onChange={(event) => setTicketStyleDraft((draft) => ({ ...draft, [key]: event.target.checked }))} />{title}</label>)}
@@ -1822,6 +1918,10 @@ export default function ExamModule({
                 : filteredHallTickets
               ).map((ticket) => {
                 const ticketStudent = students.find((s) => String(s.id) === String(ticket.student_id));
+                const studentPhotoUrl =
+                  ticket.photo_url ||
+                  ticketStudent?.photoUrl ||
+                  (ticketStudent?.id ? `/api/v1/students/${ticketStudent.id}/photo/` : (ticket.student_id ? `/api/v1/students/${ticket.student_id}/photo/` : ''));
                 const feeInfo = getTicketFeeInfo(ticket);
                 const isDeselected = deselectedTicketIds.has(ticket.id);
                 const ticketSchoolName =
@@ -1969,24 +2069,54 @@ export default function ExamModule({
                     </div>
                   </div>
 
-                  {/* Student Credentials Grid */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-                    <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.candidateName}</p>
-                      <p className="text-sm font-black text-slate-900">{ticket.student_name}</p>
+                  {/* Student Credentials & Candidate Photo Section */}
+                  <div className="hall-ticket-student-section flex flex-col-reverse sm:flex-row items-start justify-between gap-4">
+                    <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs w-full">
+                      <div className="space-y-0.5 col-span-2 sm:col-span-2">
+                        <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.candidateName}</p>
+                        <p className="text-base font-black text-slate-900">{ticket.student_name}</p>
+                        {ticket.parent_name && (
+                          <p className="text-[11px] font-medium text-slate-500">
+                            Guardian: <span className="font-semibold text-slate-700">{ticket.parent_name}</span>
+                          </p>
+                        )}
+                      </div>
+                      {ticketSettings.showAdmissionNo && (
+                        <div className="space-y-0.5">
+                          <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.admissionNo}</p>
+                          <p className="font-mono text-xs font-extrabold text-slate-800">{ticket.admission_no || 'N/A'}</p>
+                        </div>
+                      )}
+                      {ticketSettings.showClassSection && (
+                        <div className="space-y-0.5">
+                          <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.classSection}</p>
+                          <p className="text-xs font-extrabold text-slate-800">{ticket.class_name} {ticket.section ? `- ${ticket.section}` : ''}</p>
+                        </div>
+                      )}
+                      {ticketSettings.showRollNumber && (
+                        <div className="space-y-0.5">
+                          <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.rollNumber}</p>
+                          <p className="font-mono text-xs font-black" style={{ color: ticketSettings.accentColor }}>#{ticket.roll_no}</p>
+                        </div>
+                      )}
+                      {ticket.emergency_contact && (
+                        <div className="space-y-0.5">
+                          <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Emergency Contact</p>
+                          <p className="font-mono text-xs font-semibold text-slate-700">{ticket.emergency_contact}</p>
+                        </div>
+                      )}
                     </div>
-                    {ticketSettings.showAdmissionNo && <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.admissionNo}</p>
-                      <p className="font-mono text-xs font-extrabold text-slate-800">{ticket.admission_no || 'N/A'}</p>
-                    </div>}
-                    {ticketSettings.showClassSection && <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.classSection}</p>
-                      <p className="text-xs font-extrabold text-slate-800">{ticket.class_name} {ticket.section ? `- ${ticket.section}` : ''}</p>
-                    </div>}
-                    {ticketSettings.showRollNumber && <div className="space-y-0.5">
-                      <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">{ticketLabels.rollNumber}</p>
-                      <p className="font-mono text-xs font-black" style={{ color: ticketSettings.accentColor }}>#{ticket.roll_no}</p>
-                    </div>}
+
+                    {ticketSettings.showStudentPhoto !== false && (
+                      <CandidatePhoto
+                        photoUrl={studentPhotoUrl}
+                        studentName={ticket.student_name}
+                        rollNo={ticket.roll_no}
+                        admissionNo={ticket.admission_no}
+                        accentColor={ticketSettings.accentColor}
+                        layout={ticketSettings.layout}
+                      />
+                    )}
                   </div>
 
                   {/* Scheduled Papers Table */}

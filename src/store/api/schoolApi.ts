@@ -28,6 +28,7 @@ export interface HallTicketSettings {
   showInstructions: boolean;
   footerNote: string;
   logoImageUrl: string;
+  showStudentPhoto?: boolean;
   showAdmissionNo: boolean;
   showClassSection: boolean;
   showRollNumber: boolean;

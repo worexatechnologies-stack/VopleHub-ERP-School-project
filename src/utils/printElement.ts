@@ -56,6 +56,9 @@ export function printElement(elementId: string, title: string): void {
       .hall-ticket-print-page h2 { font-size: 11pt !important; }
       .hall-ticket-print-page .grid { display: grid !important; }
       .hall-ticket-print-page .grid.grid-cols-2 { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+      .hall-ticket-print-page .hall-ticket-student-section { display: flex !important; flex-direction: row !important; justify-content: space-between !important; align-items: flex-start !important; gap: 4mm !important; }
+      .hall-ticket-print-page .hall-ticket-photo-box { width: 22mm !important; height: auto !important; }
+      .hall-ticket-print-page .hall-ticket-photo-box > div { width: 22mm !important; height: 26mm !important; border-width: 1px !important; }
       .hall-ticket-print-page .hall-ticket-invigilator-signature { width: 23mm !important; height: 10mm !important; }
       .hall-ticket-print-page .hall-ticket-controller-signature { width: 32mm !important; height: 10mm !important; }
       .hall-ticket-print-page th, .hall-ticket-print-page td { padding: 1.5mm 1mm !important; font-size: 7pt !important; }

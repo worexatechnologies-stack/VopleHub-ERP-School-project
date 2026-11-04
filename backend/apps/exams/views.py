@@ -45,6 +45,14 @@ class ExamSchedulePermission(permissions.BasePermission):
         return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
 
 
+def resolve_student_photo_url(student):
+    if not student:
+        return ''
+    if getattr(student, 'photo_content_type', None) or getattr(student, 'photo_key', None) or getattr(student, 'photo_data', None):
+        return f'/api/v1/students/{student.pk}/photo/'
+    return getattr(student, 'photo_url', '') or getattr(student, 'photoUrl', '') or ''
+
+
 class ExamScheduleViewSet(TenantScopedViewSet):
     """Tenant-scoped exam schedule CRUD and publish/unpublish lifecycle actions."""
     queryset = ExamSchedule.objects.select_related('school', 'classroom').prefetch_related('items', 'classroom__sections').order_by('-created_at')
@@ -353,7 +361,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                 'admission_no': student.admission_no,
                 'roll_no': student.roll_no or student.id,
                 'parent_name': student.parent_name or getattr(student, 'father_name', '') or getattr(student, 'mother_name', ''),
-                'photo_url': getattr(student, 'photo_url', '') or '',
+                'photo_url': resolve_student_photo_url(student),
                 'emergency_contact': student.parent_phone or '',
                 'papers': papers,
                 'status': 'released' if schedule.hall_tickets_released else ('pending_approval' if schedule.hall_tickets_generated else 'draft'),
@@ -690,7 +698,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                 'student_name': s.name,
                 'admission_no': s.admission_no,
                 'roll_no': s.roll_no or s.id,
-                'photo_url': getattr(s, 'photo_url', '') or '',
+                'photo_url': resolve_student_photo_url(s),
                 'marks': student_marks,
             })
 
@@ -1408,7 +1416,7 @@ class ExamScheduleViewSet(TenantScopedViewSet):
                 'admission_no': student.admission_no,
                 'roll_no': student.roll_no or student.id,
                 'parent_name': student.parent_name or getattr(student, 'father_name', '') or getattr(student, 'mother_name', ''),
-                'photo_url': getattr(student, 'photo_url', '') or '',
+                'photo_url': resolve_student_photo_url(student),
                 'papers': papers,
                 'total_obtained': tot_obt,
                 'total_max': tot_max,
