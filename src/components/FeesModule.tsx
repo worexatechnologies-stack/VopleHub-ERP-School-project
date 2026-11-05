@@ -38,7 +38,15 @@ import {
   FileSpreadsheet,
   Info,
   Smartphone,
-  RotateCcw
+  RotateCcw,
+  Eye,
+  EyeOff,
+  Copy,
+  ExternalLink,
+  Lock,
+  FileText,
+  Sparkles,
+  AlertCircle
 } from 'lucide-react';
 import {
   BarChart,
@@ -78,7 +86,17 @@ import ExportOptionsModal from './common/ExportOptionsModal';
 import { ListPagination } from './common/QueryStates';
 import { store } from '../store';
 import { studentApi } from '../store/api/studentApi';
-import { useGetSchoolRevenueQuery } from '../store/api/financeApi';
+import {
+  useGetSchoolRevenueQuery,
+  useGetFeePaymentSettingsQuery,
+  useUpdateFeePaymentSettingsMutation,
+  useTestFeeGatewayConnectionMutation,
+  useGetFeePaymentMetricsQuery,
+  useGetFeePaymentsListQuery,
+  useLazyGetFeePaymentReceiptQuery,
+  FeePaymentTransactionItem,
+  FeePaymentReceiptDetail,
+} from '../store/api/financeApi';
 
 // ==========================================
 // INTERFACES & MODEL TYPES
@@ -624,7 +642,54 @@ export default function FeesModule({
   // ADMIN PORTAL STATE & CONTROL
   // ------------------------------------------
   const isAdmin = ['Super Admin', 'School Admin', 'Principal', 'Accountant'].includes(currentUserRole);
-  const [activeAdminTab, setActiveAdminTab] = useState<'analytics' | 'structures' | 'tracking' | 'reports'>('analytics');
+  const [activeAdminTab, setActiveAdminTab] = useState<'analytics' | 'structures' | 'tracking' | 'reports' | 'collections' | 'gateway'>('analytics');
+
+  // Gateway Settings State & Hooks
+  const { data: gatewaySettings, isLoading: isLoadingSettings, refetch: refetchSettings } = useGetFeePaymentSettingsQuery();
+  const [updateSettings, { isLoading: isSavingSettings }] = useUpdateFeePaymentSettingsMutation();
+  const [testConnection, { isLoading: isTestingConnection }] = useTestFeeGatewayConnectionMutation();
+
+  const [gwKeyId, setGwKeyId] = useState('');
+  const [gwKeySecret, setGwKeySecret] = useState('');
+  const [gwWebhookSecret, setGwWebhookSecret] = useState('');
+  const [gwTestMode, setGwTestMode] = useState(true);
+  const [gwEnabled, setGwEnabled] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
+  const [showWebhookSecret, setShowWebhookSecret] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<{ status: 'success' | 'error' | 'warning' | null; message: string }>({ status: null, message: '' });
+  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
+
+  useEffect(() => {
+    if (gatewaySettings) {
+      setGwKeyId(gatewaySettings.keyId || '');
+      setGwTestMode(gatewaySettings.testMode);
+      setGwEnabled(gatewaySettings.enabled);
+    }
+  }, [gatewaySettings]);
+
+  // Fee Collections State & Hooks
+  const [collectionSearch, setCollectionSearch] = useState('');
+  const [collectionClass, setCollectionClass] = useState('All');
+  const [collectionStatus, setCollectionStatus] = useState('All');
+  const [collectionMethod, setCollectionMethod] = useState('All');
+  const [collectionCategory, setCollectionCategory] = useState('All');
+  const [collectionDateScope, setCollectionDateScope] = useState<'today' | 'week' | 'month' | 'all'>('all');
+  const [collectionPage, setCollectionPage] = useState(1);
+  const [selectedTxnDetails, setSelectedTxnDetails] = useState<FeePaymentTransactionItem | null>(null);
+  const [activeReceiptDetail, setActiveReceiptDetail] = useState<FeePaymentReceiptDetail | null>(null);
+  const [fetchReceipt, { isLoading: isLoadingReceipt }] = useLazyGetFeePaymentReceiptQuery();
+
+  const { data: metricsData, refetch: refetchMetrics } = useGetFeePaymentMetricsQuery();
+  const { data: paymentsListData, isLoading: isLoadingPayments, refetch: refetchPayments } = useGetFeePaymentsListQuery({
+    search: collectionSearch || undefined,
+    className: collectionClass !== 'All' ? collectionClass : undefined,
+    status: collectionStatus !== 'All' ? collectionStatus : undefined,
+    paymentMethod: collectionMethod !== 'All' ? collectionMethod : undefined,
+    category: collectionCategory !== 'All' ? collectionCategory : undefined,
+    dateScope: collectionDateScope !== 'all' ? collectionDateScope : undefined,
+    page: collectionPage,
+    pageSize: 20,
+  });
 
   // Fee Structure Creator Modal State
   const [isStructureModalOpen, setIsStructureModalOpen] = useState(false);
@@ -2279,6 +2344,160 @@ export default function FeesModule({
     );
   }
 
+  // Payment Gateway Form Handlers
+  const handleSaveGateway = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedKey = gwKeyId.trim();
+    if (!trimmedKey) {
+      emitNotification({
+        title: 'Key ID Required',
+        message: 'Please enter a valid Razorpay Key ID.',
+        tone: 'danger',
+        source: 'fees',
+      });
+      return;
+    }
+    const expectedPrefix = gwTestMode ? 'rzp_test_' : 'rzp_live_';
+    if (!trimmedKey.startsWith(expectedPrefix)) {
+      emitNotification({
+        title: 'Key ID Mode Mismatch',
+        message: `For ${gwTestMode ? 'Test' : 'Live'} mode, your Key ID must start with '${expectedPrefix}'.`,
+        tone: 'danger',
+        source: 'fees',
+      });
+      return;
+    }
+    if (!gatewaySettings?.keySecretConfigured && !gwKeySecret.trim()) {
+      emitNotification({
+        title: 'Key Secret Required',
+        message: 'Please enter your Razorpay Key Secret.',
+        tone: 'danger',
+        source: 'fees',
+      });
+      return;
+    }
+    try {
+      await updateSettings({
+        keyId: trimmedKey,
+        ...(gwKeySecret.trim() ? { keySecret: gwKeySecret.trim() } : {}),
+        ...(gwWebhookSecret.trim() ? { webhookSecret: gwWebhookSecret.trim() } : {}),
+        testMode: gwTestMode,
+        enabled: gwEnabled,
+      }).unwrap();
+      setGwKeySecret('');
+      setGwWebhookSecret('');
+      setConnectionTestResult({ status: null, message: '' });
+      emitNotification({
+        title: 'Gateway Credentials Saved',
+        message: `Razorpay payment gateway configured successfully in ${gwTestMode ? 'Test' : 'Live'} mode. Credentials encrypted at rest.`,
+        tone: 'success',
+        source: 'fees',
+      });
+      refetchSettings();
+    } catch (err: any) {
+      emitNotification({
+        title: 'Failed to Save Settings',
+        message: err?.data?.keyId?.[0] || err?.data?.detail || 'Could not save payment gateway configuration.',
+        tone: 'danger',
+        source: 'fees',
+      });
+    }
+  };
+
+  const handleTestConnection = async () => {
+    try {
+      setConnectionTestResult({ status: null, message: '' });
+      const res = await testConnection({
+        keyId: gwKeyId.trim() || undefined,
+        keySecret: gwKeySecret.trim() || undefined,
+        testMode: gwTestMode,
+      }).unwrap();
+      setConnectionTestResult({
+        status: res.status === 'warning' ? 'warning' : 'success',
+        message: res.message || 'Razorpay connection verified successfully.',
+      });
+      emitNotification({
+        title: 'Connection Test Succeeded',
+        message: res.message,
+        tone: 'success',
+        source: 'fees',
+      });
+    } catch (err: any) {
+      const msg = err?.data?.message || err?.data?.detail || 'Connection test failed. Please verify Key ID and Key Secret.';
+      setConnectionTestResult({
+        status: 'error',
+        message: msg,
+      });
+      emitNotification({
+        title: 'Connection Test Failed',
+        message: msg,
+        tone: 'danger',
+        source: 'fees',
+      });
+    }
+  };
+
+  const handleCopyWebhook = () => {
+    if (gatewaySettings?.webhookUrl) {
+      navigator.clipboard.writeText(gatewaySettings.webhookUrl);
+      setCopiedWebhookUrl(true);
+      setTimeout(() => setCopiedWebhookUrl(false), 2500);
+      emitNotification({
+        title: 'Webhook URL Copied',
+        message: 'Endpoint copied to clipboard.',
+        tone: 'info',
+        source: 'fees',
+      });
+    }
+  };
+
+  const handleExportCollections = (format: 'csv' | 'excel') => {
+    const rows = paymentsListData?.results || [];
+    if (rows.length === 0) {
+      alert('No payment transactions to export.');
+      return;
+    }
+    const headers = [
+      'Transaction ID',
+      'Gateway Payment ID',
+      'Gateway Order ID',
+      'Student Name',
+      'Admission No',
+      'Class',
+      'Section',
+      'Parent Name',
+      'Category',
+      'Amount Paid (INR)',
+      'Payment Method',
+      'Payment Date',
+      'Status',
+    ];
+    const csvRows = rows.map((p) => [
+      `"${p.transaction_id || ''}"`,
+      `"${p.gateway_payment_id || ''}"`,
+      `"${p.gateway_order_id || ''}"`,
+      `"${p.student_name || ''}"`,
+      `"${p.admission_no || ''}"`,
+      `"${p.class_name || ''}"`,
+      `"${p.section_name || ''}"`,
+      `"${p.parent_name || p.payer_name || ''}"`,
+      `"${p.category || ''}"`,
+      p.amount_paid,
+      `"${p.payment_method || ''}"`,
+      `"${p.payment_date || ''}"`,
+      `"${p.status || ''}"`,
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...csvRows.map((r) => r.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `fee_collections_${new Date().toISOString().split('T')[0]}.${format === 'csv' ? 'csv' : 'csv'}`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   // =========================================================================
   // RENDER: SCHOOL ADMIN / ACCOUNTANT PORTAL VIEW
   // =========================================================================
@@ -2401,6 +2620,33 @@ export default function FeesModule({
           }`}
         >
           <FileSpreadsheet className="w-4 h-4" /> Class Reports
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('collections')}
+          className={`py-2 px-4 rounded-xl font-bold text-xs flex items-center gap-2 transition-all whitespace-nowrap cursor-pointer ${
+            activeAdminTab === 'collections'
+              ? 'bg-orange-500 text-white shadow-xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Receipt className="w-4 h-4" /> Fee Collections
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('gateway')}
+          className={`py-2 px-4 rounded-xl font-bold text-xs flex items-center gap-2 transition-all whitespace-nowrap cursor-pointer ${
+            activeAdminTab === 'gateway'
+              ? 'bg-orange-500 text-white shadow-xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <CreditCard className="w-4 h-4" /> Razorpay Settings
+          {gatewaySettings?.isConnected ? (
+            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block ml-0.5 animate-pulse" title="Connected" />
+          ) : (
+            <span className="w-2 h-2 rounded-full bg-amber-400 inline-block ml-0.5" title="Setup needed" />
+          )}
         </button>
       </div>
 
@@ -3677,6 +3923,685 @@ export default function FeesModule({
         </div>
       )}
 
+      {/* ------------------------------------------------------------------- */}
+      {/* TAB 5: FEE COLLECTIONS & PAYMENT MANAGEMENT */}
+      {/* ------------------------------------------------------------------- */}
+      {activeAdminTab === 'collections' && (
+        <div className="space-y-6 animate-fade-in">
+          {/* KPI Metrics Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-2xs hover:shadow-xs transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Fees Collected</span>
+                <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
+                  <IndianRupee className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-slate-900 mt-2">
+                ₹{(metricsData?.totalCollected || 0).toLocaleString('en-IN')}
+              </div>
+              <div className="flex items-center gap-1.5 mt-2 text-xs font-semibold text-emerald-600">
+                <TrendingUp className="w-3.5 h-3.5" />
+                <span>{metricsData?.collectionRate || 0}% overall collection rate</span>
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-2xs hover:shadow-xs transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Today's Collections</span>
+                <div className="w-8 h-8 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center font-bold">
+                  <Calendar className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-orange-600 mt-2">
+                ₹{(metricsData?.todayCollected || 0).toLocaleString('en-IN')}
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-2">
+                Real-time transactions today
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-2xs hover:shadow-xs transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">This Month's Collections</span>
+                <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold">
+                  <BarChart3 className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-slate-900 mt-2">
+                ₹{(metricsData?.monthCollected || 0).toLocaleString('en-IN')}
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-2">
+                Current billing cycle receipts
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-2xs hover:shadow-xs transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Pending Dues</span>
+                <div className="w-8 h-8 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center font-bold">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-rose-600 mt-2">
+                ₹{(metricsData?.pendingReceivables || 0).toLocaleString('en-IN')}
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-2">
+                Outstanding fee balance
+              </div>
+            </div>
+          </div>
+
+          {/* Transaction Status Counters */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                <span className="text-xs font-bold text-slate-600">Successful</span>
+              </div>
+              <span className="text-sm font-black text-emerald-700">{metricsData?.successCount || 0}</span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                <span className="text-xs font-bold text-slate-600">Pending Orders</span>
+              </div>
+              <span className="text-sm font-black text-amber-700">{metricsData?.pendingCount || 0}</span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
+                <span className="text-xs font-bold text-slate-600">Failed</span>
+              </div>
+              <span className="text-sm font-black text-rose-700">{metricsData?.failedCount || 0}</span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-purple-500" />
+                <span className="text-xs font-bold text-slate-600">Refunded</span>
+              </div>
+              <span className="text-sm font-black text-purple-700">{metricsData?.refundedCount || 0}</span>
+            </div>
+          </div>
+
+          {/* Filter Toolbar */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="relative flex-1 min-w-[240px]">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={collectionSearch}
+                  onChange={(e) => {
+                    setCollectionSearch(e.target.value);
+                    setCollectionPage(1);
+                  }}
+                  placeholder="Search by student name, admission no, transaction ID, payment ID..."
+                  className="w-full pl-9 pr-4 py-2 text-xs font-medium rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Class Filter */}
+                <select
+                  value={collectionClass}
+                  onChange={(e) => {
+                    setCollectionClass(e.target.value);
+                    setCollectionPage(1);
+                  }}
+                  className="h-8 px-2.5 text-xs font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-orange-500 cursor-pointer"
+                >
+                  <option value="All">All Classes</option>
+                  {availableClasses.map((c) => (
+                    <option key={c} value={c}>{formatClassLabel(c)}</option>
+                  ))}
+                </select>
+
+                {/* Status Filter */}
+                <select
+                  value={collectionStatus}
+                  onChange={(e) => {
+                    setCollectionStatus(e.target.value);
+                    setCollectionPage(1);
+                  }}
+                  className="h-8 px-2.5 text-xs font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-orange-500 cursor-pointer"
+                >
+                  <option value="All">All Statuses</option>
+                  <option value="Success">Success / Paid</option>
+                  <option value="Pending">Pending</option>
+                  <option value="Failed">Failed</option>
+                  <option value="Refunded">Refunded</option>
+                </select>
+
+                {/* Payment Method */}
+                <select
+                  value={collectionMethod}
+                  onChange={(e) => {
+                    setCollectionMethod(e.target.value);
+                    setCollectionPage(1);
+                  }}
+                  className="h-8 px-2.5 text-xs font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-orange-500 cursor-pointer"
+                >
+                  <option value="All">All Methods</option>
+                  <option value="Razorpay">Razorpay Gateway</option>
+                  <option value="UPI">UPI</option>
+                  <option value="Card">Card</option>
+                  <option value="Net Banking">Net Banking</option>
+                  <option value="Cash">Cash at Counter</option>
+                </select>
+
+                {/* Date Scope */}
+                <div className="flex rounded-lg border border-slate-200 overflow-hidden text-xs">
+                  {(['all', 'today', 'week', 'month'] as const).map((scope) => (
+                    <button
+                      key={scope}
+                      type="button"
+                      onClick={() => {
+                        setCollectionDateScope(scope);
+                        setCollectionPage(1);
+                      }}
+                      className={`px-2.5 py-1 font-bold capitalize transition-colors ${
+                        collectionDateScope === scope
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-white text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {scope === 'all' ? 'All Time' : (scope === 'today' ? 'Today' : (scope === 'week' ? '7 Days' : 'This Month'))}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Export Buttons */}
+                <button
+                  type="button"
+                  onClick={() => handleExportCollections('excel')}
+                  className="h-8 px-3 inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-all shadow-2xs cursor-pointer"
+                  title="Export payments table to Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Export Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportCollections('csv')}
+                  className="h-8 px-3 inline-flex items-center gap-1.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-lg transition-all cursor-pointer"
+                  title="Export payments to CSV"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    refetchPayments();
+                    refetchMetrics();
+                  }}
+                  className="h-8 w-8 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 cursor-pointer"
+                  title="Refresh records"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Transactions Table */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-slate-50/90 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider">
+                    <th className="py-3 px-4">Transaction / Receipt</th>
+                    <th className="py-3 px-4">Razorpay Payment ID</th>
+                    <th className="py-3 px-4">Student & Class</th>
+                    <th className="py-3 px-4">Parent / Payer</th>
+                    <th className="py-3 px-4">Fee Category</th>
+                    <th className="py-3 px-4 text-right">Amount Paid</th>
+                    <th className="py-3 px-4">Method</th>
+                    <th className="py-3 px-4">Date</th>
+                    <th className="py-3 px-4 text-center">Status</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-medium">
+                  {isLoadingPayments ? (
+                    <tr>
+                      <td colSpan={10} className="py-12 text-center text-slate-400">
+                        <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-orange-500" />
+                        <span>Loading payment transactions...</span>
+                      </td>
+                    </tr>
+                  ) : (paymentsListData?.results?.length || 0) === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="py-12 text-center text-slate-400">
+                        <Receipt className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                        <p className="font-bold text-slate-600 text-sm">No payment transactions found</p>
+                        <p className="text-xs text-slate-400 mt-1">Try adjusting your filters or record a new fee payment.</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    paymentsListData?.results?.map((item) => {
+                      const isSuccess = item.status?.toLowerCase() === 'success' || item.status?.toLowerCase() === 'paid';
+                      const isFailed = item.status?.toLowerCase() === 'failed';
+                      const isPending = item.status?.toLowerCase() === 'pending';
+                      return (
+                        <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-3 px-4">
+                            <span className="font-mono font-bold text-slate-900 block">{item.receipt_no || item.transaction_id}</span>
+                            {item.receipt_no && item.transaction_id && item.receipt_no !== item.transaction_id && (
+                              <span className="text-[10px] text-slate-400 font-mono block">{item.transaction_id}</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            {item.gateway_payment_id ? (
+                              <span className="inline-flex items-center gap-1 font-mono text-[11px] font-bold px-2 py-0.5 rounded-md bg-orange-50 text-orange-700 border border-orange-200">
+                                <CreditCard className="w-3 h-3 text-orange-500" />
+                                {item.gateway_payment_id}
+                              </span>
+                            ) : (
+                              <span className="text-[11px] text-slate-400 font-mono italic">Offline / Manual</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="font-black text-slate-900 block">{item.student_name}</span>
+                            <span className="text-[11px] text-slate-500">
+                              {item.admission_no} · {item.class_name ? `Class ${item.class_name}` : ''}{item.section_name ? `-${item.section_name}` : ''}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-700">
+                            {item.parent_name || item.payer_name || 'Guardian'}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md text-[11px] font-semibold">
+                              {item.category || 'School Fee'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <span className="font-black text-slate-900 text-sm">
+                              ₹{Number(item.amount_paid).toLocaleString('en-IN')}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700">
+                              {item.payment_method}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap text-slate-600 text-[11px]">
+                            {item.payment_date}
+                          </td>
+                          <td className="py-3 px-4 text-center">
+                            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                              isSuccess ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                              isFailed ? 'bg-rose-100 text-rose-800 border border-rose-200' :
+                              isPending ? 'bg-amber-100 text-amber-800 border border-amber-200' :
+                              'bg-purple-100 text-purple-800 border border-purple-200'
+                            }`}>
+                              {item.status || 'Success'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTxnDetails(item)}
+                                className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition cursor-pointer"
+                                title="View transaction details"
+                              >
+                                <Info className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    const receipt = await fetchReceipt(item.id).unwrap();
+                                    setActiveReceiptDetail(receipt);
+                                  } catch {
+                                    alert('Failed to load official receipt.');
+                                  }
+                                }}
+                                className="p-1.5 rounded-lg bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 transition cursor-pointer"
+                                title="Print / Download receipt"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls */}
+            {((paymentsListData?.count || 0) > 20) && (
+              <div className="p-4 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
+                <span>Showing page {collectionPage} of {Math.ceil((paymentsListData?.count || 0) / 20)} ({paymentsListData?.count || 0} total records)</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    disabled={collectionPage <= 1}
+                    onClick={() => setCollectionPage((p) => Math.max(1, p - 1))}
+                    className="px-3 py-1 rounded-lg border border-slate-200 disabled:opacity-50 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    disabled={collectionPage >= Math.ceil((paymentsListData?.count || 0) / 20)}
+                    onClick={() => setCollectionPage((p) => p + 1)}
+                    className="px-3 py-1 rounded-lg border border-slate-200 disabled:opacity-50 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------- */}
+      {/* TAB 6: RAZORPAY PAYMENT GATEWAY SETTINGS */}
+      {/* ------------------------------------------------------------------- */}
+      {activeAdminTab === 'gateway' && (
+        <div className="space-y-6 max-w-4xl animate-fade-in">
+          {/* Header Card */}
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-orange-500/10 text-orange-600 flex items-center justify-center shrink-0">
+                <CreditCard className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-black text-slate-900">Razorpay Payment Gateway</h3>
+                  {gatewaySettings?.isConnected ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      Connected ({gatewaySettings.testMode ? 'Test Mode' : 'Live Mode'})
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                      <span className="w-2 h-2 rounded-full bg-slate-400" />
+                      Not Connected
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  Configure direct Razorpay payment collection for student fee payments. Multi-tenant credentials are encrypted at rest with AES-256 / Fernet cryptography.
+                </p>
+                {gatewaySettings?.updatedAt && (
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Last updated: {new Date(gatewaySettings.updatedAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={isTestingConnection || !gwKeyId.trim()}
+                className="px-4 py-2 rounded-xl border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-700 font-bold text-xs transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-2xs"
+              >
+                {isTestingConnection ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Testing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Test Connection</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Connection Test Banner if available */}
+          {connectionTestResult.status && (
+            <div className={`p-4 rounded-2xl border text-xs flex items-start gap-3 animate-fade-in ${
+              connectionTestResult.status === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : connectionTestResult.status === 'warning'
+                ? 'bg-amber-50 border-amber-200 text-amber-900'
+                : 'bg-rose-50 border-rose-200 text-rose-900'
+            }`}>
+              {connectionTestResult.status === 'success' ? (
+                <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              ) : connectionTestResult.status === 'warning' ? (
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              )}
+              <div className="flex-1">
+                <span className="font-extrabold block">
+                  {connectionTestResult.status === 'success' ? 'Connection Verified' : (connectionTestResult.status === 'warning' ? 'Configuration Notice' : 'Connection Error')}
+                </span>
+                <p className="mt-0.5">{connectionTestResult.message}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Settings Form Card */}
+          <form onSubmit={handleSaveGateway} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
+            {/* Mode Selector and Enabled Toggle */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-slate-100">
+              <div className="space-y-1.5">
+                <label className="text-xs font-black text-slate-800 uppercase tracking-wider">Gateway Environment Mode</label>
+                <div className="grid grid-cols-2 gap-2 bg-slate-100/80 p-1 rounded-xl border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setGwTestMode(true)}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      gwTestMode
+                        ? 'bg-white text-orange-600 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Test / Sandbox Mode
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGwTestMode(false)}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      !gwTestMode
+                        ? 'bg-white text-emerald-600 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Live / Production Mode
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  {gwTestMode
+                    ? 'Test Mode uses Razorpay sandbox (keys start with rzp_test_). No real funds will be charged.'
+                    : 'Live Mode processes real payments (keys start with rzp_live_). Settlements go to the school bank account.'}
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-black text-slate-800 uppercase tracking-wider">Gateway Status Toggle</label>
+                <div className="flex items-center justify-between p-3 rounded-xl border border-slate-200 bg-slate-50">
+                  <div>
+                    <span className="font-bold text-slate-800 text-xs block">Enable Razorpay Fee Payments</span>
+                    <span className="text-[11px] text-slate-500">Allow parents & students to pay online</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={gwEnabled}
+                      onChange={(e) => setGwEnabled(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500" />
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* Credential Inputs */}
+            <div className="space-y-4">
+              {/* Razorpay Key ID */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-slate-800">
+                    Razorpay Key ID <span className="text-rose-500">*</span>
+                  </label>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    {gwTestMode ? 'Must start with rzp_test_' : 'Must start with rzp_live_'}
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  required
+                  value={gwKeyId}
+                  onChange={(e) => setGwKeyId(e.target.value)}
+                  placeholder={gwTestMode ? 'rzp_test_XXXXXXXXXXXXXXXX' : 'rzp_live_XXXXXXXXXXXXXXXX'}
+                  className="w-full px-3.5 py-2.5 text-xs font-mono rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500 transition"
+                />
+              </div>
+
+              {/* Razorpay Key Secret */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-slate-800">
+                    Razorpay Key Secret <span className="text-rose-500">*</span>
+                  </label>
+                  {gatewaySettings?.keySecretConfigured && (
+                    <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1">
+                      <Lock className="w-3 h-3" /> Secret Encrypted & Stored
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <input
+                    type={showSecret ? 'text' : 'password'}
+                    value={gwKeySecret}
+                    onChange={(e) => setGwKeySecret(e.target.value)}
+                    placeholder={
+                      gatewaySettings?.keySecretConfigured
+                        ? '•••••••••••••••• (Leave blank to keep existing encrypted secret)'
+                        : 'Enter Razorpay Key Secret'
+                    }
+                    className="w-full px-3.5 py-2.5 pr-10 text-xs font-mono rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSecret(!showSecret)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  The Key Secret is never exposed to the frontend after saving. It is encrypted at rest using server-side Fernet encryption.
+                </p>
+              </div>
+
+              {/* Webhook Secret */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-slate-800">
+                    Webhook Secret (Optional but recommended)
+                  </label>
+                  {gatewaySettings?.webhookSecretConfigured && (
+                    <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1">
+                      <Check className="w-3 h-3" /> Configured
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <input
+                    type={showWebhookSecret ? 'text' : 'password'}
+                    value={gwWebhookSecret}
+                    onChange={(e) => setGwWebhookSecret(e.target.value)}
+                    placeholder={
+                      gatewaySettings?.webhookSecretConfigured
+                        ? '•••••••••••••••• (Leave blank to keep existing webhook secret)'
+                        : 'Enter secret set in Razorpay webhook dashboard'
+                    }
+                    className="w-full px-3.5 py-2.5 pr-10 text-xs font-mono rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowWebhookSecret(!showWebhookSecret)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showWebhookSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Webhook Endpoint Display */}
+              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-black text-slate-700 uppercase tracking-wider">
+                    School Webhook Endpoint URL
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyWebhook}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+                  >
+                    {copiedWebhookUrl ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="text-emerald-700">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy URL</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <div className="p-2.5 bg-white rounded-xl border border-slate-200 font-mono text-xs text-slate-800 break-all select-all">
+                  {gatewaySettings?.webhookUrl || `${window.location.origin}/api/v1/fee-structures/payments/webhook/`}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Register this URL in your Razorpay Dashboard under Settings → Webhooks. Subscribe to events: <code>payment.captured</code> and <code>payment.failed</code>.
+                </p>
+              </div>
+            </div>
+
+            {/* Security Notice Card */}
+            <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-100 flex items-start gap-3 text-xs text-indigo-900">
+              <ShieldCheck className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-extrabold block">Bank-Grade Payment Security & School Isolation</span>
+                <p className="mt-0.5 text-indigo-800/90 leading-relaxed">
+                  Payment keys are tied strictly to your school's tenant identifier and never shared across schools. Checkout transactions use HMAC-SHA256 signature verification directly on the backend to prevent tampering or overpayments.
+                </p>
+              </div>
+            </div>
+
+            {/* Save Button */}
+            <div className="pt-2 flex justify-end">
+              <button
+                type="submit"
+                disabled={isSavingSettings || !gwKeyId.trim()}
+                className="px-6 py-3 rounded-2xl bg-orange-500 hover:bg-orange-600 text-white font-extrabold text-xs shadow-md transition disabled:opacity-50 cursor-pointer flex items-center gap-2"
+              >
+                {isSavingSettings ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Saving Credentials...</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>Save Configuration</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* ========================================================================= */}
       {/* MODAL 1: STUDENT FEE LEDGER SLIDE-OVER */}
       {/* ========================================================================= */}
@@ -4771,6 +5696,244 @@ export default function FeesModule({
         </div>,
         document.body
       )}
+      {/* ========================================================================= */}
+      {/* TRANSACTION DETAILS MODAL */}
+      {/* ========================================================================= */}
+      {selectedTxnDetails && createPortal(
+        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex min-h-full items-center justify-center p-3 sm:p-5 animate-fade-in" role="presentation">
+          <div className="bg-white rounded-3xl max-w-lg w-full max-h-[90vh] flex flex-col p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150 border border-slate-100 overflow-hidden my-auto">
+            <div className="flex justify-between items-start border-b border-slate-100 pb-3 flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-orange-50 text-orange-600 flex items-center justify-center">
+                  <Receipt className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 text-base">Payment Transaction Details</h3>
+                  <p className="text-xs font-mono text-slate-500">Ref: {selectedTxnDetails.transaction_id}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedTxnDetails(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 space-y-3 text-xs pr-1">
+              <div className="grid grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-2xl border border-slate-200">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Payment Status</span>
+                  <span className={`inline-block mt-0.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                    selectedTxnDetails.status?.toLowerCase() === 'success' || selectedTxnDetails.status?.toLowerCase() === 'paid'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800'
+                  }`}>
+                    {selectedTxnDetails.status}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Amount Received</span>
+                  <span className="text-base font-black text-slate-900 block mt-0.5">
+                    ₹{Number(selectedTxnDetails.amount_paid).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Payment Method</span>
+                  <span className="font-bold text-slate-800 block mt-0.5">{selectedTxnDetails.payment_method}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Payment Date</span>
+                  <span className="font-bold text-slate-800 block mt-0.5">{selectedTxnDetails.payment_date}</span>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                <span className="text-[11px] font-black text-slate-700 uppercase tracking-wider block">Student Information</span>
+                <div className="flex justify-between py-1 border-b border-slate-200/60">
+                  <span className="text-slate-500">Student Name</span>
+                  <span className="font-bold text-slate-900">{selectedTxnDetails.student_name}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-200/60">
+                  <span className="text-slate-500">Admission No</span>
+                  <span className="font-bold text-slate-900">{selectedTxnDetails.admission_no}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-200/60">
+                  <span className="text-slate-500">Class & Section</span>
+                  <span className="font-bold text-slate-900">{selectedTxnDetails.class_name ? `Class ${selectedTxnDetails.class_name}` : ''}{selectedTxnDetails.section_name ? ` - ${selectedTxnDetails.section_name}` : ''}</span>
+                </div>
+                <div className="flex justify-between py-1">
+                  <span className="text-slate-500">Parent / Payer</span>
+                  <span className="font-bold text-slate-900">{selectedTxnDetails.parent_name || selectedTxnDetails.payer_name || 'Guardian'}</span>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2 font-mono">
+                <span className="text-[11px] font-black text-slate-700 font-sans uppercase tracking-wider block">Razorpay Gateway Audit</span>
+                <div className="flex justify-between py-1 border-b border-slate-200/60">
+                  <span className="text-slate-500 font-sans">Payment ID</span>
+                  <span className="font-bold text-orange-600">{selectedTxnDetails.gateway_payment_id || 'N/A'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-200/60">
+                  <span className="text-slate-500 font-sans">Gateway Order ID</span>
+                  <span className="font-bold text-slate-800">{selectedTxnDetails.gateway_order_id || 'N/A'}</span>
+                </div>
+                <div className="flex justify-between py-1">
+                  <span className="text-slate-500 font-sans">Receipt Ref</span>
+                  <span className="font-bold text-slate-800">{selectedTxnDetails.receipt_no || 'N/A'}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100 flex-shrink-0">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const receipt = await fetchReceipt(selectedTxnDetails.id).unwrap();
+                    setActiveReceiptDetail(receipt);
+                    setSelectedTxnDetails(null);
+                  } catch {
+                    alert('Could not load official printable receipt.');
+                  }
+                }}
+                className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white font-extrabold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>View & Print Official Receipt</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedTxnDetails(null)}
+                className="px-4 py-2 border border-slate-200 text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-50 transition cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ========================================================================= */}
+      {/* OFFICIAL PRINTABLE RECEIPT MODAL */}
+      {/* ========================================================================= */}
+      {activeReceiptDetail && createPortal(
+        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex min-h-full items-center justify-center p-3 sm:p-5 animate-fade-in" role="presentation">
+          <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[95vh] flex flex-col p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150 border border-slate-100 overflow-hidden my-auto">
+            <div className="flex justify-between items-center border-b border-slate-100 pb-3 flex-shrink-0 print:hidden">
+              <div className="flex items-center gap-2">
+                <Receipt className="w-5 h-5 text-orange-500" />
+                <h3 className="font-extrabold text-slate-900 text-base">Official Payment Receipt</h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-3.5 py-1.5 bg-orange-500 hover:bg-orange-600 text-white font-extrabold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print Receipt</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveReceiptDetail(null)}
+                  className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Printable Receipt Paper Container */}
+            <div className="overflow-y-auto flex-1 p-6 border border-slate-200 rounded-2xl bg-white space-y-5 text-slate-900">
+              {/* Receipt Header */}
+              <div className="flex justify-between items-start border-b-2 border-slate-900 pb-4">
+                <div>
+                  <h1 className="text-xl font-black tracking-tight text-slate-900 uppercase">
+                    {activeReceiptDetail.school.name || 'Demo North School'}
+                  </h1>
+                  <p className="text-xs text-slate-500 mt-0.5">{activeReceiptDetail.school.address || 'Academic Complex, Main Campus'}</p>
+                  <p className="text-[11px] text-slate-500">
+                    Phone: {activeReceiptDetail.school.phone || '+91 98765 43210'} · Email: {activeReceiptDetail.school.email || 'accounts@school.edu'}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <span className="inline-block px-3 py-1 bg-orange-100 text-orange-800 font-mono font-black text-xs rounded-lg uppercase tracking-wider">
+                    Official Fee Receipt
+                  </span>
+                  <p className="text-xs font-mono font-bold text-slate-800 mt-1">Receipt: {activeReceiptDetail.receiptNo}</p>
+                  <p className="text-[11px] text-slate-500">Date: {activeReceiptDetail.paymentDate}</p>
+                </div>
+              </div>
+
+              {/* Student & Payment Info Grid */}
+              <div className="grid grid-cols-2 gap-4 text-xs">
+                <div className="space-y-1.5 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  <span className="text-[10px] font-black uppercase text-slate-400 block tracking-wider">Student Details</span>
+                  <p className="font-extrabold text-sm text-slate-900">{activeReceiptDetail.student.name}</p>
+                  <p className="text-slate-600">Admission No: <strong className="text-slate-800">{activeReceiptDetail.student.admissionNo}</strong></p>
+                  <p className="text-slate-600">Class: <strong className="text-slate-800">{activeReceiptDetail.student.className} - {activeReceiptDetail.student.section}</strong></p>
+                  <p className="text-slate-600">Academic Session: <strong className="text-slate-800">{activeReceiptDetail.student.academicYear || '2026-2027'}</strong></p>
+                </div>
+
+                <div className="space-y-1.5 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  <span className="text-[10px] font-black uppercase text-slate-400 block tracking-wider">Payment Metadata</span>
+                  <p className="text-slate-600">Transaction ID: <strong className="font-mono text-slate-800">{activeReceiptDetail.transactionId}</strong></p>
+                  <p className="text-slate-600">Razorpay Payment ID: <strong className="font-mono text-orange-600">{activeReceiptDetail.gatewayPaymentId || 'Counter Payment'}</strong></p>
+                  <p className="text-slate-600">Payment Mode: <strong className="text-slate-800">{activeReceiptDetail.paymentMethod}</strong></p>
+                  <p className="text-slate-600">Payer Name: <strong className="text-slate-800">{activeReceiptDetail.payerName || 'Parent / Guardian'}</strong></p>
+                </div>
+              </div>
+
+              {/* Fee Breakdown Table */}
+              <div className="border border-slate-200 rounded-xl overflow-hidden text-xs">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-100 font-bold uppercase text-slate-600 border-b border-slate-200">
+                    <tr>
+                      <th className="py-2.5 px-4">Description</th>
+                      <th className="py-2.5 px-4">Installment</th>
+                      <th className="py-2.5 px-4 text-right">Amount (INR)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    <tr>
+                      <td className="py-3 px-4 font-bold text-slate-900">{activeReceiptDetail.category || 'School Tuition & Academic Fee'}</td>
+                      <td className="py-3 px-4 text-slate-600">{activeReceiptDetail.installmentType || 'Fee Payment'}</td>
+                      <td className="py-3 px-4 text-right font-black text-slate-900">₹{activeReceiptDetail.amountPaid.toLocaleString('en-IN')}</td>
+                    </tr>
+                  </tbody>
+                  <tfoot className="bg-slate-50 font-black border-t-2 border-slate-900">
+                    <tr>
+                      <td colSpan={2} className="py-2.5 px-4 text-right text-xs uppercase tracking-wider">Total Received Amount</td>
+                      <td className="py-2.5 px-4 text-right text-sm text-emerald-700">₹{activeReceiptDetail.amountPaid.toLocaleString('en-IN')}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              {/* Status Note & Signatory */}
+              <div className="pt-6 flex justify-between items-end text-xs border-t border-slate-200">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-emerald-700 font-black text-xs">
+                    <CheckCircle className="w-4 h-4" /> Payment Status: PAID IN FULL
+                  </div>
+                  <p className="text-[10px] text-slate-400">This is a system generated electronically verified digital receipt.</p>
+                </div>
+                <div className="text-center space-y-1">
+                  <div className="w-36 border-b border-slate-400 pb-1 font-serif italic text-slate-500 text-[11px]">
+                    Authorized Signatory
+                  </div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Accounts Department</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
       {isFeeExportOptionsOpen && <ExportOptionsModal
         title="Export fee records"
         description="Choose all students or the selected class, then choose the sheets for your Excel file."

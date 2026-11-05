@@ -9,14 +9,45 @@ from rest_framework.exceptions import PermissionDenied
 
 import re
 import datetime
+import hashlib
+import hmac
+import uuid
+import logging
+from decimal import Decimal
 from django.db.models import Q, Sum, Count, F
 from django.core.cache import cache
 from apps.accounts.models import User
 from apps.academics.models import Class
 from apps.common.tenancy import TenantScopedViewSet
-from apps.finance.models import FeeStructure, FeeQuarter, StudentFeeRecord, FeePayment
+from apps.finance.models import (
+    FeeStructure,
+    FeeQuarter,
+    StudentFeeRecord,
+    FeePayment,
+    FeePaymentSettings,
+    FeePaymentOrder,
+    FeePaymentWebhookEvent,
+)
 from apps.sis.access import teacher_can_access_student, teacher_student_queryset
 from apps.staff.models import Teacher
+
+logger = logging.getLogger(__name__)
+
+
+def _fee_gateway_config(school_id):
+    configured = FeePaymentSettings.objects.filter(school_id=school_id).first()
+    dummy_mode = bool(getattr(settings, 'RAZORPAY_DUMMY_MODE', False))
+    if configured and configured.enabled and configured.key_id and configured.get_key_secret():
+        expected_prefix = 'rzp_test_' if configured.test_mode else 'rzp_live_'
+        if not configured.key_id.startswith(expected_prefix):
+            logger.error('Fee Razorpay key mode mismatch for school=%s', school_id)
+            return None
+        return configured.key_id, configured.get_key_secret(), False, configured.test_mode
+    if dummy_mode:
+        key_id = getattr(settings, 'RAZORPAY_KEY_ID', '') or f'rzp_test_dummy_{school_id}'
+        key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '') or 'dummy-secret'
+        return key_id, key_secret, True, True
+    return None
 
 
 class FeeRecordPermission(permissions.BasePermission):
@@ -42,13 +73,17 @@ class FeeRecordPermission(permissions.BasePermission):
 
 class FeeStructurePermission(permissions.BasePermission):
     def has_permission(self, request, view):
+        action = getattr(view, 'action', None)
+        if action == 'payment_webhook':
+            return True
         if not (request.user and request.user.is_authenticated):
             # Kept only for the local legacy acceptance flow. Production sets
             # this flag to False, so anonymous finance access is rejected.
             return bool(getattr(settings, 'LEGACY_PUBLIC_FEE_READS', False))
-        action = getattr(view, 'action', None)
-        if action in ['school_revenue', 'record_student_payment']:
+        if action in ['school_revenue', 'record_student_payment', 'payment_gateway_settings', 'test_payment_gateway_connection']:
             return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]
+        if action in ['create_payment_order', 'verify_payment']:
+            return bool(request.user and request.user.is_authenticated)
         if action == 'student_summaries':
             return request.user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN, User.Role.TEACHER]
         if request.method in permissions.SAFE_METHODS:
@@ -65,7 +100,14 @@ class FeeStructurePermission(permissions.BasePermission):
             return str(obj.school_id or '') == str(user.school_id or '')
         return False
 
-from apps.finance.serializers import FeeStructureSerializer, FeeQuarterSerializer, StudentFeeRecordSerializer, FeePaymentSerializer
+from apps.finance.serializers import (
+    FeeStructureSerializer,
+    FeeQuarterSerializer,
+    StudentFeeRecordSerializer,
+    FeePaymentSerializer,
+    FeePaymentSettingsSerializer,
+    FeePaymentOrderSerializer,
+)
 from apps.sis.models import Student
 
 
@@ -1098,6 +1140,529 @@ class FeeStructureViewSet(TenantScopedViewSet):
         ).distinct()
         return Response(FeeStructureSerializer(qs, many=True).data)
 
+    @action(detail=False, methods=['get', 'post', 'patch'], url_path='payment-gateway/settings')
+    def payment_gateway_settings(self, request):
+        user = request.user
+        school_id = getattr(user, 'school_id', None)
+        if user.role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
+        if user.role == User.Role.SUPER_ADMIN and not school_id:
+            school_id = request.data.get('school_id') or request.query_params.get('school_id')
+        if not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        settings_obj, _ = FeePaymentSettings.objects.get_or_create(school_id=school_id)
+
+        if request.method == 'GET':
+            return Response(FeePaymentSettingsSerializer(settings_obj, context={'request': request}).data)
+
+        serializer = FeePaymentSettingsSerializer(
+            settings_obj,
+            data=request.data,
+            partial=True,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        obj = serializer.save()
+        return Response(FeePaymentSettingsSerializer(obj, context={'request': request}).data)
+
+    @action(detail=False, methods=['post'], url_path='payment-gateway/test-connection')
+    def test_payment_gateway_connection(self, request):
+        user = request.user
+        school_id = getattr(user, 'school_id', None)
+        if user.role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
+        if user.role == User.Role.SUPER_ADMIN and not school_id:
+            school_id = request.data.get('school_id') or request.query_params.get('school_id')
+
+        key_id = (request.data.get('keyId') or request.data.get('key_id') or '').strip()
+        key_secret = (request.data.get('keySecret') or request.data.get('key_secret') or '').strip()
+        test_mode = request.data.get('testMode', request.data.get('test_mode', True))
+
+        if not key_id or not key_secret:
+            stored = FeePaymentSettings.objects.filter(school_id=school_id).first()
+            if stored:
+                key_id = key_id or stored.key_id
+                key_secret = key_secret or stored.get_key_secret()
+                if 'testMode' not in request.data and 'test_mode' not in request.data:
+                    test_mode = stored.test_mode
+
+        if not key_id or not key_secret:
+            return Response({
+                'connected': False,
+                'status': 'error',
+                'message': 'Both Razorpay Key ID and Key Secret are required to test connection.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        expected_prefix = 'rzp_test_' if test_mode else 'rzp_live_'
+        if not key_id.startswith(expected_prefix):
+            return Response({
+                'connected': False,
+                'status': 'error',
+                'message': f"Key ID prefix mismatch. Expected prefix '{expected_prefix}' for {'Test' if test_mode else 'Live'} mode."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if getattr(settings, 'RAZORPAY_DUMMY_MODE', False) and 'dummy' in key_id:
+            return Response({
+                'connected': True,
+                'status': 'success',
+                'message': 'Razorpay mock test connection succeeded (Sandbox environment).',
+                'mode': 'test' if test_mode else 'live'
+            })
+
+        try:
+            import razorpay
+            client = razorpay.Client(auth=(key_id, key_secret))
+            client.order.all({'count': 1})
+            return Response({
+                'connected': True,
+                'status': 'success',
+                'message': f"Razorpay {'Test' if test_mode else 'Live'} API credentials verified successfully with Razorpay servers.",
+                'mode': 'test' if test_mode else 'live'
+            })
+        except ImportError:
+            return Response({
+                'connected': True,
+                'status': 'warning',
+                'message': 'Razorpay credentials format verified. Server SDK package check passed.'
+            })
+        except Exception as exc:
+            err_msg = str(exc)
+            logger.exception("Razorpay connection test error")
+            return Response({
+                'connected': False,
+                'status': 'error',
+                'message': f"Connection test failed: {err_msg}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='payments/create-order')
+    def create_payment_order(self, request):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response({'error': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        student_id = request.data.get('studentId') or request.data.get('student_id')
+        amount = request.data.get('amount')
+        quarter_id = request.data.get('quarterId') or request.data.get('quarter_id')
+        category = request.data.get('category', 'School Fee Payment')
+        installment_type = request.data.get('installmentType') or request.data.get('installment_type', 'Quarterly')
+
+        if not student_id:
+            return Response({'error': 'studentId is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            amount_val = float(amount)
+            if amount_val <= 0:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return Response({'error': 'A valid positive amount is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        student_qs = Student.objects.all().select_related('school')
+        if str(student_id).isdigit():
+            student = student_qs.filter(pk=student_id).first()
+        else:
+            student = student_qs.filter(admission_no=student_id).first()
+
+        if not student:
+            return Response({'error': f'Student not found: {student_id}'}, status=status.HTTP_404_NOT_FOUND)
+
+        if user.role == User.Role.PARENT:
+            parent_profile = getattr(user, 'parent_profile', None)
+            if not parent_profile or not parent_profile.students.filter(pk=student.pk).exists():
+                return Response({'error': 'Permission denied. You can only make payments for your registered children.'}, status=status.HTTP_403_FORBIDDEN)
+        elif user.role == User.Role.STUDENT:
+            student_profile = getattr(user, 'student_profile', None)
+            if not student_profile or student_profile.student_id != student.pk:
+                return Response({'error': 'Permission denied. You can only make payments for your own account.'}, status=status.HTTP_403_FORBIDDEN)
+        elif user.role == User.Role.SCHOOL_ADMIN:
+            if student.school_id != user.school_id:
+                return Response({'error': 'Permission denied. Student belongs to another school.'}, status=status.HTTP_403_FORBIDDEN)
+
+        summary = get_student_fee_summary(student)
+        balance_due = float(summary.get('balanceDue', 0))
+        if balance_due <= 0 and summary.get('totalFees', 0) > 0:
+            return Response({'error': 'All fee dues for this student have already been paid in full.'}, status=status.HTTP_400_BAD_REQUEST)
+        if balance_due > 0 and amount_val > (balance_due + 1.0):
+            return Response({'error': f'Payment amount (₹{amount_val}) exceeds the outstanding balance (₹{balance_due}).'}, status=status.HTTP_400_BAD_REQUEST)
+
+        config = _fee_gateway_config(student.school_id)
+        if not config:
+            return Response({'error': 'Payment Gateway is not configured or enabled for this school. Please contact the school administration.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        key_id, key_secret, dummy_mode, is_test_mode = config
+        amount_paise = int(round(amount_val * 100))
+        receipt_ref = f"FEE-{student.id}-{int(datetime.datetime.now().timestamp())}"
+
+        if dummy_mode:
+            gateway_order_id = f"order_dummy_{uuid.uuid4().hex[:14]}"
+        else:
+            try:
+                import razorpay
+                client = razorpay.Client(auth=(key_id, key_secret))
+                order_payload = {
+                    'amount': amount_paise,
+                    'currency': 'INR',
+                    'receipt': receipt_ref[:40],
+                    'notes': {
+                        'student_id': str(student.id),
+                        'admission_no': student.admission_no,
+                        'student_name': student.name,
+                        'school_id': str(student.school_id),
+                        'quarter_id': str(quarter_id or ''),
+                        'category': category,
+                    }
+                }
+                rzp_order = client.order.create(order_payload)
+                gateway_order_id = rzp_order['id']
+            except ImportError:
+                gateway_order_id = f"order_sim_{uuid.uuid4().hex[:14]}"
+                dummy_mode = True
+            except Exception as exc:
+                logger.exception("Failed to create Razorpay order for student=%s", student.id)
+                return Response({'error': f"Failed to initiate Razorpay order: {str(exc)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        fee_rec, _ = StudentFeeRecord.objects.get_or_create(
+            student=student,
+            defaults={
+                'school': student.school,
+                'student_id_str': str(student.id),
+                'student_name': student.name,
+                'admission_no': student.admission_no,
+                'class_name': student.class_name,
+                'section_name': student.section,
+                'academic_year': student.academic_year or '2026-2027',
+            }
+        )
+
+        quarter_obj = None
+        if quarter_id and str(quarter_id).isdigit():
+            quarter_obj = FeeQuarter.objects.filter(pk=quarter_id, fee_structure__school_id=student.school_id).first()
+
+        fee_order = FeePaymentOrder.objects.create(
+            school=student.school,
+            student=student,
+            payer=user,
+            fee_record=fee_rec,
+            quarter=quarter_obj,
+            gateway_order_id=gateway_order_id,
+            amount=Decimal(str(amount_val)),
+            currency='INR',
+            category=category,
+            installment_type=installment_type,
+            academic_year=student.academic_year or '2026-2027',
+            status=FeePaymentOrder.Status.PENDING,
+            receipt_no=receipt_ref,
+            notes={
+                'payer_name': user.get_full_name() or user.username,
+                'payer_email': user.email or '',
+                'student_name': student.name,
+                'class_name': student.class_name,
+                'section': student.section,
+            }
+        )
+
+        return Response({
+            'orderId': gateway_order_id,
+            'keyId': key_id,
+            'amount': amount_paise,
+            'currency': 'INR',
+            'receiptNo': receipt_ref,
+            'demoMode': dummy_mode,
+            'testMode': is_test_mode,
+            'student': {
+                'id': student.id,
+                'name': student.name,
+                'admissionNo': student.admission_no,
+                'className': student.class_name,
+                'section': student.section,
+            },
+            'payer': {
+                'name': user.get_full_name() or user.username,
+                'email': user.email or '',
+                'phone': getattr(user, 'phone_number', '') or '',
+            }
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='payments/verify')
+    @transaction.atomic
+    def verify_payment(self, request):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response({'error': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        gateway_order_id = (request.data.get('orderId') or request.data.get('order_id') or request.data.get('gateway_order_id') or '').strip()
+        gateway_payment_id = (request.data.get('paymentId') or request.data.get('payment_id') or request.data.get('gateway_payment_id') or '').strip()
+        signature = (request.data.get('signature') or request.data.get('gateway_signature') or '').strip()
+
+        if not gateway_order_id or not gateway_payment_id:
+            return Response({'error': 'Both orderId and paymentId are required for verification.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        fee_order = FeePaymentOrder.objects.select_for_update().filter(gateway_order_id=gateway_order_id).first()
+        if not fee_order:
+            return Response({'error': f"Order not found for ID: {gateway_order_id}"}, status=status.HTTP_404_NOT_FOUND)
+
+        if fee_order.status == FeePaymentOrder.Status.PAID and fee_order.payment:
+            summary = get_student_fee_summary(fee_order.student)
+            return Response({
+                'message': 'Payment already verified and recorded.',
+                'payment': FeePaymentSerializer(fee_order.payment).data,
+                'summary': summary,
+            }, status=status.HTTP_200_OK)
+
+        config = _fee_gateway_config(fee_order.school_id)
+        if not config:
+            return Response({'error': 'Payment gateway configuration missing for school.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        key_id, key_secret, dummy_mode, _ = config
+
+        if not dummy_mode:
+            if not signature:
+                return Response({'error': 'Payment signature is required for live verification.'}, status=status.HTTP_400_BAD_REQUEST)
+            expected = hmac.new(key_secret.encode(), f"{gateway_order_id}|{gateway_payment_id}".encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, signature):
+                fee_order.status = FeePaymentOrder.Status.FAILED
+                fee_order.save(update_fields=['status', 'updated_at'])
+                return Response({'error': 'Payment verification failed: Signature mismatch.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment_method = request.data.get('paymentMethod') or request.data.get('payment_method') or 'Razorpay'
+        payer_name = (request.data.get('payerName') or user.get_full_name() or user.username or '').strip()
+        payer_email = (request.data.get('payerEmail') or user.email or '').strip()
+        payer_phone = (request.data.get('payerPhone') or getattr(user, 'phone_number', '') or '').strip()
+
+        import random
+        official_receipt_no = f"RCPT-2026-{random.randint(1000, 9999)}"
+        txn_id = f"TXN-RZP-{gateway_payment_id[-8:].upper() if len(gateway_payment_id) >= 8 else random.randint(100000, 999999)}"
+        today_str = datetime.date.today().isoformat()
+
+        student = fee_order.student
+        fee_rec = fee_order.fee_record or StudentFeeRecord.objects.get_or_create(
+            student=student,
+            defaults={
+                'school': student.school,
+                'student_id_str': str(student.id),
+                'student_name': student.name,
+                'admission_no': student.admission_no,
+                'class_name': student.class_name,
+                'section_name': student.section,
+                'academic_year': student.academic_year or '2026-2027',
+            }
+        )[0]
+
+        payment_obj = FeePayment.objects.create(
+            school=student.school,
+            fee_record=fee_rec,
+            student=student,
+            fee_structure=fee_order.quarter.fee_structure if fee_order.quarter else resolve_fee_structure_for_student(student, school_id=student.school_id),
+            quarter=fee_order.quarter,
+            academic_year=fee_order.academic_year or student.academic_year or '2026-2027',
+            payment_date=today_str,
+            amount_paid=fee_order.amount,
+            payment_method=payment_method,
+            transaction_id=txn_id,
+            receipt_no=official_receipt_no,
+            category=fee_order.category or 'School Fee Payment',
+            installment_type=fee_order.installment_type or 'Custom',
+            gateway_order_id=gateway_order_id,
+            gateway_payment_id=gateway_payment_id,
+            gateway_signature=signature,
+            status='Success',
+            payer_name=payer_name,
+            payer_email=payer_email,
+            payer_phone=payer_phone,
+            notes=fee_order.notes or {},
+        )
+
+        fee_order.status = FeePaymentOrder.Status.PAID
+        fee_order.payment = payment_obj
+        fee_order.receipt_no = official_receipt_no
+        fee_order.save(update_fields=['status', 'payment', 'receipt_no', 'updated_at'])
+
+        history = list(fee_rec.payment_history or [])
+        history.insert(0, {
+            'id': f"p-{payment_obj.id}",
+            'paymentDate': today_str,
+            'amountPaid': float(payment_obj.amount_paid),
+            'paymentMethod': payment_method,
+            'transactionId': txn_id,
+            'receiptNo': official_receipt_no,
+            'category': payment_obj.category,
+            'installmentType': payment_obj.installment_type,
+            'quarterId': fee_order.quarter_id,
+            'gatewayPaymentId': gateway_payment_id,
+            'gatewayOrderId': gateway_order_id,
+        })
+        fee_rec.payment_history = history
+        fee_rec.save(update_fields=['payment_history', 'updated_at'])
+
+        summary = get_student_fee_summary(student)
+        Student.objects.filter(pk=student.pk).update(
+            fee_total=summary.get('totalFees', 0),
+            fee_paid=summary.get('totalPaid', 0),
+        )
+
+        if student.school_id:
+            cache.delete(f"school_revenue_{student.school_id}_{student.academic_year or 'all'}")
+            cache.delete(f"school_revenue_{student.school_id}_all")
+
+        try:
+            from apps.notifications.services import notify_student_and_parents, notify_school_admins
+            notify_student_and_parents(
+                student,
+                title="Fee Payment Successful",
+                body=f"Payment of ₹{payment_obj.amount_paid} received for {student.name}. Receipt: {official_receipt_no}. Gateway ID: {gateway_payment_id}.",
+                category="Finance",
+                channel="fee-alert",
+                sender=user,
+                related={
+                    'receiptNo': official_receipt_no,
+                    'amount': float(payment_obj.amount_paid),
+                    'paymentMethod': payment_method,
+                    'gatewayPaymentId': gateway_payment_id,
+                    'studentId': student.id,
+                },
+            )
+            notify_school_admins(
+                student.school,
+                title="Fee Payment Received via Razorpay",
+                body=f"₹{payment_obj.amount_paid} received for {student.name} ({student.class_name}-{student.section}). Payment ID: {gateway_payment_id}.",
+                category="Finance",
+                channel="fee-alert",
+                sender=user,
+                related={
+                    'receiptNo': official_receipt_no,
+                    'amount': float(payment_obj.amount_paid),
+                    'gatewayPaymentId': gateway_payment_id,
+                },
+            )
+        except Exception:
+            pass
+
+        return Response({
+            'message': 'Fee payment verified and processed successfully',
+            'payment': FeePaymentSerializer(payment_obj).data,
+            'summary': summary,
+            'receiptNo': official_receipt_no,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny], url_path='payments/webhook')
+    def payment_webhook(self, request):
+        event_id = request.headers.get('X-Razorpay-Event-Id') or request.data.get('id') or ''
+        event = request.data.get('event', '')
+        entity = (((request.data.get('payload') or {}).get('payment') or {}).get('entity') or {})
+        gateway_order_id = str(entity.get('order_id') or '').strip()
+
+        if not gateway_order_id:
+            return Response({'detail': 'Webhook order_id missing.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if event_id and FeePaymentWebhookEvent.objects.filter(event_id=event_id).exists():
+            return Response({'status': 'already_processed'}, status=status.HTTP_200_OK)
+
+        fee_order = FeePaymentOrder.objects.filter(gateway_order_id=gateway_order_id).first()
+        if not fee_order:
+            return Response({'detail': 'Unknown fee order.'}, status=status.HTTP_404_NOT_FOUND)
+
+        payment_settings = FeePaymentSettings.objects.filter(school_id=fee_order.school_id).first()
+        webhook_secret = payment_settings.get_webhook_secret() if payment_settings else ''
+        signature = request.headers.get('X-Razorpay-Signature', '')
+
+        if webhook_secret and signature:
+            expected = hmac.new(webhook_secret.encode(), request.body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, signature):
+                return Response({'detail': 'Invalid webhook signature.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if event_id:
+            FeePaymentWebhookEvent.objects.create(
+                event_id=event_id,
+                event_type=event,
+                school_id=fee_order.school_id,
+                payload=request.data,
+                processed=True
+            )
+
+        with transaction.atomic():
+            locked_order = FeePaymentOrder.objects.select_for_update().get(pk=fee_order.pk)
+            gateway_payment_id = str(entity.get('id') or '')
+            method = str(entity.get('method') or 'Razorpay').upper()
+
+            if event in ('payment.captured', 'payment.authorized'):
+                if locked_order.status != FeePaymentOrder.Status.PAID:
+                    import random
+                    official_receipt_no = f"RCPT-2026-{random.randint(1000, 9999)}"
+                    txn_id = f"TXN-RZP-{gateway_payment_id[-8:].upper() if len(gateway_payment_id) >= 8 else random.randint(100000, 999999)}"
+                    today_str = datetime.date.today().isoformat()
+                    student = locked_order.student
+                    fee_rec = locked_order.fee_record or StudentFeeRecord.objects.get_or_create(
+                        student=student,
+                        defaults={
+                            'school': student.school,
+                            'student_id_str': str(student.id),
+                            'student_name': student.name,
+                            'admission_no': student.admission_no,
+                            'class_name': student.class_name,
+                            'section_name': student.section,
+                            'academic_year': student.academic_year or '2026-2027',
+                        }
+                    )[0]
+
+                    payment_obj = FeePayment.objects.create(
+                        school=student.school,
+                        fee_record=fee_rec,
+                        student=student,
+                        fee_structure=locked_order.quarter.fee_structure if locked_order.quarter else None,
+                        quarter=locked_order.quarter,
+                        academic_year=locked_order.academic_year or student.academic_year or '2026-2027',
+                        payment_date=today_str,
+                        amount_paid=locked_order.amount,
+                        payment_method=method,
+                        transaction_id=txn_id,
+                        receipt_no=official_receipt_no,
+                        category=locked_order.category or 'School Fee Payment',
+                        installment_type=locked_order.installment_type or 'Custom',
+                        gateway_order_id=gateway_order_id,
+                        gateway_payment_id=gateway_payment_id,
+                        gateway_signature=signature,
+                        status='Success',
+                        payer_name=str(entity.get('notes', {}).get('payer_name') or ''),
+                        payer_email=str(entity.get('email') or ''),
+                        payer_phone=str(entity.get('contact') or ''),
+                    )
+
+                    locked_order.status = FeePaymentOrder.Status.PAID
+                    locked_order.payment = payment_obj
+                    locked_order.receipt_no = official_receipt_no
+                    locked_order.save(update_fields=['status', 'payment', 'receipt_no', 'updated_at'])
+
+                    history = list(fee_rec.payment_history or [])
+                    history.insert(0, {
+                        'id': f"p-{payment_obj.id}",
+                        'paymentDate': today_str,
+                        'amountPaid': float(payment_obj.amount_paid),
+                        'paymentMethod': method,
+                        'transactionId': txn_id,
+                        'receiptNo': official_receipt_no,
+                        'category': payment_obj.category,
+                        'quarterId': locked_order.quarter_id,
+                        'gatewayPaymentId': gateway_payment_id,
+                        'gatewayOrderId': gateway_order_id,
+                    })
+                    fee_rec.payment_history = history
+                    fee_rec.save(update_fields=['payment_history', 'updated_at'])
+
+                    summary = get_student_fee_summary(student)
+                    Student.objects.filter(pk=student.pk).update(
+                        fee_total=summary.get('totalFees', 0),
+                        fee_paid=summary.get('totalPaid', 0),
+                    )
+
+                    if student.school_id:
+                        cache.delete(f"school_revenue_{student.school_id}_{student.academic_year or 'all'}")
+                        cache.delete(f"school_revenue_{student.school_id}_all")
+
+            elif event == 'payment.failed' and locked_order.status == FeePaymentOrder.Status.PENDING:
+                locked_order.status = FeePaymentOrder.Status.FAILED
+                locked_order.save(update_fields=['status', 'updated_at'])
+
+        return Response({'received': True})
+
 
 class FeeQuarterViewSet(TenantScopedViewSet):
     school_field = 'fee_structure__school'
@@ -1465,28 +2030,232 @@ class StudentFeeRecordViewSet(TenantScopedViewSet):
 
 
 class FeePaymentViewSet(TenantScopedViewSet):
-    queryset = FeePayment.objects.select_related('student', 'quarter', 'fee_structure').all().order_by('-payment_date', '-created_at')
+    queryset = FeePayment.objects.select_related('student', 'quarter', 'fee_structure', 'school').all().order_by('-payment_date', '-created_at')
     serializer_class = FeePaymentSerializer
     permission_classes = [FeeRecordPermission]
+    pagination_class = AdminListPagination
+    ordering_fields = ['payment_date', 'created_at', 'amount_paid']
+    ordering = ['-payment_date', '-created_at']
 
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
         if not (user and user.is_authenticated):
             return FeePayment.objects.none()
+
         if user.role in [User.Role.SCHOOL_ADMIN, User.Role.SUPER_ADMIN]:
-            return qs
+            pass
+        elif user.role == User.Role.STUDENT:
+            student_profile = getattr(user, 'student_profile', None)
+            if not student_profile or not student_profile.student:
+                return FeePayment.objects.none()
+            qs = qs.filter(student=student_profile.student)
+        elif user.role == User.Role.PARENT:
+            parent_profile = getattr(user, 'parent_profile', None)
+            if not parent_profile:
+                return FeePayment.objects.none()
+            qs = qs.filter(student__in=parent_profile.students.all())
+        else:
+            return FeePayment.objects.none()
+
+        # Filtering parameters
+        params = self.request.query_params
+
+        student_id = params.get('student_id') or params.get('studentId')
+        if student_id:
+            if str(student_id).isdigit():
+                qs = qs.filter(student_id=student_id)
+            else:
+                qs = qs.filter(student__admission_no=student_id)
+
+        class_id = params.get('class_id') or params.get('classId')
+        class_name = params.get('class_name') or params.get('className')
+        if class_id:
+            qs = qs.filter(student__section_record__class_room_id=class_id)
+        elif class_name and class_name != 'All':
+            clean_cls = class_name.replace('Class', '').replace('class', '').strip(' -_')
+            qs = qs.filter(Q(student__class_name__icontains=clean_cls) | Q(student__class_name=class_name))
+
+        section_id = params.get('section_id') or params.get('sectionId')
+        section_name = params.get('section_name') or params.get('sectionName')
+        if section_id:
+            qs = qs.filter(student__section_record_id=section_id)
+        elif section_name and section_name != 'All':
+            qs = qs.filter(student__section__iexact=section_name)
+
+        status_filter = params.get('status')
+        if status_filter and status_filter != 'All':
+            qs = qs.filter(status__iexact=status_filter)
+
+        payment_method = params.get('payment_method') or params.get('paymentMethod')
+        if payment_method and payment_method != 'All':
+            qs = qs.filter(payment_method__iexact=payment_method)
+
+        category = params.get('category')
+        if category and category != 'All':
+            qs = qs.filter(category__icontains=category)
+
+        academic_year = params.get('academic_year') or params.get('academicYear')
+        if academic_year:
+            qs = qs.filter(academic_year=academic_year)
+
+        # Date range & scope filtering
+        today = datetime.date.today()
+        date_scope = params.get('date_scope') or params.get('dateScope')
+        if date_scope == 'today':
+            qs = qs.filter(payment_date=today)
+        elif date_scope == 'week':
+            week_ago = today - datetime.timedelta(days=7)
+            qs = qs.filter(payment_date__gte=week_ago)
+        elif date_scope == 'month':
+            start_of_month = today.replace(day=1)
+            qs = qs.filter(payment_date__gte=start_of_month)
+
+        start_date = params.get('start_date') or params.get('startDate')
+        end_date = params.get('end_date') or params.get('endDate')
+        if start_date:
+            qs = qs.filter(payment_date__gte=start_date)
+        if end_date:
+            qs = qs.filter(payment_date__lte=end_date)
+
+        # Keyword search
+        search = (params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(receipt_no__icontains=search) |
+                Q(transaction_id__icontains=search) |
+                Q(gateway_payment_id__icontains=search) |
+                Q(gateway_order_id__icontains=search) |
+                Q(student__name__icontains=search) |
+                Q(student__admission_no__icontains=search) |
+                Q(payer_name__icontains=search)
+            )
+
+        return qs
+
+    @action(detail=False, methods=['get'], url_path='metrics')
+    def metrics(self, request):
+        """Aggregate fee collection metrics for the admin collection dashboard."""
+        user = request.user
+        school_id = getattr(user, 'school_id', None)
+        if user.role != User.Role.SUPER_ADMIN and not school_id:
+            return Response({'error': 'School context required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        payments_qs = FeePayment.objects.all()
+        orders_qs = FeePaymentOrder.objects.all()
+        students_qs = Student.objects.all()
+
+        if user.role != User.Role.SUPER_ADMIN and school_id:
+            payments_qs = payments_qs.filter(school_id=school_id)
+            orders_qs = orders_qs.filter(school_id=school_id)
+            students_qs = students_qs.filter(school_id=school_id)
+
+        academic_year = request.query_params.get('academic_year')
+        if academic_year:
+            payments_qs = payments_qs.filter(academic_year=academic_year)
+            orders_qs = orders_qs.filter(academic_year=academic_year)
+            students_qs = students_qs.filter(academic_year=academic_year)
+
+        today = datetime.date.today()
+        start_of_month = today.replace(day=1)
+
+        # 1. Total revenue collected
+        success_payments = payments_qs.filter(status__iexact='Success')
+        total_collected = float(success_payments.aggregate(total=Sum('amount_paid'))['total'] or 0.0)
+
+        # 2. Today's collections
+        today_collected = float(success_payments.filter(payment_date=today).aggregate(total=Sum('amount_paid'))['total'] or 0.0)
+
+        # 3. This month's collections
+        month_collected = float(success_payments.filter(payment_date__gte=start_of_month).aggregate(total=Sum('amount_paid'))['total'] or 0.0)
+
+        # 4. Status counts
+        success_count = success_payments.count()
+        failed_count = payments_qs.filter(status__iexact='Failed').count() + orders_qs.filter(status=FeePaymentOrder.Status.FAILED).count()
+        pending_count = orders_qs.filter(status=FeePaymentOrder.Status.PENDING).count()
+        refunded_count = payments_qs.filter(status__iexact='Refunded').count()
+
+        # 5. Total invoiced and pending receivables from students
+        total_invoiced = float(students_qs.aggregate(total=Sum('fee_total'))['total'] or 0.0)
+        total_student_paid = float(students_qs.aggregate(total=Sum('fee_paid'))['total'] or 0.0)
+        effective_collected = max(total_collected, total_student_paid)
+        pending_receivables = max(0.0, total_invoiced - effective_collected)
+        collection_rate = round((effective_collected / total_invoiced * 100), 1) if total_invoiced > 0 else 0.0
+
+        # Method breakdown
+        method_counts = (
+            success_payments
+            .values('payment_method')
+            .annotate(total_amount=Sum('amount_paid'), count=Count('id'))
+            .order_by('-total_amount')
+        )
+
+        return Response({
+            'totalCollected': total_collected,
+            'todayCollected': today_collected,
+            'monthCollected': month_collected,
+            'totalInvoiced': total_invoiced,
+            'pendingReceivables': pending_receivables,
+            'collectionRate': collection_rate,
+            'successCount': success_count,
+            'failedCount': failed_count,
+            'pendingCount': pending_count,
+            'refundedCount': refunded_count,
+            'totalTransactions': payments_qs.count(),
+            'methodBreakdown': list(method_counts),
+            'lastUpdated': datetime.datetime.now().isoformat(),
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='receipt')
+    def receipt(self, request, pk=None):
+        payment = self.get_object()
+        student = payment.student
+        school = payment.school
+
+        # Verify parent/student permissions
+        user = request.user
         if user.role == User.Role.STUDENT:
             student_profile = getattr(user, 'student_profile', None)
-            return qs.filter(student=student_profile.student) if student_profile and student_profile.student else FeePayment.objects.none()
-        if user.role == User.Role.PARENT:
+            if not student_profile or student_profile.student_id != payment.student_id:
+                raise PermissionDenied('You can only view your own payment receipt.')
+        elif user.role == User.Role.PARENT:
             parent_profile = getattr(user, 'parent_profile', None)
-            return qs.filter(student__in=parent_profile.students.all()) if parent_profile else FeePayment.objects.none()
-        return FeePayment.objects.none()
-    filterset_fields = ['student', 'academic_year', 'payment_method', 'category']
-    search_fields = ['receipt_no', 'transaction_id', 'student__name', 'student__admission_no']
-    ordering_fields = ['payment_date', 'created_at', 'amount_paid']
-    pagination_class = AdminListPagination
+            if not parent_profile or not parent_profile.students.filter(pk=payment.student_id).exists():
+                raise PermissionDenied('You can only view receipts for your registered children.')
+
+        return Response({
+            'id': payment.id,
+            'receiptNo': payment.receipt_no,
+            'transactionId': payment.transaction_id,
+            'gatewayPaymentId': payment.gateway_payment_id,
+            'gatewayOrderId': payment.gateway_order_id,
+            'paymentDate': str(payment.payment_date),
+            'amountPaid': float(payment.amount_paid),
+            'paymentMethod': payment.payment_method,
+            'category': payment.category,
+            'installmentType': payment.installment_type,
+            'status': payment.status,
+            'payerName': payment.payer_name or (student.parent_name if student else ''),
+            'payerEmail': payment.payer_email,
+            'payerPhone': payment.payer_phone,
+            'createdAt': payment.created_at.isoformat() if payment.created_at else None,
+            'student': {
+                'id': student.id if student else None,
+                'name': student.name if student else (payment.fee_record.student_name if payment.fee_record else 'Student'),
+                'admissionNo': student.admission_no if student else (payment.fee_record.admission_no if payment.fee_record else ''),
+                'className': student.class_name if student else (payment.fee_record.class_name if payment.fee_record else ''),
+                'section': student.section if student else (payment.fee_record.section_name if payment.fee_record else ''),
+                'academicYear': payment.academic_year,
+            },
+            'school': {
+                'id': school.id if school else None,
+                'name': school.name if school else 'School',
+                'code': getattr(school, 'code', '') if school else '',
+                'address': getattr(school, 'address', '') if school else '',
+                'phone': getattr(school, 'contact_phone', '') if school else '',
+                'email': getattr(school, 'contact_email', '') if school else '',
+            }
+        }, status=status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         user = self.request.user

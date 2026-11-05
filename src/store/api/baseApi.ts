@@ -168,6 +168,9 @@ export const baseApi = createApi({
     'StoreProduct',
     'StoreOrder',
     'StorePaymentSettings',
+    'FeePaymentSettings',
+    'FeePayments',
+    'FeePaymentMetrics',
   ],
   endpoints: () => ({}),
 });

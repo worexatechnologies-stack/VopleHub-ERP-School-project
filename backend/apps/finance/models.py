@@ -1,4 +1,5 @@
 from django.db import models
+from django.conf import settings
 from apps.schools.models import School
 from apps.sis.models import Student
 
@@ -200,6 +201,44 @@ class StudentFeeRecord(models.Model):
     def __str__(self):
         return f"{self.student_name} ({self.admission_no}) - Fee Record"
 
+class FeePaymentSettings(models.Model):
+    """School-level Razorpay payment gateway credentials with encryption at rest."""
+    school = models.OneToOneField(School, on_delete=models.CASCADE, related_name='fee_payment_settings')
+    key_id = models.CharField(max_length=128, blank=True)
+    encrypted_key_secret = models.TextField(blank=True)
+    encrypted_webhook_secret = models.TextField(blank=True)
+    test_mode = models.BooleanField(default=True)
+    enabled = models.BooleanField(default=False)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='fee_payment_settings_updates')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def set_key_secret(self, value: str):
+        from apps.store.crypto import encrypt_secret
+        self.encrypted_key_secret = encrypt_secret(value) if value else ''
+
+    def get_key_secret(self) -> str:
+        from apps.store.crypto import decrypt_secret
+        return decrypt_secret(self.encrypted_key_secret)
+
+    def set_webhook_secret(self, value: str):
+        from apps.store.crypto import encrypt_secret
+        self.encrypted_webhook_secret = encrypt_secret(value) if value else ''
+
+    def get_webhook_secret(self) -> str:
+        from apps.store.crypto import decrypt_secret
+        return decrypt_secret(self.encrypted_webhook_secret)
+
+    @property
+    def is_connected(self) -> bool:
+        if not (self.enabled and self.key_id and self.encrypted_key_secret):
+            return False
+        expected_prefix = 'rzp_test_' if self.test_mode else 'rzp_live_'
+        return self.key_id.startswith(expected_prefix)
+
+    def __str__(self):
+        return f"{self.school.name} - Fee Payment Gateway ({'Test' if self.test_mode else 'Live'})"
+
+
 class FeePayment(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='fee_payments', null=True, blank=True)
     fee_record = models.ForeignKey(StudentFeeRecord, on_delete=models.CASCADE, related_name='payments', null=True, blank=True)
@@ -214,6 +253,14 @@ class FeePayment(models.Model):
     receipt_no = models.CharField(max_length=100)
     category = models.CharField(max_length=100, blank=True, default='School Fee Payment')
     installment_type = models.CharField(max_length=100, blank=True, default='Custom')
+    gateway_order_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    gateway_payment_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    gateway_signature = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=20, default='Success')
+    payer_name = models.CharField(max_length=160, blank=True, default='')
+    payer_email = models.CharField(max_length=160, blank=True, default='')
+    payer_phone = models.CharField(max_length=30, blank=True, default='')
+    notes = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -224,7 +271,65 @@ class FeePayment(models.Model):
             models.Index(fields=['student', 'payment_date']),
             models.Index(fields=['fee_record']),
             models.Index(fields=['school', '-payment_date', '-created_at'], name='fee_pmt_sch_dt_cr_idx'),
+            models.Index(fields=['gateway_payment_id']),
+            models.Index(fields=['gateway_order_id']),
+            models.Index(fields=['school', 'status']),
         ]
 
     def __str__(self):
         return f"Payment {self.receipt_no} - ₹{self.amount_paid}"
+
+
+class FeePaymentOrder(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'Pending', 'Pending payment'
+        PAID = 'Paid', 'Paid'
+        FAILED = 'Failed', 'Payment failed'
+        CANCELLED = 'Cancelled', 'Cancelled'
+
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='fee_payment_orders')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='fee_payment_orders')
+    payer = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='fee_payment_orders')
+    fee_record = models.ForeignKey(StudentFeeRecord, null=True, blank=True, on_delete=models.SET_NULL, related_name='payment_orders')
+    quarter = models.ForeignKey(FeeQuarter, null=True, blank=True, on_delete=models.SET_NULL, related_name='payment_orders')
+    gateway_order_id = models.CharField(max_length=100, unique=True, db_index=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default='INR')
+    category = models.CharField(max_length=100, default='School Fee Payment')
+    installment_type = models.CharField(max_length=100, default='Custom')
+    academic_year = models.CharField(max_length=50, default='2026-2027')
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    receipt_no = models.CharField(max_length=100, blank=True, default='')
+    payment = models.OneToOneField(FeePayment, null=True, blank=True, on_delete=models.SET_NULL, related_name='gateway_order')
+    notes = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['school', 'status']),
+            models.Index(fields=['student', 'status']),
+            models.Index(fields=['gateway_order_id']),
+            models.Index(fields=['school', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Order {self.gateway_order_id} - {self.student.name} (₹{self.amount})"
+
+
+class FeePaymentWebhookEvent(models.Model):
+    event_id = models.CharField(max_length=128, unique=True, db_index=True)
+    event_type = models.CharField(max_length=100)
+    school = models.ForeignKey(School, null=True, blank=True, on_delete=models.CASCADE, related_name='fee_webhook_events')
+    payload = models.JSONField(default=dict)
+    processed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['event_id']),
+            models.Index(fields=['school', 'event_type']),
+        ]
+
+    def __str__(self):
+        return f"Webhook {self.event_id} ({self.event_type})"

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
-from apps.finance.models import FeeStructure, FeeQuarter, StudentFeeRecord, FeePayment
+from apps.finance.models import FeeStructure, FeeQuarter, StudentFeeRecord, FeePayment, FeePaymentSettings, FeePaymentOrder
 from apps.academics.models import Class, Section, AcademicYear
 from apps.sis.models import Student
 
@@ -118,8 +118,71 @@ class StudentFeeRecordSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'student': 'Student must belong to this school.'})
         return attrs
 
+class FeePaymentSettingsSerializer(serializers.ModelSerializer):
+    keyId = serializers.CharField(source='key_id', required=False, allow_blank=True)
+    testMode = serializers.BooleanField(source='test_mode', required=False)
+    keySecret = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    webhookSecret = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    keySecretConfigured = serializers.SerializerMethodField()
+    webhookSecretConfigured = serializers.SerializerMethodField()
+    isConnected = serializers.BooleanField(source='is_connected', read_only=True)
+    webhookUrl = serializers.SerializerMethodField()
+    updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
+
+    class Meta:
+        model = FeePaymentSettings
+        fields = [
+            'id', 'keyId', 'testMode', 'enabled', 'keySecret', 'webhookSecret',
+            'keySecretConfigured', 'webhookSecretConfigured', 'isConnected',
+            'webhookUrl', 'updatedAt'
+        ]
+
+    def get_keySecretConfigured(self, obj) -> bool:
+        return bool(obj.encrypted_key_secret)
+
+    def get_webhookSecretConfigured(self, obj) -> bool:
+        return bool(obj.encrypted_webhook_secret)
+
+    def get_webhookUrl(self, obj) -> str:
+        request = self.context.get('request')
+        path = '/api/v1/fee-structures/payments/webhook/'
+        if request:
+            return request.build_absolute_uri(path)
+        return path
+
+    def validate(self, attrs):
+        key_id = attrs.get('key_id', getattr(self.instance, 'key_id', '') if self.instance else '')
+        test_mode = attrs.get('test_mode', getattr(self.instance, 'test_mode', True) if self.instance else True)
+        enabled = attrs.get('enabled', getattr(self.instance, 'enabled', False) if self.instance else False)
+        if enabled and key_id:
+            expected_prefix = 'rzp_test_' if test_mode else 'rzp_live_'
+            if not key_id.startswith(expected_prefix):
+                mode_str = 'Test mode' if test_mode else 'Live mode'
+                raise serializers.ValidationError({
+                    'keyId': f"Invalid Key ID for {mode_str}. Key must start with '{expected_prefix}'."
+                })
+        return attrs
+
+    def update(self, instance, validated_data):
+        key_secret = self.initial_data.get('keySecret') or self.initial_data.get('key_secret')
+        webhook_secret = self.initial_data.get('webhookSecret') or self.initial_data.get('webhook_secret')
+        if key_secret:
+            instance.set_key_secret(key_secret.strip())
+        if webhook_secret:
+            instance.set_webhook_secret(webhook_secret.strip())
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            instance.updated_by = request.user
+        return super().update(instance, validated_data)
+
+
 class FeePaymentSerializer(serializers.ModelSerializer):
     school = serializers.PrimaryKeyRelatedField(read_only=True)
+    student_name = serializers.CharField(source='student.name', read_only=True)
+    admission_no = serializers.CharField(source='student.admission_no', read_only=True)
+    class_name = serializers.CharField(source='student.class_name', read_only=True)
+    section_name = serializers.CharField(source='student.section', read_only=True)
+    parent_name = serializers.CharField(source='student.parent_name', read_only=True)
 
     class Meta:
         model = FeePayment
@@ -147,3 +210,14 @@ class FeePaymentSerializer(serializers.ModelSerializer):
         if quarter and fee_structure and quarter.fee_structure_id != fee_structure.pk:
             raise serializers.ValidationError({'quarter': 'Fee quarter must belong to the selected fee structure.'})
         return attrs
+
+
+class FeePaymentOrderSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.name', read_only=True)
+    admission_no = serializers.CharField(source='student.admission_no', read_only=True)
+    class_name = serializers.CharField(source='student.class_name', read_only=True)
+    section_name = serializers.CharField(source='student.section', read_only=True)
+
+    class Meta:
+        model = FeePaymentOrder
+        fields = '__all__'

@@ -55,12 +55,7 @@ import {
   type StoreProduct,
 } from '../store/api/storeApi';
 import { useGetStudentsQuery } from '../store/api/studentApi';
-
-declare global {
-  interface Window {
-    Razorpay?: new (options: Record<string, unknown>) => { open: () => void };
-  }
-}
+import { loadRazorpay } from '../utils/loadRazorpay';
 
 const STORE_CATEGORIES = [
   { id: 'All', label: 'All Items' },
@@ -72,17 +67,6 @@ const STORE_CATEGORIES = [
   { id: 'Merchandise', label: 'Merchandise & Supplies' },
   { id: 'Other', label: 'Other' },
 ];
-
-function loadRazorpay(): Promise<boolean> {
-  if (window.Razorpay) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const script = document.createElement('script');
-    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
-    script.onload = () => resolve(true);
-    script.onerror = () => resolve(false);
-    document.body.appendChild(script);
-  });
-}
 
 function productSaveErrorMessage(error: any): string {
   const data = error?.data;

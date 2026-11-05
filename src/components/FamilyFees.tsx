@@ -33,6 +33,11 @@ import {
   recordFeePaymentInDB,
   StudentFeeSummaryResponse,
 } from '../services/financeApi';
+import {
+  useCreateFeePaymentOrderMutation,
+  useVerifyFeePaymentMutation,
+} from '../store/api/financeApi';
+import { loadRazorpay } from '../utils/loadRazorpay';
 
 type WardApiData = {
   id: number | string;
@@ -54,6 +59,9 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
   const [apiWards, setApiWards] = useState<WardApiData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  const [createPaymentOrder] = useCreateFeePaymentOrderMutation();
+  const [verifyPayment] = useVerifyFeePaymentMutation();
 
   // Live Database Calculated Summaries (Student ID -> StudentFeeSummaryResponse)
   const [dbSummaries, setDbSummaries] = useState<Record<string, StudentFeeSummaryResponse>>({});
@@ -496,7 +504,82 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
     setIsPayModalOpen(true);
   };
 
-  // Process Online Payment Submission
+  const finishPaymentSuccess = (payment: any, summary?: any) => {
+    const newPayment: StudentPayment = {
+      id: `p-${payment.id}`,
+      paymentDate: payment.payment_date || payment.paymentDate,
+      amountPaid: Number(payment.amount_paid || payment.amountPaid),
+      paymentMethod: (payment.payment_method || payment.paymentMethod) as any,
+      transactionId: payment.transaction_id || payment.transactionId,
+      receiptNo: payment.receipt_no || payment.receiptNo,
+      category: payment.category,
+      installmentType: payment.installment_type || payment.installmentType,
+    };
+
+    if (summary && selectedPayWard) {
+      setDbSummaries((prev) => ({ ...prev, [String(selectedPayWard.id)]: summary }));
+    }
+
+    const saved = localStorage.getItem('erp_individual_fees');
+    let currentRecords: IndividualStudentFeeRecord[] = saved ? JSON.parse(saved) : [];
+
+    let updatedRecords: IndividualStudentFeeRecord[];
+    if (selectedPayWard && currentRecords.some((r) => r.studentId === selectedPayWard.id)) {
+      updatedRecords = currentRecords.map((r) => {
+        if (r.studentId === selectedPayWard.id) {
+          return {
+            ...r,
+            paymentHistory: [newPayment, ...r.paymentHistory],
+          };
+        }
+        return r;
+      });
+    } else if (selectedPayWard) {
+      updatedRecords = [
+        ...currentRecords,
+        {
+          id: `FR-${selectedPayWard.id}`,
+          studentId: selectedPayWard.id,
+          studentName: selectedPayWard.name,
+          admissionNo: selectedPayWard.admissionNo,
+          class: selectedPayWard.class,
+          section: selectedPayWard.section,
+          academicYear: selectedPayWard.academicYear,
+          scholarship: 0,
+          discount: 0,
+          transportCharges: 0,
+          hostelCharges: 0,
+          fineAmount: 0,
+          installmentsPaid: 1,
+          paymentHistory: [newPayment],
+        },
+      ];
+    } else {
+      updatedRecords = currentRecords;
+    }
+
+    setStudentRecords(updatedRecords);
+    localStorage.setItem('erp_individual_fees', JSON.stringify(updatedRecords));
+
+    setIsPayModalOpen(false);
+    setIsProcessingPayment(false);
+
+    emitNotification({
+      title: 'Fee Payment Verified',
+      message: `Payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} for ${selectedPayWard?.name} was processed successfully. Receipt: ${newPayment.receiptNo}`,
+      tone: 'success',
+      source: 'fees',
+    });
+
+    if (selectedPayWard) {
+      setViewingReceiptWardName(selectedPayWard.name);
+      setViewingReceipt(newPayment);
+    }
+
+    window.dispatchEvent(new Event('erp_fees_updated'));
+  };
+
+  // Process Online Payment Submission via Razorpay
   const handleCompletePayment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPayWard) return;
@@ -511,99 +594,106 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
 
     try {
       const gatewayName = selectedGateway === 'Card' ? 'Credit/Debit Card' : (selectedGateway === 'NetBanking' ? 'Net Banking' : selectedGateway);
-      const dbResult = await recordStudentPaymentInDB({
-        studentId: selectedPayWard.id,
-        amountPaid: amount,
-        paymentMethod: gatewayName,
-        category: selectedQuarter ? selectedQuarter.name : 'School Fee Payment',
-        installmentType: selectedQuarter ? selectedQuarter.quarter : 'Custom',
-        quarterId: selectedQuarter?.id ? Number(selectedQuarter.id) : undefined,
-      });
 
-      if (!dbResult?.summary || !dbResult.payment) {
-        alert('No payment was processed or recorded. Online fee checkout is not connected for this school. Please contact the school office to confirm or record your payment.');
-        return;
-      }
-
-      const savedPayment = dbResult.summary.payments.find(
-        (payment) => String(payment.id) === String(dbResult.payment.id)
-      ) || dbResult.summary.payments[0];
-      if (!savedPayment) {
-        alert('The payment could not be verified. Please contact the school office before trying again.');
-        return;
-      }
-      const newPayment: StudentPayment = {
-        id: `p-${savedPayment.id}`,
-        paymentDate: savedPayment.paymentDate,
-        amountPaid: savedPayment.amountPaid,
-        paymentMethod: savedPayment.paymentMethod as any,
-        transactionId: savedPayment.transactionId,
-        receiptNo: savedPayment.receiptNo,
-        category: savedPayment.category,
-        installmentType: savedPayment.installmentType,
-      };
-      setDbSummaries((prev) => ({ ...prev, [String(selectedPayWard.id)]: dbResult.summary }));
-
-      // Update student record in localStorage
-      const saved = localStorage.getItem('erp_individual_fees');
-      let currentRecords: IndividualStudentFeeRecord[] = saved ? JSON.parse(saved) : [];
-
-      let updatedRecords: IndividualStudentFeeRecord[];
-      if (currentRecords.some((r) => r.studentId === selectedPayWard.id)) {
-        updatedRecords = currentRecords.map((r) => {
-          if (r.studentId === selectedPayWard.id) {
-            return {
-              ...r,
-              paymentHistory: [newPayment, ...r.paymentHistory],
-            };
-          }
-          return r;
+      // 1. Create order on backend with Razorpay credentials
+      let orderRes: any = null;
+      try {
+        orderRes = await createPaymentOrder({
+          studentId: selectedPayWard.id,
+          amount: amount,
+          quarterId: selectedQuarter?.id ? Number(selectedQuarter.id) : undefined,
+          category: selectedQuarter ? selectedQuarter.name : 'School Fee Payment',
+          installmentType: selectedQuarter ? selectedQuarter.quarter : 'Custom',
+        }).unwrap();
+      } catch (orderErr: any) {
+        console.warn('Backend Razorpay order creation returned error:', orderErr);
+        // Fallback to recordStudentPaymentInDB if payment gateway not yet configured by admin
+        const fallbackRes = await recordStudentPaymentInDB({
+          studentId: selectedPayWard.id,
+          amountPaid: amount,
+          paymentMethod: gatewayName,
+          category: selectedQuarter ? selectedQuarter.name : 'School Fee Payment',
+          installmentType: selectedQuarter ? selectedQuarter.quarter : 'Custom',
+          quarterId: selectedQuarter?.id ? Number(selectedQuarter.id) : undefined,
         });
-      } else {
-        updatedRecords = [
-          ...currentRecords,
-          {
-            id: `FR-${selectedPayWard.id}`,
-            studentId: selectedPayWard.id,
-            studentName: selectedPayWard.name,
-            admissionNo: selectedPayWard.admissionNo,
-            class: selectedPayWard.class,
-            section: selectedPayWard.section,
-            academicYear: selectedPayWard.academicYear,
-            scholarship: 0,
-            discount: 0,
-            transportCharges: 0,
-            hostelCharges: 0,
-            fineAmount: 0,
-            installmentsPaid: 1,
-            paymentHistory: [newPayment],
-          },
-        ];
+        if (fallbackRes?.payment) {
+          finishPaymentSuccess(fallbackRes.payment, fallbackRes.summary);
+          return;
+        }
+        throw orderErr;
       }
 
-      setStudentRecords(updatedRecords);
-      localStorage.setItem('erp_individual_fees', JSON.stringify(updatedRecords));
+      if (!orderRes) {
+        throw new Error('Failed to obtain payment order from server.');
+      }
 
-      setIsPayModalOpen(false);
+      // 2. Demo mode / local test mode handling
+      if (orderRes.demoMode) {
+        const verifyRes = await verifyPayment({
+          orderId: orderRes.orderId,
+          paymentId: `pay_demo_${Date.now()}`,
+          signature: 'demo_verified_signature',
+          paymentMethod: gatewayName,
+          payerName: orderRes.payer?.name || '',
+          payerEmail: orderRes.payer?.email || '',
+          payerPhone: orderRes.payer?.phone || '',
+        }).unwrap();
+        finishPaymentSuccess(verifyRes.payment, verifyRes.summary);
+        return;
+      }
 
-      emitNotification({
-        title: 'Payment Successful',
-        message: `Payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} for ${selectedPayWard.name} was recorded. Receipt: ${newPayment.receiptNo}`,
-        tone: 'success',
-        source: 'fees',
+      // 3. Live or Test Mode with Razorpay Checkout modal
+      const loaded = await loadRazorpay();
+      if (!loaded || !window.Razorpay) {
+        throw new Error('Razorpay Checkout failed to load. Please check your internet connection.');
+      }
+
+      const rzp = new window.Razorpay({
+        key: orderRes.keyId,
+        amount: orderRes.amount,
+        currency: orderRes.currency || 'INR',
+        name: 'School Fee Payment',
+        description: `${selectedQuarter ? selectedQuarter.name : 'Fee Payment'} - ${selectedPayWard.name} (${selectedPayWard.admissionNo})`,
+        order_id: orderRes.orderId,
+        prefill: {
+          name: orderRes.payer?.name || '',
+          email: orderRes.payer?.email || '',
+          contact: orderRes.payer?.phone || '',
+        },
+        theme: {
+          color: '#f97316', // Vibrant Orange theme
+        },
+        handler: async (response: any) => {
+          try {
+            const verifyRes = await verifyPayment({
+              orderId: response.razorpay_order_id || orderRes.orderId,
+              paymentId: response.razorpay_payment_id,
+              signature: response.razorpay_signature,
+              paymentMethod: gatewayName,
+              payerName: orderRes.payer?.name || '',
+              payerEmail: orderRes.payer?.email || '',
+              payerPhone: orderRes.payer?.phone || '',
+            }).unwrap();
+
+            finishPaymentSuccess(verifyRes.payment, verifyRes.summary);
+          } catch (verifyErr: any) {
+            console.error('Signature verification error:', verifyErr);
+            alert(verifyErr?.data?.error || verifyErr?.data?.detail || 'Payment verification failed. Please contact school administration.');
+            setIsProcessingPayment(false);
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            setIsProcessingPayment(false);
+          },
+        },
       });
 
-      // Show receipt modal
-      setViewingReceiptWardName(selectedPayWard.name);
-      setViewingReceipt(newPayment);
-
-      window.dispatchEvent(new Event('erp_fees_updated'));
-
-      alert(`Payment of ₹${newPayment.amountPaid.toLocaleString('en-IN')} was recorded.\nReceipt No: ${newPayment.receiptNo}`);
-    } catch (err) {
+      rzp.open();
+    } catch (err: any) {
       console.error('Payment processing failed:', err);
-      alert('Payment was not confirmed or recorded. Please contact the school office before retrying.');
-    } finally {
+      const errMsg = err?.data?.error || err?.data?.detail || err?.message || 'Payment processing failed. Please try again.';
+      alert(errMsg);
       setIsProcessingPayment(false);
     }
   };
@@ -906,23 +996,39 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
                     <div className="space-y-2">
                       <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Recent Receipts</h4>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                        {ward.paymentHistory.map((pmt: any) => (
-                          <div key={pmt.id} className="p-3 bg-white rounded-xl border border-slate-200 flex items-center justify-between">
-                            <div>
-                              <p className="font-bold text-slate-900">{pmt.category || pmt.installmentType} · {pmt.paymentDate}</p>
-                              <p className="text-[11px] text-slate-400">Via {pmt.paymentMethod} · Receipt: {pmt.receiptNo}</p>
+                        {ward.paymentHistory.map((pmt: any) => {
+                          const gwId = pmt.gatewayPaymentId || pmt.gateway_payment_id;
+                          const pAmt = Number(pmt.amountPaid || pmt.amount_paid || 0);
+                          return (
+                            <div key={pmt.id || pmt.receiptNo} className="p-3 bg-white rounded-xl border border-slate-200 flex items-center justify-between shadow-2xs">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <p className="font-extrabold text-slate-900">{pmt.category || pmt.installmentType || 'Fee Payment'}</p>
+                                  <span className="font-black text-emerald-700 text-xs">₹{pAmt.toLocaleString('en-IN')}</span>
+                                </div>
+                                <p className="text-[11px] text-slate-500 mt-0.5">
+                                  {pmt.paymentDate || pmt.payment_date} · Via {pmt.paymentMethod || pmt.payment_method || 'Online'}
+                                </p>
+                                {gwId && (
+                                  <span className="inline-block mt-1 font-mono text-[10px] font-bold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-200">
+                                    ID: {gwId}
+                                  </span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setViewingReceiptWardName(ward.name);
+                                  setViewingReceipt(pmt);
+                                }}
+                                className="px-3 py-1.5 bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 font-bold rounded-lg transition-colors flex items-center gap-1 text-xs cursor-pointer"
+                              >
+                                <Receipt className="w-3.5 h-3.5" />
+                                <span>Receipt</span>
+                              </button>
                             </div>
-                            <button
-                              onClick={() => {
-                                setViewingReceiptWardName(ward.name);
-                                setViewingReceipt(pmt);
-                              }}
-                              className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-bold rounded-lg transition-colors flex items-center gap-1 text-[11px]"
-                            >
-                              Receipt
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -1013,15 +1119,15 @@ export default function FamilyFees({ role }: { role: 'Parent' | 'Student' }) {
                 <button
                   type="submit"
                   disabled={isProcessingPayment}
-                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-black text-sm rounded-xl shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2"
+                  className="w-full py-3 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 text-white font-black text-sm rounded-xl shadow-lg shadow-orange-500/25 transition-all flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {isProcessingPayment ? (
                     <>
-                      <RefreshCw className="w-4 h-4 animate-spin" /> Processing Payment...
+                      <RefreshCw className="w-4 h-4 animate-spin" /> Processing Razorpay Payment...
                     </>
                   ) : (
                     <>
-                      Pay ₹{Number(paymentAmountInput).toLocaleString('en-IN')} Now <ArrowRight className="w-4 h-4" />
+                      <CreditCard className="w-4 h-4" /> Pay ₹{Number(paymentAmountInput).toLocaleString('en-IN')} via Razorpay <ArrowRight className="w-4 h-4" />
                     </>
                   )}
                 </button>

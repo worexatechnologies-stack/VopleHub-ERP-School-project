@@ -112,6 +112,149 @@ export interface SchoolRevenueSummary {
   lastUpdated: string;
 }
 
+export interface FeePaymentGatewaySettings {
+  id?: number;
+  keyId: string;
+  testMode: boolean;
+  enabled: boolean;
+  keySecretConfigured: boolean;
+  webhookSecretConfigured: boolean;
+  isConnected: boolean;
+  webhookUrl: string;
+  updatedAt?: string;
+}
+
+export interface FeePaymentOrderPayload {
+  studentId: number | string;
+  amount: number;
+  quarterId?: number;
+  category?: string;
+  installmentType?: string;
+}
+
+export interface FeePaymentOrderResponse {
+  orderId: string;
+  keyId: string;
+  amount: number; // paise
+  currency: string;
+  receiptNo: string;
+  demoMode: boolean;
+  testMode: boolean;
+  student: {
+    id: number;
+    name: string;
+    admissionNo: string;
+    className: string;
+    section: string;
+  };
+  payer: {
+    name: string;
+    email: string;
+    phone: string;
+  };
+}
+
+export interface FeePaymentVerificationPayload {
+  orderId: string;
+  paymentId: string;
+  signature: string;
+  paymentMethod?: string;
+  payerName?: string;
+  payerEmail?: string;
+  payerPhone?: string;
+}
+
+export interface FeePaymentMetrics {
+  totalCollected: number;
+  todayCollected: number;
+  monthCollected: number;
+  totalInvoiced: number;
+  pendingReceivables: number;
+  collectionRate: number;
+  successCount: number;
+  failedCount: number;
+  pendingCount: number;
+  refundedCount: number;
+  totalTransactions: number;
+  methodBreakdown: Array<{ payment_method: string; total_amount: number; count: number }>;
+  lastUpdated: string;
+}
+
+export interface FeePaymentTransactionItem {
+  id: number;
+  receipt_no: string;
+  transaction_id: string;
+  gateway_payment_id?: string;
+  gateway_order_id?: string;
+  payment_date: string;
+  amount_paid: number | string;
+  payment_method: string;
+  category: string;
+  installment_type: string;
+  status: 'Success' | 'Failed' | 'Pending' | 'Refunded' | string;
+  payer_name?: string;
+  payer_email?: string;
+  payer_phone?: string;
+  student_name: string;
+  admission_no: string;
+  class_name: string;
+  section_name: string;
+  parent_name?: string;
+  created_at: string;
+}
+
+export interface FeePaymentReceiptDetail {
+  id: number;
+  receiptNo: string;
+  transactionId: string;
+  gatewayPaymentId: string;
+  gatewayOrderId: string;
+  paymentDate: string;
+  amountPaid: number;
+  paymentMethod: string;
+  category: string;
+  installmentType: string;
+  status: string;
+  payerName: string;
+  payerEmail: string;
+  payerPhone: string;
+  createdAt?: string;
+  student: {
+    id: number;
+    name: string;
+    admissionNo: string;
+    className: string;
+    section: string;
+    academicYear: string;
+  };
+  school: {
+    id: number;
+    name: string;
+    code: string;
+    address: string;
+    phone: string;
+    email: string;
+  };
+}
+
+export interface FeePaymentListParams {
+  search?: string;
+  className?: string;
+  classId?: number | string;
+  sectionName?: string;
+  sectionId?: number | string;
+  status?: string;
+  paymentMethod?: string;
+  category?: string;
+  academicYear?: string;
+  dateScope?: 'today' | 'week' | 'month';
+  startDate?: string;
+  endDate?: string;
+  studentId?: number | string;
+  page?: number;
+  pageSize?: number;
+}
+
 type Page<T> = { results?: T[]; next?: string | null } | T[];
 
 async function fetchAllPages<T>(url: string, baseQuery: any): Promise<{ data: T[] } | { error: any }> {
@@ -407,6 +550,109 @@ export const financeApi = baseApi.injectEndpoints({
         { type: 'StudentStats', id: 'LIST' },
       ],
     }),
+
+    getFeePaymentSettings: build.query<FeePaymentGatewaySettings, void>({
+      query: () => '/fee-structures/payment-gateway/settings/',
+      providesTags: [{ type: 'FeePaymentSettings', id: 'CURRENT' }],
+    }),
+
+    updateFeePaymentSettings: build.mutation<
+      FeePaymentGatewaySettings,
+      Partial<FeePaymentGatewaySettings & { keySecret?: string; webhookSecret?: string }>
+    >({
+      query: (body) => ({
+        url: '/fee-structures/payment-gateway/settings/',
+        method: 'POST',
+        body,
+      }),
+      invalidatesTags: [{ type: 'FeePaymentSettings', id: 'CURRENT' }],
+    }),
+
+    testFeeGatewayConnection: build.mutation<
+      { connected: boolean; status: string; message: string; mode?: string },
+      Partial<{ keyId: string; keySecret: string; testMode: boolean }>
+    >({
+      query: (body) => ({
+        url: '/fee-structures/payment-gateway/test-connection/',
+        method: 'POST',
+        body,
+      }),
+    }),
+
+    createFeePaymentOrder: build.mutation<FeePaymentOrderResponse, FeePaymentOrderPayload>({
+      query: (body) => ({
+        url: '/fee-structures/payments/create-order/',
+        method: 'POST',
+        body,
+      }),
+    }),
+
+    verifyFeePayment: build.mutation<
+      { message: string; payment: FeePaymentTransactionItem; summary: StudentFeeSummaryResponse; receiptNo: string },
+      FeePaymentVerificationPayload
+    >({
+      query: (body) => ({
+        url: '/fee-structures/payments/verify/',
+        method: 'POST',
+        body,
+      }),
+      invalidatesTags: (_res, _err, _arg) => [
+        { type: 'FeePayments', id: 'LIST' },
+        { type: 'FeePaymentMetrics', id: 'CURRENT' },
+        { type: 'FeeRevenue', id: 'LIST' },
+        { type: 'FeeRecords', id: 'LIST' },
+        { type: 'FeeSummary', id: 'LIST' },
+        { type: 'FeeSummaries', id: 'LIST' },
+        { type: 'StudentStats', id: 'LIST' },
+      ],
+    }),
+
+    getFeePaymentMetrics: build.query<FeePaymentMetrics, { academicYear?: string } | void>({
+      query: (args) => {
+        const query = args?.academicYear ? `?academic_year=${encodeURIComponent(args.academicYear)}` : '';
+        return `/fee-payments/metrics/${query}`;
+      },
+      providesTags: [{ type: 'FeePaymentMetrics', id: 'CURRENT' }],
+    }),
+
+    getFeePaymentsList: build.query<{ results: FeePaymentTransactionItem[]; count: number }, FeePaymentListParams | void>({
+      query: (params) => {
+        const urlParams = new URLSearchParams();
+        if (params) {
+          if (params.search) urlParams.append('search', params.search);
+          if (params.className && params.className !== 'All') urlParams.append('class_name', params.className);
+          if (params.classId) urlParams.append('class_id', String(params.classId));
+          if (params.sectionName && params.sectionName !== 'All') urlParams.append('section_name', params.sectionName);
+          if (params.sectionId) urlParams.append('section_id', String(params.sectionId));
+          if (params.status && params.status !== 'All') urlParams.append('status', params.status);
+          if (params.paymentMethod && params.paymentMethod !== 'All') urlParams.append('payment_method', params.paymentMethod);
+          if (params.category && params.category !== 'All') urlParams.append('category', params.category);
+          if (params.academicYear) urlParams.append('academic_year', params.academicYear);
+          if (params.dateScope) urlParams.append('date_scope', params.dateScope);
+          if (params.startDate) urlParams.append('start_date', params.startDate);
+          if (params.endDate) urlParams.append('end_date', params.endDate);
+          if (params.studentId) urlParams.append('student_id', String(params.studentId));
+          if (params.page) urlParams.append('page', String(params.page));
+          if (params.pageSize) urlParams.append('page_size', String(params.pageSize));
+        }
+        const query = urlParams.toString() ? `?${urlParams.toString()}` : '';
+        return `/fee-payments/${query}`;
+      },
+      transformResponse: (res: any) => {
+        if (res && Array.isArray(res.results)) {
+          return { results: res.results, count: res.count || res.results.length };
+        }
+        if (Array.isArray(res)) {
+          return { results: res, count: res.length };
+        }
+        return { results: [], count: 0 };
+      },
+      providesTags: [{ type: 'FeePayments', id: 'LIST' }],
+    }),
+
+    getFeePaymentReceipt: build.query<FeePaymentReceiptDetail, number | string>({
+      query: (id) => `/fee-payments/${id}/receipt/`,
+    }),
   }),
 });
 
@@ -430,4 +676,14 @@ export const {
   useRecordStudentPaymentMutation,
   useRecordFeePaymentMutation,
   useUpdateStudentFeeRecordMutation,
+  useGetFeePaymentSettingsQuery,
+  useUpdateFeePaymentSettingsMutation,
+  useTestFeeGatewayConnectionMutation,
+  useCreateFeePaymentOrderMutation,
+  useVerifyFeePaymentMutation,
+  useGetFeePaymentMetricsQuery,
+  useGetFeePaymentsListQuery,
+  useLazyGetFeePaymentsListQuery,
+  useGetFeePaymentReceiptQuery,
+  useLazyGetFeePaymentReceiptQuery,
 } = financeApi;
